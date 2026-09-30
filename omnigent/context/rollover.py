@@ -237,3 +237,81 @@ async def build_rollover_item(
         token_count=summary["token_count"],
         compacted_messages=compacted_messages,
     )
+
+
+async def build_side_chat_seed(
+    items: list[dict[str, Any]],
+    *,
+    keep_messages: int,
+    model: str,
+    llm_client: Any = None,
+    connection: dict[str, str] | None = None,
+    runner_client: Any | None = None,
+    conversation_id: str | None = None,
+) -> CompactionData:
+    """
+    Build the seed compaction item for a rollover side chat, Muse-style.
+
+    A side chat forked from a rollover session stays a rollover session,
+    but must not inherit the parent's full transcript — its CLI opens from
+    exactly one checkpoint: the parent's latest summary (built now, over the
+    whole record, if the parent never rolled over) plus the recent tail.
+
+    :param items: The parent's full chronological record, as flat item
+        dicts. Must be non-empty.
+    :param keep_messages: How many trailing messages to keep verbatim.
+    :param model: LLM model string for the summarization call, when one is
+        needed.
+    :param llm_client: LLM client for direct summarization. Ignored when
+        *runner_client* is set.
+    :param connection: Per-provider connection overrides, forwarded as-is.
+    :param runner_client: Preferred path — delegates to the runner's own
+        credentials, as in :func:`build_rollover_item`.
+    :param conversation_id: The PARENT session's id (the summarization call
+        runs against the parent's runner binding, not the not-yet-created
+        fork's).
+    :returns: A :class:`CompactionData` seed, ready to post as the fork's
+        own ``compaction`` item.
+    :raises ValueError: If *items* is empty.
+    """
+    if not items:
+        raise ValueError("build_side_chat_seed requires a non-empty parent record")
+
+    last_compaction_index = next(
+        (i for i in range(len(items) - 1, -1, -1) if items[i].get("type") == "compaction"),
+        None,
+    )
+    if last_compaction_index is None:
+        return await build_rollover_item(
+            items,
+            previous_summary=None,
+            keep_messages=keep_messages,
+            model=model,
+            llm_client=llm_client,
+            connection=connection,
+            runner_client=runner_client,
+            conversation_id=conversation_id,
+        )
+
+    checkpoint = items[last_compaction_index]
+    items_since = items[last_compaction_index + 1 :]
+    if not items_since:
+        # Nothing new since the parent's last checkpoint — reuse it verbatim
+        # rather than re-summarizing zero material.
+        return CompactionData(
+            summary=checkpoint.get("summary", ""),
+            last_item_id=checkpoint.get("last_item_id") or items[-1]["id"],
+            model=checkpoint.get("model"),
+            token_count=checkpoint.get("token_count", 0),
+            compacted_messages=checkpoint.get("compacted_messages"),
+        )
+    return await build_rollover_item(
+        items_since,
+        previous_summary=checkpoint.get("summary"),
+        keep_messages=keep_messages,
+        model=model,
+        llm_client=llm_client,
+        connection=connection,
+        runner_client=runner_client,
+        conversation_id=conversation_id,
+    )

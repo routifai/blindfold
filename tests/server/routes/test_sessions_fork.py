@@ -17,6 +17,7 @@ from starlette.testclient import TestClient
 from omnigent.db.utils import builtin_agent_id
 from omnigent.entities import (
     Agent,
+    CompactionData,
     Conversation,
     ConversationItem,
     MessageData,
@@ -128,6 +129,7 @@ class _ConversationStore:
         self._items = items_by_conv or {}
         self.fork_calls: list[dict[str, Any]] = []
         self.label_writes: list[tuple[str, dict[str, str]]] = []
+        self.appended: list[tuple[str, list[Any]]] = []
 
     def set_labels(
         self,
@@ -340,6 +342,10 @@ class _ConversationStore:
             last_id=items[-1].id if items else None,
             has_more=has_more,
         )
+
+    def append(self, conversation_id: str, items: list[Any]) -> None:
+        """Record an append call (used by the rollover side-chat seed)."""
+        self.appended.append((conversation_id, list(items)))
 
 
 class _FileStore:
@@ -1320,6 +1326,147 @@ async def test_fork_same_agent_keeps_permission_mode_label() -> None:
     assert resp.status_code == 201, f"got {resp.status_code}: {resp.text}"
     # Nothing conditional to drop, so the permission-mode label carries over.
     assert conv_store.fork_calls[0]["dropped_label_keys"] == frozenset()
+
+
+def _make_compaction_item(
+    item_id: str, *, last_item_id: str, summary: str = "prior summary", response_id: str = "resp_c"
+) -> ConversationItem:
+    """Build a compaction item for rollover side-chat seeding tests."""
+    return ConversationItem(
+        id=item_id,
+        type="compaction",
+        status="completed",
+        response_id=response_id,
+        created_at=1,
+        data=CompactionData(
+            summary=summary,
+            last_item_id=last_item_id,
+            model="test-model",
+            token_count=7,
+            compacted_messages=[
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": summary}],
+                }
+            ],
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_fork_side_chat_of_rollover_keeps_labels_and_reuses_checkpoint() -> None:
+    """A side-chat fork of a rollover super chat stays a rollover session.
+
+    Its labels carry over untouched (Muse-style — the same lifecycle, not
+    dropped), and since the parent already has a checkpoint with nothing
+    new since, the fork's seed reuses it verbatim rather than re-summarizing.
+    """
+    conv = _make_conversation(
+        labels={
+            "omnigent.context.mode": "rollover",
+            "omnigent.context.rollover_at_tokens": "5000",
+            "omnigent.context.rollover_keep_messages": "10",
+        }
+    )
+    items = [
+        _make_item("9980c8a9248139f14f4165e5d53088aa", "Hello", response_id="resp_1"),
+        _make_compaction_item("comp_1", last_item_id="9980c8a9248139f14f4165e5d53088aa"),
+    ]
+    conv_store = _ConversationStore(
+        conversations={"e9f8f58523cec9a57d3bdf93be543e8c": conv},
+        items_by_conv={"e9f8f58523cec9a57d3bdf93be543e8c": items},
+    )
+    client = TestClient(_build_app(conv_store))
+
+    resp = client.post(
+        "/v1/sessions/e9f8f58523cec9a57d3bdf93be543e8c/fork",
+        json={"side_chat": True},
+    )
+
+    assert resp.status_code == 201, f"got {resp.status_code}: {resp.text}"
+    assert conv_store.fork_calls[0]["dropped_label_keys"] == frozenset(), (
+        "rollover labels must ride along with the fork, not be dropped"
+    )
+    assert conv_store.fork_calls[0]["resume_source_native_session"] is False, (
+        "must take the rebuild path, not clone the parent's full native rollout"
+    )
+    assert len(conv_store.appended) == 1
+    fork_id, new_items = conv_store.appended[0]
+    assert fork_id == "c538360473d41c84c1eee13918fbeca0"
+    assert len(new_items) == 1
+    assert new_items[0].type == "compaction"
+    assert new_items[0].data.summary == "prior summary"
+
+
+@pytest.mark.asyncio
+async def test_fork_side_chat_of_rollover_without_checkpoint_summarizes_now(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A side chat forked before the parent ever rolled over builds one seed now."""
+    from omnigent.context import rollover as rollover_module
+
+    async def _fake_summarize_history(messages, *_args, **_kwargs):
+        del messages
+        return {"text": "FRESH SUMMARY", "token_count": 3}
+
+    monkeypatch.setattr(rollover_module, "summarize_history", _fake_summarize_history)
+
+    conv = _make_conversation(labels={"omnigent.context.mode": "rollover"})
+    items = [
+        _make_item("9980c8a9248139f14f4165e5d53088aa", "Hello", response_id="resp_1"),
+        _make_item("msg_2", "hi there", response_id="resp_1"),
+    ]
+    conv_store = _ConversationStore(
+        conversations={"e9f8f58523cec9a57d3bdf93be543e8c": conv},
+        items_by_conv={"e9f8f58523cec9a57d3bdf93be543e8c": items},
+    )
+    client = TestClient(_build_app(conv_store))
+
+    resp = client.post(
+        "/v1/sessions/e9f8f58523cec9a57d3bdf93be543e8c/fork",
+        json={"side_chat": True},
+    )
+
+    assert resp.status_code == 201, f"got {resp.status_code}: {resp.text}"
+    assert len(conv_store.appended) == 1
+    _, new_items = conv_store.appended[0]
+    assert new_items[0].data.summary == "FRESH SUMMARY"
+
+
+@pytest.mark.asyncio
+async def test_fork_non_rollover_side_chat_unchanged() -> None:
+    """A side-chat fork of a non-rollover session behaves exactly as upstream:
+    no label change, no seed, and the normal clone-vs-rebuild decision stands."""
+    conv = _make_conversation(labels={})
+    conv_store = _ConversationStore(conversations={"e9f8f58523cec9a57d3bdf93be543e8c": conv})
+    client = TestClient(_build_app(conv_store))
+
+    resp = client.post(
+        "/v1/sessions/e9f8f58523cec9a57d3bdf93be543e8c/fork",
+        json={"side_chat": True},
+    )
+
+    assert resp.status_code == 201, f"got {resp.status_code}: {resp.text}"
+    assert conv_store.fork_calls[0]["dropped_label_keys"] == frozenset()
+    assert conv_store.fork_calls[0]["resume_source_native_session"] is True
+    assert conv_store.appended == []
+
+
+@pytest.mark.asyncio
+async def test_fork_non_side_chat_keeps_rollover_labels() -> None:
+    """A normal (non-side-chat) fork of a rollover session keeps its labels
+    and does not seed a checkpoint — it is meant to continue the parent's
+    exact context, not be trimmed."""
+    conv = _make_conversation(labels={"omnigent.context.mode": "rollover"})
+    conv_store = _ConversationStore(conversations={"e9f8f58523cec9a57d3bdf93be543e8c": conv})
+    client = TestClient(_build_app(conv_store))
+
+    resp = client.post("/v1/sessions/e9f8f58523cec9a57d3bdf93be543e8c/fork", json={})
+
+    assert resp.status_code == 201, f"got {resp.status_code}: {resp.text}"
+    assert conv_store.fork_calls[0]["dropped_label_keys"] == frozenset()
+    assert conv_store.appended == []
 
 
 @pytest.mark.asyncio
