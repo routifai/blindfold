@@ -1227,8 +1227,8 @@ async function reportRolloverCompaction(config, { summary, model, tokensBefore }
 /**
  * Handle Pi's ``session_before_compact`` for a rollover session: build
  * Omnigent's state-file summary with Pi's own ``generateSummary`` and hand
- * it back so Pi records ITS OWN ``CompactionEntry`` (no pane recycle — see
- * ``rollover/PLAN.md``'s "Later: Pi" paragraph). Fails open on any error so
+ * it back so Pi records ITS OWN ``CompactionEntry`` (no pane recycle).
+ * Fails open on any error so
  * Pi's default compaction still runs rather than stalling the session.
  */
 async function handleRolloverBeforeCompact(config, event, ctx) {

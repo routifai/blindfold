@@ -67,7 +67,6 @@ def rollover_labels(
     *,
     rollover_at_tokens: int = 3000,
     keep_tokens: int | None = None,
-    keep_messages: int | None = None,
 ) -> dict[str, str]:
     labels = {
         "omnigent.context.mode": "rollover",
@@ -75,8 +74,6 @@ def rollover_labels(
     }
     if keep_tokens is not None:
         labels["omnigent.context.rollover_keep_tokens"] = str(keep_tokens)
-    if keep_messages is not None:
-        labels["omnigent.context.rollover_keep_messages"] = str(keep_messages)
     return labels
 
 
@@ -267,7 +264,7 @@ def self_compaction_audit(session_id: str, our_compaction_count: int) -> dict[st
     }
 
 
-CHECKPOINT_HEADER_START = "This conversation grew past its context limit"
+CHECKPOINT_HEADER_START = "[Context checkpoint inserted by the system"
 
 
 def checkpoint_shape_ok(summary: str) -> dict[str, bool]:

@@ -227,7 +227,7 @@ async def test_triggers_and_recycles_pane_when_over_threshold(
     labels = {
         "omnigent.context.mode": "rollover",
         "omnigent.context.rollover_at_tokens": "1",
-        "omnigent.context.rollover_keep_messages": "2",
+        "omnigent.context.rollover_keep_tokens": "1",
     }
     fake_client = _FakeServerClient(items, labels=labels)
     pm = _FakeProcessManager(_ScriptedHarnessClient([]))
@@ -248,7 +248,7 @@ async def test_triggers_and_recycles_pane_when_over_threshold(
     assert data["summary"] == f"{CHECKPOINT_HEADER}\n\nROLLING SUMMARY"
     assert data["last_item_id"] == "m9"
     compacted = data["compacted_messages"]
-    # Summary pair first, then the last 2 kept messages (m8, m9).
+    # Summary pair first, then the last turn (m8, m9).
     assert [m.get("id") for m in compacted if "id" in m] == ["m8", "m9"]
     assert fake_reaper.reaped_ids == [conv_id]
     # Bug fix (PLAN.md "A, revision 2" point 5): the reported-usage label is
@@ -337,8 +337,7 @@ async def test_gate_holds_new_turns_while_the_rollover_is_written(
 
     class _GateCheckingResponses(_FakeLLMResponses):
         async def create(self, **kwargs: Any) -> Any:
-            gate = app.state.rollover_gates.get(conv_id)
-            gate_states.append(gate is not None and not gate.is_set())
+            gate_states.append(app.state.rollover_gate.is_open(conv_id))
             items.append(_msg("m10", "user", "sent during summarization"))
             return await super().create(**kwargs)
 
@@ -359,6 +358,6 @@ async def test_gate_holds_new_turns_while_the_rollover_is_written(
     await app.state.maybe_apply_rollover(conv_id)
 
     assert gate_states == [True]
-    assert conv_id not in app.state.rollover_gates
+    assert not app.state.rollover_gate.is_open(conv_id)
     assert len(fake_client.posted_events) == 1
     assert fake_reaper.reaped_ids == [conv_id]

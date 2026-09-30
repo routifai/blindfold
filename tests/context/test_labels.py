@@ -5,7 +5,6 @@ from __future__ import annotations
 from omnigent.context.labels import (
     CONTEXT_MODE_LABEL,
     ROLLOVER_AT_TOKENS_LABEL,
-    ROLLOVER_KEEP_MESSAGES_LABEL,
     ROLLOVER_KEEP_TOKENS_LABEL,
     ROLLOVER_MODE_VALUE,
     ROLLOVER_SESSION_LABELS,
@@ -38,7 +37,6 @@ def test_rollover_session_labels_cover_every_rollover_label() -> None:
             {
                 CONTEXT_MODE_LABEL,
                 ROLLOVER_AT_TOKENS_LABEL,
-                ROLLOVER_KEEP_MESSAGES_LABEL,
                 ROLLOVER_KEEP_TOKENS_LABEL,
             }
         )

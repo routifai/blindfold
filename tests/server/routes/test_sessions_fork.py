@@ -1366,7 +1366,6 @@ async def test_fork_side_chat_of_rollover_keeps_labels_and_reuses_checkpoint() -
         labels={
             "omnigent.context.mode": "rollover",
             "omnigent.context.rollover_at_tokens": "5000",
-            "omnigent.context.rollover_keep_messages": "10",
         }
     )
     items = [

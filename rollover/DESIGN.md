@@ -100,9 +100,9 @@ This is the assembler's job, reusing contract v0.2:
 - `summary`: `summarize_history` over everything since the previous
   compaction, merged with the previous summary. This is a *rolling* summary,
   the way Rakazo batches compaction.
-- `recent`: the last `omnigent.context.rollover_keep_messages` messages
-  (default 20). Tool calls ride along with their message, counted as
-  `max_messages` is today.
+- `recent`: the last turn, plus earlier whole turns while they fit
+  `omnigent.context.rollover_keep_tokens` (default 16,000). A turn is never
+  split, so tool calls stay with their results.
 - `memory`: rendered into the system text, as now (phase 4 fills it in).
 
 It is written as **one `compaction` item** with `summary`, `last_item_id` and

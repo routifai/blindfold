@@ -6250,45 +6250,6 @@ async def _fetch_close_target(
     return body
 
 
-def _project_history_item(item: _JsonObject) -> _JsonObject:
-    """REST-shape counterpart of ``session_history._project_item``.
-
-    Reads the flat ``ConversationItem.to_api_dict()`` shape returned by
-    ``GET /v1/sessions/{id}/items`` — same fields ``_project_api_item``
-    (the ``sys_session_get_history`` REST projector) reads.
-    """
-    itype = _optional_string(item.get("type"))
-    item_id = _optional_string(item.get("id"))
-    created_at = item.get("created_at")
-    if itype == "function_call":
-        return {
-            "id": item_id,
-            "created_at": created_at,
-            "role": "assistant",
-            "type": "tool_call",
-            "name": _optional_string(item.get("name")),
-            "args": _truncate_activity(_optional_string(item.get("arguments")) or ""),
-        }
-    if itype == "function_call_output":
-        output = item.get("output")
-        rendered = output if isinstance(output, str) else json.dumps(output)
-        return {
-            "id": item_id,
-            "created_at": created_at,
-            "role": "tool",
-            "type": "tool_result",
-            "name": _optional_string(item.get("name")),
-            "content": _truncate_activity(rendered),
-        }
-    return {
-        "id": item_id,
-        "created_at": created_at,
-        "role": _optional_string(item.get("role")) or "unknown",
-        "type": "text",
-        "content": _truncate_activity(_text_from_api_content(item.get("content"))),
-    }
-
-
 async def _execute_session_history_tool(
     args: _JsonObject,
     *,
@@ -6328,16 +6289,6 @@ async def _execute_session_history_tool(
     return json.dumps({"error": "action must be one of ['read', 'search', 'status']"})
 
 
-def _session_history_read_response(turns: list[list[_JsonObject]], next_cursor: str | None) -> str:
-    """Build the ``read`` action's JSON response — shared by every return path."""
-    return json.dumps(
-        {
-            "turns": [{"messages": turn} for turn in turns],
-            "next_cursor": next_cursor,
-        }
-    )
-
-
 async def _session_history_read_via_rest(
     args: _JsonObject,
     conversation_id: str,
@@ -6347,7 +6298,7 @@ async def _session_history_read_via_rest(
     cursor = args.get("cursor")
     if cursor is not None and not isinstance(cursor, str):
         return json.dumps({"error": "cursor must be a string"})
-    limit = _clamp_session_history_limit(
+    limit = _session_history.clamp_limit(
         args.get("limit"),
         default=_session_history._READ_DEFAULT_LIMIT,
         maximum=_session_history._READ_MAX_LIMIT,
@@ -6371,62 +6322,24 @@ async def _session_history_read_via_rest(
         )
         resp.raise_for_status()
         body = resp.json()
-        items = [_project_history_item(raw) for raw in body.get("data", [])]
+        items = [_session_history.project_api_item(raw) for raw in body.get("data", [])]
         return items, bool(body.get("has_more"))
 
-    turns: list[list[_JsonObject]] = []
-    current: list[_JsonObject] = []
+    collector = _session_history.TurnCollector(limit)
     next_fetch_cursor: str | None = cursor
-    scanned = 0
     try:
-        while len(turns) < limit and scanned < _session_history._READ_MAX_ITEMS_SCANNED:
+        while collector.wants_more:
             items, has_more = await fetch_page(next_fetch_cursor)
             if not items:
                 break
-            hit_limit_at: int | None = None
-            for idx, item in enumerate(items):
-                current.append(item)
-                scanned += 1
-                if item.get("type") == "text" and item.get("role") == "user":
-                    turns.append(list(reversed(current)))
-                    current = []
-                    if len(turns) >= limit:
-                        hit_limit_at = idx
-                        break
-            if hit_limit_at is not None:
-                # A boundary mid-page always has more items behind it (at
-                # least the rest of this page); only a boundary on the
-                # page's LAST item needs has_more to know whether the
-                # record is exhausted.
-                if hit_limit_at == len(items) - 1 and not has_more:
-                    return _session_history_read_response(turns, None)
-                cut_id = items[hit_limit_at].get("id")
-                return _session_history_read_response(
-                    turns, cut_id if isinstance(cut_id, str) else None
-                )
+            done = collector.feed(items, has_more)
+            if done is not None:
+                return _session_history.read_response(*done)
             last_id = items[-1].get("id")
             next_fetch_cursor = last_id if isinstance(last_id, str) else None
-            if not has_more:
-                if current:
-                    turns.append(list(reversed(current)))
-                return _session_history_read_response(turns, None)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 — a failed page read is reported to the model
         return json.dumps({"error": f"session_history read failed: {exc}"})
-    # Scan cap reached mid-turn: flush what was fetched rather than drop it.
-    if current:
-        turns.append(list(reversed(current)))
-    return _session_history_read_response(turns, next_fetch_cursor)
-
-
-def _clamp_session_history_limit(raw: object, *, default: int, maximum: int) -> int | str:
-    """Coerce + clamp a ``session_history`` ``limit`` argument."""
-    if raw is None:
-        return default
-    if isinstance(raw, bool) or not isinstance(raw, int):
-        return json.dumps({"error": f"limit must be an integer, got {raw!r}"})
-    if raw < 1:
-        return json.dumps({"error": "limit must be >= 1"})
-    return min(raw, maximum)
+    return _session_history.read_response(*collector.finish(next_fetch_cursor))
 
 
 async def _session_history_search_via_rest(
@@ -6438,7 +6351,7 @@ async def _session_history_search_via_rest(
     query = args.get("query")
     if not isinstance(query, str) or not query.strip():
         return json.dumps({"error": "search requires a non-empty 'query' string"})
-    limit = _clamp_session_history_limit(
+    limit = _session_history.clamp_limit(
         args.get("limit"),
         default=_session_history._SEARCH_DEFAULT_LIMIT,
         maximum=_session_history._SEARCH_MAX_LIMIT,
@@ -6455,7 +6368,7 @@ async def _session_history_search_via_rest(
     except Exception as exc:  # noqa: BLE001
         return json.dumps({"error": f"session_history search failed: {exc}"})
     data: list[_JsonObject] = resp.json().get("data", [])
-    return json.dumps({"results": [_project_history_item(it) for it in data]})
+    return json.dumps({"results": [_session_history.project_api_item(it) for it in data]})
 
 
 async def _session_history_status_via_rest(

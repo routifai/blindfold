@@ -1,7 +1,7 @@
 # Rollover E2E proof
 
-Live end-to-end proof for the rollover super chat (`rollover/DESIGN.md`,
-`rollover/PLAN.md`), driven through the real web UI + a Docker runner
+Live end-to-end proof for the rollover super chat (`rollover/DESIGN.md`),
+driven through the real web UI + a Docker runner
 container, the same shape as `dev/blindfold/blindfold_e2e.py` (see
 `rollover-muse:dev/blindfold/README.md` for that pattern).
 

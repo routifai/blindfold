@@ -51,7 +51,6 @@ from omnigent.context.labels import CONTEXT_MODE_LABEL, is_rollover
 from omnigent.context.rollover import (
     build_rollover_item,
     estimate_context_tokens,
-    resolve_keep_messages,
     resolve_keep_tokens,
     resolve_rollover_threshold,
 )
@@ -175,6 +174,7 @@ from omnigent.runner.resource_registry import (
     TerminalLifecycle,
     trim_terminal_output,
 )
+from omnigent.runner.rollover_gate import RolloverGate
 from omnigent.runner.session_init_protocol import (
     RunnerSessionInitEnvelope,
     parse_runner_session_init_envelope,
@@ -3153,14 +3153,7 @@ def create_runner_app(
     _repl_terminal_ensure_locks: dict[str, asyncio.Lock] = {}
     _active_turns: dict[str, asyncio.Task[None] | None] = {}
     app.state.active_turns = _active_turns
-    # Single-flight guard: a rollover session whose post-turn check is already
-    # writing a compaction item / recycling its pane, so a second convergence
-    # (e.g. an overlapping continuation) never rolls it over twice at once.
-    _rollover_in_progress: set[str] = set()
-    # Set while a rollover is being written; a turn arriving meanwhile waits on
-    # it so it lands in the relaunched pane instead of the one being reaped.
-    _rollover_gates: dict[str, asyncio.Event] = {}
-    _ROLLOVER_GATE_TIMEOUT_S = 120.0
+    _rollover_gate = RolloverGate()
     _ROLLOVER_FETCH_MAX_PAGES = 25
     _DEFAULT_ROLLOVER_MODEL = ROLLOVER_SUMMARY_FALLBACK_MODEL
     # Conversations whose claude-sdk `/compact` published an up-front
@@ -7989,16 +7982,14 @@ def create_runner_app(
     async def _maybe_apply_rollover(conv_id: str) -> None:
         """Cheap no-op for every non-rollover turn; the label gates all I/O below."""
         # pi-native rolls over through Pi's own compaction hook; recycling its
-        # pane too would double-compact.
+        # pane too would double-compact. The gate opens before any await, so a
+        # turn arriving right now already waits.
         if (
             not _is_native_harness(conv_id)
             or _session_harness_name(conv_id) == "pi-native"
-            or conv_id in _rollover_in_progress
+            or not _rollover_gate.try_open(conv_id)
         ):
             return
-        # Opened before any await, so a turn arriving right now already waits.
-        _rollover_in_progress.add(conv_id)
-        gate = _rollover_gates[conv_id] = asyncio.Event()
         try:
             # Durable per-session cache (see _rollover_labels_for_session) — no
             # per-turn label round trip for the common case, unlike a TTL cache.
@@ -8017,9 +8008,7 @@ def create_runner_app(
                 extra={"session_id": conv_id},
             )
         finally:
-            gate.set()
-            _rollover_gates.pop(conv_id, None)
-            _rollover_in_progress.discard(conv_id)
+            _rollover_gate.close(conv_id)
 
     async def _fetch_rollover_window(
         conv_id: str,
@@ -8076,7 +8065,6 @@ def create_runner_app(
         data = await build_rollover_item(
             items,
             previous_summary=previous_summary,
-            keep_messages=resolve_keep_messages(labels),
             keep_tokens=resolve_keep_tokens(labels),
             model=model,
             llm_client=_get_runner_llm_client(),
@@ -8121,7 +8109,7 @@ def create_runner_app(
         )
 
     app.state.maybe_apply_rollover = _maybe_apply_rollover
-    app.state.rollover_gates = _rollover_gates
+    app.state.rollover_gate = _rollover_gate
     app.state.session_init_envelopes = _session_init_envelopes
 
     async def _cancel_active_turn(
@@ -9034,10 +9022,7 @@ def create_runner_app(
         conv: str,
     ) -> None:
         _subagent_wake_pending.discard(conv)
-        rollover_gate = _rollover_gates.get(conv)
-        if rollover_gate is not None:
-            with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(rollover_gate.wait(), timeout=_ROLLOVER_GATE_TIMEOUT_S)
+        await _rollover_gate.wait(conv)
         # Capture our own task so the finally floor can identity-compare before
         # clearing the slot (see below).
         _own_task = asyncio.current_task()

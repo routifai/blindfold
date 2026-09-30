@@ -33,21 +33,6 @@ _SEARCH_MAX_LIMIT = 20
 
 _ACTIONS = frozenset({"read", "search", "status"})
 
-# Mirror the private label keys in ``server/routes/_sessions/common.py``
-# (``_LAST_CONTEXT_TOKENS_LABEL_KEY`` / ``_LAST_CONTEXT_WINDOW_LABEL_KEY``):
-# every harness's per-turn usage report lands here regardless of rollover
-# mode, so it is the always-available fallback for ``status``.
-_LAST_CONTEXT_TOKENS_LABEL_KEY = "omnigent.last_context_tokens"
-_LAST_CONTEXT_WINDOW_LABEL_KEY = "omnigent.last_context_window"
-
-# Rollover's own threshold label + documented default (``rollover/PLAN.md``
-# "Shared contract"), duplicated here only as the fallback used when
-# ``omnigent.context.rollover.resolve_rollover_threshold`` isn't importable
-# yet (see ``_status``).
-_ROLLOVER_AT_TOKENS_LABEL = "omnigent.context.rollover_at_tokens"
-_DEFAULT_ROLLOVER_THRESHOLD_TOKENS = 90_000
-_DEFAULT_THRESHOLD_WINDOW_FRACTION = 0.45
-
 
 class SessionHistoryTool(Tool):
     """
@@ -167,7 +152,7 @@ class SessionHistoryTool(Tool):
         return _status(conv_store, ctx.conversation_id)
 
 
-def _clamp_limit(raw: Any, *, default: int, maximum: int) -> int | str:
+def clamp_limit(raw: Any, *, default: int, maximum: int) -> int | str:
     """Coerce + clamp a ``limit`` argument to ``[1, maximum]``, default when absent."""
     if raw is None:
         return default
@@ -183,7 +168,7 @@ def _read(conv_store: Any, conversation_id: str, args: dict[str, Any]) -> str:
     cursor = args.get("cursor")
     if cursor is not None and not isinstance(cursor, str):
         return json.dumps({"error": "cursor must be a string"})
-    limit = _clamp_limit(args.get("limit"), default=_READ_DEFAULT_LIMIT, maximum=_READ_MAX_LIMIT)
+    limit = clamp_limit(args.get("limit"), default=_READ_DEFAULT_LIMIT, maximum=_READ_MAX_LIMIT)
     if isinstance(limit, str):
         return limit
 
@@ -204,12 +189,52 @@ def _read(conv_store: Any, conversation_id: str, args: dict[str, Any]) -> str:
     except StaleCursorError:
         return json.dumps({"error": "stale_cursor", "cursor": cursor})
 
-    return json.dumps(
-        {
-            "turns": [{"messages": turn} for turn in turns],
-            "next_cursor": next_cursor,
-        }
-    )
+    return read_response(turns, next_cursor)
+
+
+class TurnCollector:
+    """Group newest-first projected items into full turns, page by page.
+
+    A turn is a user message plus everything that answered it. Shared by the
+    in-process read and the runner's async REST read, which differ only in
+    how they fetch a page.
+    """
+
+    def __init__(self, limit: int) -> None:
+        self._limit = limit
+        self.turns: list[list[dict[str, Any]]] = []
+        self._current: list[dict[str, Any]] = []
+        self._scanned = 0
+
+    @property
+    def wants_more(self) -> bool:
+        return len(self.turns) < self._limit and self._scanned < _READ_MAX_ITEMS_SCANNED
+
+    def feed(
+        self, items: list[dict[str, Any]], has_more: bool
+    ) -> tuple[list[list[dict[str, Any]]], str | None] | None:
+        """Add one newest-first page; return ``(turns, next_cursor)`` once done."""
+        for idx, item in enumerate(items):
+            self._current.append(item)
+            self._scanned += 1
+            if item.get("type") == "text" and item.get("role") == "user":
+                self.turns.append(list(reversed(self._current)))
+                self._current = []
+                if len(self.turns) >= self._limit:
+                    # A cut on the page's last item only has more behind it if has_more.
+                    if idx == len(items) - 1 and not has_more:
+                        return self.turns, None
+                    return self.turns, items[idx]["id"]
+        if not has_more:
+            return self.finish(None)
+        return None
+
+    def finish(self, cursor: str | None) -> tuple[list[list[dict[str, Any]]], str | None]:
+        """Flush a partial turn (end of record or scan cap) rather than drop it."""
+        if self._current:
+            self.turns.append(list(reversed(self._current)))
+            self._current = []
+        return self.turns, cursor
 
 
 def group_into_turns(
@@ -218,61 +243,25 @@ def group_into_turns(
     limit: int,
     start_cursor: str | None = None,
 ) -> tuple[list[list[dict[str, Any]]], str | None]:
-    """
-    Group newest-first projected items into full turns.
-
-    A turn is a user message plus everything that answered it (assistant
-    messages, tool calls/results, reasoning) — everything up to but not
-    including the next user message walking backward. Shared by the
-    in-process tool and the runner's REST-based relay dispatch
-    (``omnigent.runner.tool_dispatch``), which both provide their own
-    *fetch_page* over the same already-projected item shape
-    (``_project_item`` / its REST-shape counterpart).
-
-    :param fetch_page: Called with the previous batch's oldest item id
-        (``None`` for the first call, or *start_cursor*); returns
-        ``(items, has_more)`` for one batch, newest-first.
-    :param limit: Number of complete turns to collect.
-    :param start_cursor: Resume point from a prior call's ``next_cursor``.
-    :returns: ``(turns, next_cursor)`` — *turns* newest-first, each turn
-        chronological (oldest item — the user message — first);
-        *next_cursor* resumes with the next older page, or ``None`` when
-        the record is exhausted.
-    """
-    turns: list[list[dict[str, Any]]] = []
-    current: list[dict[str, Any]] = []
+    """Collect *limit* full turns newest-first, paging backward via *fetch_page*."""
+    collector = TurnCollector(limit)
     cursor = start_cursor
-    scanned = 0
-    while len(turns) < limit and scanned < _READ_MAX_ITEMS_SCANNED:
+    while collector.wants_more:
         items, has_more = fetch_page(cursor)
         if not items:
             break
-        hit_limit_at: int | None = None
-        for idx, item in enumerate(items):
-            current.append(item)
-            scanned += 1
-            if item.get("type") == "text" and item.get("role") == "user":
-                turns.append(list(reversed(current)))
-                current = []
-                if len(turns) >= limit:
-                    hit_limit_at = idx
-                    break
-        if hit_limit_at is not None:
-            # A boundary mid-page always has more items behind it (at least
-            # the rest of this page); only a boundary on the page's LAST
-            # item needs has_more to know whether the record is exhausted.
-            if hit_limit_at == len(items) - 1 and not has_more:
-                return turns, None
-            return turns, items[hit_limit_at]["id"]
+        done = collector.feed(items, has_more)
+        if done is not None:
+            return done
         cursor = items[-1]["id"]
-        if not has_more:
-            if current:
-                turns.append(list(reversed(current)))
-            return turns, None
-    # Scan cap reached mid-turn: flush what was fetched rather than drop it.
-    if current:
-        turns.append(list(reversed(current)))
-    return turns, cursor
+    return collector.finish(cursor)
+
+
+def read_response(turns: list[list[dict[str, Any]]], next_cursor: str | None) -> str:
+    """The ``read`` action's JSON payload."""
+    return json.dumps(
+        {"turns": [{"messages": turn} for turn in turns], "next_cursor": next_cursor}
+    )
 
 
 def _search(conv_store: Any, conversation_id: str, args: dict[str, Any]) -> str:
@@ -280,7 +269,7 @@ def _search(conv_store: Any, conversation_id: str, args: dict[str, Any]) -> str:
     query = args.get("query")
     if not isinstance(query, str) or not query.strip():
         return json.dumps({"error": "search requires a non-empty 'query' string"})
-    limit = _clamp_limit(
+    limit = clamp_limit(
         args.get("limit"), default=_SEARCH_DEFAULT_LIMIT, maximum=_SEARCH_MAX_LIMIT
     )
     if isinstance(limit, str):
@@ -312,24 +301,15 @@ def status_from_labels(labels: dict[str, str]) -> dict[str, Any]:
         / ``tokens_remaining_to_rollover`` / ``context_used_percent`` only
         when they can actually be computed from known values.
     """
-    current_tokens = _parse_positive_int(labels.get(_LAST_CONTEXT_TOKENS_LABEL_KEY))
-    context_window = _parse_positive_int(labels.get(_LAST_CONTEXT_WINDOW_LABEL_KEY))
+    from omnigent.context.rollover import (
+        reported_context_tokens,
+        reported_context_window,
+        resolve_rollover_threshold,
+    )
 
-    # Prefer rollover's own threshold resolver once it exists (same policy,
-    # single source of truth); fall back to the documented default here so
-    # ``status`` still works before that module lands.
-    try:
-        from omnigent.context.rollover import resolve_rollover_threshold
-
-        threshold = resolve_rollover_threshold(labels)
-    except ImportError:
-        explicit = _parse_positive_int(labels.get(_ROLLOVER_AT_TOKENS_LABEL))
-        if explicit is not None:
-            threshold = explicit
-        elif context_window is not None:
-            threshold = int(context_window * _DEFAULT_THRESHOLD_WINDOW_FRACTION)
-        else:
-            threshold = _DEFAULT_ROLLOVER_THRESHOLD_TOKENS
+    current_tokens = reported_context_tokens(labels)
+    context_window = reported_context_window(labels)
+    threshold = resolve_rollover_threshold(labels)
 
     # Only report what is actually known — a harness that hasn't posted a
     # usage report yet (e.g. right after a rollover) has no current_tokens,
@@ -346,50 +326,43 @@ def status_from_labels(labels: dict[str, str]) -> dict[str, Any]:
     return result
 
 
-def _parse_positive_int(raw: str | None) -> int | None:
-    """Parse a label's string value as a positive int, or ``None``."""
-    if raw is None:
-        return None
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        return None
-    return value if value > 0 else None
+def _project_item(item: Any) -> dict[str, Any]:
+    """Project a :class:`ConversationItem` via its flat API dict."""
+    return project_api_item(item.to_api_dict())
 
 
-def _project_item(item: Any) -> dict[str, str | None]:
+def project_api_item(item: dict[str, Any]) -> dict[str, Any]:
     """
-    Project a conversation item into a compact dict with its id.
+    Project a flat API item into a compact dict with its id.
 
-    Same shape and truncation rule as ``spawn._project_activity_item``:
-    messages, tool calls, and tool results collapse to role/type/content,
-    each content field capped at ``_CONTENT_MAX_CHARS``.
+    Messages, tool calls and tool results collapse to role/type/content, each
+    content field capped at ``_CONTENT_MAX_CHARS``.
 
-    :param item: A :class:`ConversationItem` from the calling session.
-    :returns: A compact dict with ``id``, ``role``, ``type``, and content.
+    :param item: A ``ConversationItem.to_api_dict()`` dict.
+    :returns: A compact dict with ``id``, ``created_at``, ``role``, ``type``
+        and content.
     """
-    data = item.data.model_dump()
-    if item.type == "function_call":
+    base = {"id": item.get("id"), "created_at": item.get("created_at")}
+    kind = item.get("type")
+    if kind == "function_call":
         return {
-            "id": item.id,
-            "created_at": item.created_at,
+            **base,
             "role": "assistant",
             "type": "tool_call",
-            "name": data.get("name"),
-            "args": _truncate(data.get("arguments", "")),
+            "name": item.get("name"),
+            "args": _truncate(str(item.get("arguments") or "")),
         }
-    if item.type == "function_call_output":
+    if kind == "function_call_output":
+        output = item.get("output")
         return {
-            "id": item.id,
-            "created_at": item.created_at,
+            **base,
             "role": "tool",
             "type": "tool_result",
-            "name": data.get("name"),
-            "content": _truncate(data.get("output", "")),
+            "name": item.get("name"),
+            "content": _truncate(output if isinstance(output, str) else json.dumps(output)),
         }
-    role = data.get("role", "unknown")
     text_parts: list[str] = []
-    for block in data.get("content", []):
+    for block in item.get("content") or []:
         if isinstance(block, dict):
             text = block.get("text") or block.get("output_text")
             if text:
@@ -397,9 +370,8 @@ def _project_item(item: Any) -> dict[str, str | None]:
         elif isinstance(block, str):
             text_parts.append(block)
     return {
-        "id": item.id,
-        "created_at": item.created_at,
-        "role": role,
+        **base,
+        "role": item.get("role") or "unknown",
         "type": "text",
         "content": _truncate("\n".join(text_parts)),
     }

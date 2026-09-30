@@ -23,14 +23,8 @@ ROLLOVER_MODE_VALUE = "rollover"
 # (see rollover.resolve_rollover_threshold).
 ROLLOVER_AT_TOKENS_LABEL = "omnigent.context.rollover_at_tokens"
 
-# How many of the most recent messages a rollover keeps verbatim (tool items
-# ride along with the message they belong to). Unset -> DEFAULT_KEEP_MESSAGES.
-ROLLOVER_KEEP_MESSAGES_LABEL = "omnigent.context.rollover_keep_messages"
-DEFAULT_KEEP_MESSAGES = 20
-
-# Token budget for the kept tail (whole turns only — see
-# rollover.select_recent). Unset -> DEFAULT_KEEP_TOKENS. Measured on real
-# Muse compactions (PLAN.md "A, revision 2").
+# Token budget for the kept tail beyond the last turn (whole turns only; see
+# rollover.select_recent). Unset -> DEFAULT_KEEP_TOKENS.
 ROLLOVER_KEEP_TOKENS_LABEL = "omnigent.context.rollover_keep_tokens"
 DEFAULT_KEEP_TOKENS = 16_000
 
@@ -54,7 +48,6 @@ ROLLOVER_SESSION_LABELS: frozenset[str] = frozenset(
     {
         CONTEXT_MODE_LABEL,
         ROLLOVER_AT_TOKENS_LABEL,
-        ROLLOVER_KEEP_MESSAGES_LABEL,
         ROLLOVER_KEEP_TOKENS_LABEL,
     }
 )

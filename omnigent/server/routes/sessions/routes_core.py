@@ -2968,7 +2968,6 @@ def register_core_routes(
         """
         from omnigent.context.rollover import (
             build_side_chat_seed,
-            resolve_keep_messages,
             resolve_keep_tokens,
         )
         from omnigent.entities import NewConversationItem
@@ -3001,7 +3000,6 @@ def register_core_routes(
         seed_labels = source_conv.labels if source_conv else None
         seed = await build_side_chat_seed(
             items,
-            keep_messages=resolve_keep_messages(seed_labels),
             keep_tokens=resolve_keep_tokens(seed_labels),
             model=model,
             runner_client=runner_client,

@@ -13,7 +13,6 @@ from omnigent.context.rollover import (
     SUMMARIZER_DATE_PLACEHOLDER,
     build_rollover_item,
     estimate_context_tokens,
-    resolve_keep_messages,
     resolve_keep_tokens,
     resolve_rollover_threshold,
     select_recent,
@@ -111,69 +110,42 @@ class _ReturnsTextClient:
 # ── select_recent: whole-turn selection ─────────────────────────────────
 
 
-def test_select_recent_keeps_whole_trailing_turns() -> None:
-    items = _turn(1) + _turn(2) + _turn(3)
-    # Each turn is 2 messages; keep_messages=2 fits exactly one whole turn.
-    result = select_recent(items, keep_messages=2, keep_tokens=_HUGE_TOKENS, model="gpt-4o")
-    assert [i["id"] for i in result] == ["u3", "a3"]
+def test_select_recent_always_keeps_the_last_turn() -> None:
+    """Rollover runs right after a turn finishes; that turn stays verbatim
+    even when it alone is over budget."""
+    items = _turn(1) + _turn(2)
+    result = select_recent(items, keep_tokens=1, model="gpt-4o")
+    assert [i["id"] for i in result] == ["u2", "a2"]
 
 
 def test_select_recent_keeps_tool_items_riding_within_their_turn() -> None:
     items = _turn(1) + _turn(2, with_tool=True)
-    result = select_recent(items, keep_messages=2, keep_tokens=_HUGE_TOKENS, model="gpt-4o")
+    result = select_recent(items, keep_tokens=1, model="gpt-4o")
     assert [i["id"] for i in result] == ["u2", "fc_c2", "fo_c2", "a2"]
 
 
+def test_select_recent_adds_earlier_whole_turns_within_budget() -> None:
+    items = _turn(1) + _turn(2) + _turn(3)
+    two_turns = count_tokens(items[2:], "gpt-4o")
+    result = select_recent(items, keep_tokens=two_turns, model="gpt-4o")
+    assert [i["id"] for i in result] == ["u2", "a2", "u3", "a3"]
+
+
 def test_select_recent_tail_always_starts_at_a_user_message() -> None:
-    """No configuration of the two budgets can ever start the tail on an
-    assistant message — a turn is kept whole or not at all."""
-    items = _turn(1) + _turn(2)
-    for keep_messages in range(6):
-        result = select_recent(
-            items, keep_messages=keep_messages, keep_tokens=_HUGE_TOKENS, model="gpt-4o"
-        )
-        if result:
-            assert result[0]["role"] == "user", (
-                f"keep_messages={keep_messages} started the tail on {result[0]!r}"
-            )
-
-
-def test_select_recent_never_splits_a_turn_message_budget() -> None:
-    items = _turn(1) + _turn(2)
-    # The last turn alone is 2 messages; keep_messages=1 can't fit it, so the
-    # whole turn (not half of it) is dropped rather than orphaning a message.
-    result = select_recent(items, keep_messages=1, keep_tokens=_HUGE_TOKENS, model="gpt-4o")
-    assert result == []
-
-
-def test_select_recent_empty_tail_when_latest_turn_exceeds_token_budget() -> None:
-    items = _turn(1) + _turn(2)
-    tiny_budget = 1
-    result = select_recent(items, keep_messages=100, keep_tokens=tiny_budget, model="gpt-4o")
-    assert result == []
-
-
-def test_select_recent_window_always_ends_at_latest_item() -> None:
-    items = _turn(1)
-    result = select_recent(items, keep_messages=10, keep_tokens=_HUGE_TOKENS, model="gpt-4o")
-    assert [i["id"] for i in result] == ["u1", "a1"]
+    items = _turn(1) + _turn(2, with_tool=True) + _turn(3)
+    for budget in (1, 50, 200, _HUGE_TOKENS):
+        result = select_recent(items, keep_tokens=budget, model="gpt-4o")
+        assert result[0]["role"] == "user", f"budget={budget} started on {result[0]!r}"
 
 
 def test_select_recent_empty_items() -> None:
-    assert select_recent([], keep_messages=5, keep_tokens=_HUGE_TOKENS, model="gpt-4o") == []
+    assert select_recent([], keep_tokens=_HUGE_TOKENS, model="gpt-4o") == []
 
 
 def test_select_recent_no_user_message_is_empty_tail() -> None:
     # Malformed/partial record with no turn to anchor a tail on.
     items = [_msg("a1", "assistant", "orphan reply")]
-    result = select_recent(items, keep_messages=5, keep_tokens=_HUGE_TOKENS, model="gpt-4o")
-    assert result == []
-
-
-def test_select_recent_adds_multiple_whole_turns_when_budget_allows() -> None:
-    items = _turn(1) + _turn(2) + _turn(3)
-    result = select_recent(items, keep_messages=4, keep_tokens=_HUGE_TOKENS, model="gpt-4o")
-    assert [i["id"] for i in result] == ["u2", "a2", "u3", "a3"]
+    assert select_recent(items, keep_tokens=_HUGE_TOKENS, model="gpt-4o") == []
 
 
 # ── threshold / keep-budget resolution ──────────────────────────────────
@@ -200,12 +172,6 @@ def test_threshold_explicit_label_wins_over_window() -> None:
 def test_threshold_ignores_invalid_label() -> None:
     labels = {"omnigent.context.rollover_at_tokens": "not-a-number"}
     assert resolve_rollover_threshold(labels) == DEFAULT_ROLLOVER_THRESHOLD_TOKENS
-
-
-def test_resolve_keep_messages_default_and_override() -> None:
-    assert resolve_keep_messages(None) == 20
-    assert resolve_keep_messages({"omnigent.context.rollover_keep_messages": "5"}) == 5
-    assert resolve_keep_messages({"omnigent.context.rollover_keep_messages": "-1"}) == 20
 
 
 def test_resolve_keep_tokens_default_and_override() -> None:
@@ -247,8 +213,7 @@ async def test_build_rollover_item_shape() -> None:
     data = await build_rollover_item(
         items,
         previous_summary=None,
-        keep_messages=2,
-        keep_tokens=_HUGE_TOKENS,
+        keep_tokens=1,
         model="gpt-4o",
         llm_client=client,
     )
@@ -269,21 +234,21 @@ async def test_build_rollover_item_shape() -> None:
 
 
 @pytest.mark.asyncio
-async def test_build_rollover_item_empty_tail_when_latest_turn_too_big() -> None:
+async def test_build_rollover_item_keeps_the_last_turn_even_over_budget() -> None:
     items = _turn(1) + _turn(2)
     client = _ReturnsTextClient("ROLLING SUMMARY")
 
     data = await build_rollover_item(
         items,
         previous_summary=None,
-        keep_messages=100,
         keep_tokens=1,
         model="gpt-4o",
         llm_client=client,
     )
 
     # Only the summary pair — no room for even the latest turn.
-    assert len(data.compacted_messages) == 2
+    assert len(data.compacted_messages) == 4
+    assert [m.get("id") for m in data.compacted_messages[2:]] == ["u2", "a2"]
     assert data.compacted_messages[0]["role"] == "user"
     assert data.compacted_messages[1]["role"] == "assistant"
 
@@ -296,7 +261,6 @@ async def test_build_rollover_item_passes_state_file_instruction() -> None:
     await build_rollover_item(
         items,
         previous_summary=None,
-        keep_messages=20,
         keep_tokens=_HUGE_TOKENS,
         model="gpt-4o",
         llm_client=client,
@@ -315,7 +279,6 @@ async def test_build_rollover_item_feeds_previous_summary_for_progressive_summar
     await build_rollover_item(
         items,
         previous_summary=f"{CHECKPOINT_HEADER}\n\nOLD SUMMARY of earlier turns",
-        keep_messages=20,
         keep_tokens=_HUGE_TOKENS,
         model="gpt-4o",
         llm_client=client,
@@ -332,7 +295,6 @@ async def test_build_rollover_item_requires_nonempty_items() -> None:
         await build_rollover_item(
             [],
             previous_summary=None,
-            keep_messages=5,
             keep_tokens=_HUGE_TOKENS,
             model="gpt-4o",
             llm_client=_ReturnsTextClient("x"),
@@ -346,8 +308,7 @@ async def test_rollover_item_accepted_by_claude_native_resume_rebuild(tmp_path: 
     data = await build_rollover_item(
         items,
         previous_summary=None,
-        keep_messages=2,
-        keep_tokens=_HUGE_TOKENS,
+        keep_tokens=1,
         model="gpt-4o",
         llm_client=client,
     )
@@ -383,8 +344,7 @@ async def test_rollover_item_accepted_by_codex_native_resume_rebuild(tmp_path: P
     data = await build_rollover_item(
         items,
         previous_summary=None,
-        keep_messages=2,
-        keep_tokens=_HUGE_TOKENS,
+        keep_tokens=1,
         model="gpt-4o",
         llm_client=client,
     )
@@ -456,21 +416,20 @@ def test_items_for_summarizer_keeps_only_provider_schema_fields() -> None:
 async def test_checkpoint_marker_differs_from_the_summarizer_request() -> None:
     """The CLI must see a marker that's plainly not from the user, while the
     summarizer keeps the request wording it expects for a previous summary."""
-    from omnigent.context.rollover import _CHECKPOINT_MARKER_TEXT, _SUMMARY_REQUEST_TEXT
+    from omnigent.context.rollover import _SUMMARY_REQUEST_TEXT
 
     client = _ReturnsTextClient("ROLLING SUMMARY")
     data = await build_rollover_item(
         _turn(1) + _turn(2),
         previous_summary="OLD SUMMARY",
-        keep_messages=2,
         keep_tokens=_HUGE_TOKENS,
         model="gpt-4o",
         llm_client=client,
     )
     marker = data.compacted_messages[0]["content"][0]["text"]
-    assert marker == _CHECKPOINT_MARKER_TEXT
+    assert marker == CHECKPOINT_HEADER
     assert "not a message from the user" in marker
-    assert _SUMMARY_REQUEST_TEXT != _CHECKPOINT_MARKER_TEXT
+    assert _SUMMARY_REQUEST_TEXT != CHECKPOINT_HEADER
 
 
 @pytest.mark.asyncio
@@ -481,7 +440,6 @@ async def test_summarizer_gets_one_transcript_message_not_live_turns() -> None:
     await build_rollover_item(
         _turn(1) + _turn(2),
         previous_summary="OLD SUMMARY",
-        keep_messages=2,
         keep_tokens=_HUGE_TOKENS,
         model="gpt-4o",
         llm_client=client,
