@@ -7980,38 +7980,25 @@ def create_runner_app(
             )
         try:
             loop = asyncio.get_running_loop()
-            # Rollover only acts on a clean completion, and always finishes
-            # (compaction item + pane recycle) before any queued message can
-            # start its own turn — so the two never race.
-            _cont = loop.create_task(
-                _finish_turn_and_maybe_roll_over(
-                    conv_id, clean=error is None and not was_interrupted
-                ),
-            )
+            _cont = loop.create_task(_check_and_start_next_turn(conv_id))
             _cont.add_done_callback(_background_tasks.discard)
             _background_tasks.add(_cont)
         except RuntimeError:
             pass
 
-    async def _finish_turn_and_maybe_roll_over(conv_id: str, *, clean: bool) -> None:
-        if clean:
-            await _maybe_apply_rollover(conv_id)
-        await _check_and_start_next_turn(conv_id)
-
     async def _maybe_apply_rollover(conv_id: str) -> None:
         """Cheap no-op for every non-rollover turn; the label gates all I/O below."""
-        if not _is_native_harness(conv_id):
+        if not _is_native_harness(conv_id) or conv_id in _rollover_in_progress:
             return
-        # Durable per-session cache (see _rollover_labels_for_session) — no
-        # per-turn label round trip for the common case, unlike a TTL cache.
-        mode_labels = await _rollover_labels_for_session(conv_id)
-        if not is_rollover(mode_labels):
-            return
-        if conv_id in _rollover_in_progress:
-            return
+        # Opened before any await, so a turn arriving right now already waits.
         _rollover_in_progress.add(conv_id)
         gate = _rollover_gates[conv_id] = asyncio.Event()
         try:
+            # Durable per-session cache (see _rollover_labels_for_session) — no
+            # per-turn label round trip for the common case, unlike a TTL cache.
+            mode_labels = await _rollover_labels_for_session(conv_id)
+            if not is_rollover(mode_labels):
+                return
             full_labels = await _session_labels_for_runner_spawn(
                 server_client=server_client, session_id=conv_id
             )
@@ -8069,10 +8056,6 @@ def create_runner_app(
         collected.reverse()
         return collected, previous_summary
 
-    def _rollover_superseded(conv_id: str) -> bool:
-        """Whether a turn already reached the pane despite the rollover gate."""
-        return _native_turn_in_flight(conv_id)
-
     async def _apply_rollover_if_over_threshold(conv_id: str, labels: dict[str, str]) -> None:
         items, previous_summary = await _fetch_rollover_window(conv_id)
         if not items:
@@ -8093,15 +8076,6 @@ def create_runner_app(
             llm_client=_get_runner_llm_client(),
             connection=connection,
         )
-        # New turns wait on the rollover gate; one that slipped into the pane
-        # anyway must not be killed, so defer to the next clean turn end.
-        if _rollover_superseded(conv_id):
-            _logger.info(
-                "rollover deferred for %s: a new turn started during summarization",
-                conv_id,
-                extra={"session_id": conv_id},
-            )
-            return
         resp = await server_client.post(
             f"/v1/sessions/{conv_id}/events",
             json={"type": "compaction", "data": data.model_dump(exclude_none=True)},
@@ -8140,7 +8114,6 @@ def create_runner_app(
             extra={"session_id": conv_id},
         )
 
-    app.state.finish_turn_and_maybe_roll_over = _finish_turn_and_maybe_roll_over
     app.state.maybe_apply_rollover = _maybe_apply_rollover
     app.state.rollover_gates = _rollover_gates
     app.state.session_init_envelopes = _session_init_envelopes
@@ -10789,6 +10762,12 @@ def create_runner_app(
                     allow_history_preview_fallback=False,
                 )
             turn_completed = data.get("turn_completed") if isinstance(data, dict) else None
+            # A native turn truly ends at the CLI's completed-idle edge (delivery
+            # returns as soon as the prompt is typed), so rollover starts here.
+            if status == "idle" and (turn_completed is True or terminal_status == "completed"):
+                _rollover_task = asyncio.create_task(_maybe_apply_rollover(conversation_id))
+                _background_tasks.add(_rollover_task)
+                _rollover_task.add_done_callback(_background_tasks.discard)
             interrupt_pending = False
             interrupt_work_id: str | None = None
             if status == "idle" and terminal_status is None and turn_completed is not True:

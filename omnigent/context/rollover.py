@@ -223,29 +223,45 @@ def select_recent(
     return items[selected_start:] if selected_start < len(items) else []
 
 
-# Bookkeeping fields ``ConversationItem.to_api_dict()`` adds on top of the
-# type-specific ones (see API.md) — meaningful to Omnigent's own storage and
-# to the native resume rebuilders, but not part of any provider's Responses
-# API ``input`` item schema. Left in, a strict provider (observed: OpenAI)
-# 400s on the unknown field instead of ignoring it.
-_ITEM_BOOKKEEPING_FIELDS = ("id", "response_id", "status", "created_at", "created_by", "model")
+# The Responses API input fields per item type. Anything else a harness adds
+# (ids, stream ids, statuses) makes a strict provider reject the call.
+_SUMMARIZER_INPUT_FIELDS: dict[str, tuple[str, ...]] = {
+    "message": ("type", "role", "content"),
+    "function_call": ("type", "call_id", "name", "arguments"),
+    "function_call_output": ("type", "call_id", "output"),
+}
+_TEXT_BLOCK_TYPES = frozenset({"input_text", "output_text"})
+
+
+def _content_for_summarizer(content: Any) -> Any:
+    """Keep text blocks as bare ``{type, text}``; other blocks pass through."""
+    if not isinstance(content, list):
+        return content
+    return [
+        {"type": block["type"], "text": block.get("text", "")}
+        if isinstance(block, dict) and block.get("type") in _TEXT_BLOCK_TYPES
+        else block
+        for block in content
+    ]
 
 
 def _items_for_summarizer(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Project *items* into a shape safe to send as LLM input.
+    """Project *items* onto the provider input schema for the summary call.
 
-    Drops storage-only bookkeeping fields, and drops ``reasoning`` items
-    entirely — like ``history_to_input_items``, they are output-only and, on
-    a resident session, provider-specific (Claude's reasoning content is not
-    a valid OpenAI Responses API ``reasoning`` input item). Only used for the
-    summarizer's own input — :func:`select_recent`'s kept tail keeps the
-    full item dicts, which the native resume rebuilders need.
+    Only messages and tool calls/results are sent, with only their schema
+    fields; reasoning and harness-specific items are dropped. The kept tail
+    (:func:`select_recent`) keeps the full dicts the resume rebuilders need.
     """
-    return [
-        {k: v for k, v in item.items() if k not in _ITEM_BOOKKEEPING_FIELDS}
-        for item in items
-        if item.get("type") != "reasoning"
-    ]
+    projected: list[dict[str, Any]] = []
+    for item in items:
+        fields = _SUMMARIZER_INPUT_FIELDS.get(str(item.get("type")))
+        if fields is None:
+            continue
+        out = {key: item[key] for key in fields if key in item}
+        if "content" in out:
+            out["content"] = _content_for_summarizer(out["content"])
+        projected.append(out)
+    return projected
 
 
 def _summary_exchange(summary_text: str) -> list[dict[str, Any]]:

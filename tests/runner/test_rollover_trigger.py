@@ -1,11 +1,11 @@
 """Tests for the rollover trigger hook (post-turn, native sessions only).
 
-Exercises ``_maybe_apply_rollover`` / ``_finish_turn_and_maybe_roll_over``
-(exposed on ``app.state`` for testing) directly, rather than driving a full
+Exercises ``_maybe_apply_rollover`` (exposed on ``app.state`` for testing) and
+the completed-idle status edge that schedules it, rather than driving a full
 native-pane turn — the counting/threshold/item-shape logic itself is unit
 tested in ``tests/context/test_rollover.py`` against the real production
 functions; this covers the runner-side wiring: the native + label gate, the
-single-flight guard, and "never mid-turn".
+single-flight guard, and "only at a completed turn".
 """
 
 from __future__ import annotations
@@ -168,15 +168,14 @@ async def test_no_trigger_when_label_unset(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 @pytest.mark.asyncio
-async def test_never_triggers_mid_turn(monkeypatch: pytest.MonkeyPatch) -> None:
-    """clean=False (error/interrupt exit) must never roll over, even when
-    the session is in rollover mode and long past its threshold."""
-    conv_id = "conv_rollover_midturn"
+async def test_rolls_over_only_at_a_completed_idle_edge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Native delivery returns once the prompt is typed, so only the CLI's
+    completed-idle edge may start a rollover; running or bare idle never do."""
+    conv_id = "conv_rollover_edge"
     items = [_msg(f"m{i}", "user" if i % 2 == 0 else "assistant", f"msg {i}") for i in range(10)]
-    labels = {
-        "omnigent.context.mode": "rollover",
-        "omnigent.context.rollover_at_tokens": "1",
-    }
+    labels = {"omnigent.context.mode": "rollover", "omnigent.context.rollover_at_tokens": "1"}
     fake_client = _FakeServerClient(items, labels=labels)
     pm = _FakeProcessManager(_ScriptedHarnessClient([]))
     app = create_runner_app(
@@ -186,10 +185,24 @@ async def test_never_triggers_mid_turn(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     await _create_native_session(app, conv_id)
     monkeypatch.setattr("omnigent.runner.app._get_runner_llm_client", lambda: _FakeLLMClient())
+    app.state.native_pane_reaper = _FakeReaper()
 
-    await app.state.finish_turn_and_maybe_roll_over(conv_id, clean=False)
+    async def post_status(data: dict[str, Any]) -> None:
+        async with _runner_client(app) as client:
+            resp = await client.post(
+                f"/v1/sessions/{conv_id}/events",
+                json={"type": "external_session_status", "data": data},
+            )
+        assert resp.status_code == 204, resp.text
+        for _ in range(50):
+            await asyncio.sleep(0.01)
 
+    await post_status({"status": "running"})
+    await post_status({"status": "idle"})
     assert fake_client.posted_events == []
+
+    await post_status({"status": "idle", "turn_completed": True})
+    assert len(fake_client.posted_events) == 1
 
 
 @pytest.mark.asyncio

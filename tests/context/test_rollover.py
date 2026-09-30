@@ -426,3 +426,27 @@ def test_state_file_summarizer_instruction_accepts_a_caller_supplied_date() -> N
     and substitutes the real date itself, later, at actual compaction time."""
     instruction = state_file_summarizer_instruction(today=SUMMARIZER_DATE_PLACEHOLDER)
     assert f"## Context checkpoint — {SUMMARIZER_DATE_PLACEHOLDER}" in instruction
+
+
+def test_items_for_summarizer_keeps_only_provider_schema_fields() -> None:
+    from omnigent.context.rollover import _items_for_summarizer
+
+    items = [
+        {
+            "id": "m1",
+            "type": "message",
+            "role": "user",
+            "status": "completed",
+            "stream_message_id": "s1",
+            "content": [{"type": "input_text", "text": "hi", "extra": 1}],
+        },
+        {"id": "r1", "type": "reasoning", "summary": []},
+        {"id": "e1", "type": "native_tool", "name": "shell"},
+        {"id": "f1", "type": "function_call", "call_id": "c1", "name": "t", "arguments": "{}"},
+        {"id": "o1", "type": "function_call_output", "call_id": "c1", "output": "ok", "x": 2},
+    ]
+    assert _items_for_summarizer(items) == [
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+        {"type": "function_call", "call_id": "c1", "name": "t", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "c1", "output": "ok"},
+    ]
