@@ -99,13 +99,28 @@ _TRAILING_SYNC_FETCH_LIMIT = 200
 class _WarmPiState:
     """A live warm pi RPC process for one blindfolded session.
 
+    ``last_prior_ids`` + ``last_new_message_id`` (rather than one flat "seen
+    ids" list refreshed eagerly) are what the *last successfully completed*
+    turn confirmed: the prior-history ids it ran with, plus the id of the
+    new message it was given. Re-deriving "everything seen since" from those
+    two at the *start* of the next turn (see ``_sync_seen_ids_after_turn``)
+    — rather than fetching it right after this turn's own RPC call returns —
+    matters because this turn's own final answer is posted to the record by
+    the caller *after* this module returns (see
+    ``omnigent.harnesses.pi_native.blindfold``'s docstring on
+    ``post_oneshot_items`` for why): fetching too early would see the record
+    one message short and misjudge a perfectly valid reuse as stale.
+
     :param rpc: The live RPC session (``omnigent.inner.pi_executor.
         _PiRpcSession``, imported lazily — see module docstring).
     :param system_prompt: The rendered system+memory text this process was
         started with (or last confirmed to still match).
     :param model: The model this process was started with.
-    :param seen_item_ids: Record item ids this process has been exposed to,
-        oldest first — what it started with plus every turn processed since.
+    :param last_prior_ids: The prior-history item ids the last successfully
+        completed turn ran with (``[]`` for a process that has completed no
+        turn yet).
+    :param last_new_message_id: The record item id of the last successfully
+        completed turn's new message, or ``None`` before any turn completes.
     :param last_used: ``time.monotonic()`` of the last turn run on it.
     :param config_dir: Its disposable ``PI_CODING_AGENT_DIR``, removed on
         discard.
@@ -114,7 +129,8 @@ class _WarmPiState:
     rpc: _PiRpcSession
     system_prompt: str
     model: str
-    seen_item_ids: list[str]
+    last_prior_ids: list[str]
+    last_new_message_id: str | None
     last_used: float
     config_dir: Path
 
@@ -206,14 +222,21 @@ async def reset_for_tests() -> None:
     _SESSION_LOCKS.clear()
 
 
-def _invalid_reason(
+async def _validity_reason(
     state: _WarmPiState | None,
     *,
+    client: httpx.AsyncClient,
+    session_id: str,
     system_prompt: str,
     model: str,
     expected_prior_ids: list[str],
+    new_message_id: str | None,
 ) -> str | None:
-    """The reason *state* may not be reused this turn, or ``None`` if valid."""
+    """The reason *state* may not be reused this turn, or ``None`` if valid.
+
+    Cheap (no I/O) checks run first; the record resync only runs once they
+    all pass, so an already-invalid process never pays for it.
+    """
     if state is None:
         return "no_warm_process"
     if state.rpc.process is None or state.rpc.process.returncode is not None:
@@ -224,7 +247,20 @@ def _invalid_reason(
         return "system_or_memory_changed"
     if state.model != model:
         return "model_changed"
-    if state.seen_item_ids != expected_prior_ids:
+    if state.last_new_message_id is None:
+        return "history_not_confirmed"
+    if new_message_id is None:
+        return "new_message_lookup_failed"
+    synced = await _sync_seen_ids_after_turn(
+        client,
+        session_id=session_id,
+        prior_ids=state.last_prior_ids,
+        start_id=state.last_new_message_id,
+        stop_before_id=new_message_id,
+    )
+    if synced is None:
+        return "history_fetch_failed"
+    if synced != expected_prior_ids:
         return "history_window_changed"
     return None
 
@@ -245,7 +281,7 @@ async def _spawn(
     model: str,
     command: str,
     workspace: Path,
-    initial_seen_ids: list[str],
+    initial_prior_ids: list[str],
 ) -> tuple[_WarmPiState | None, str | None]:
     """Start a fresh warm ``pi --mode rpc`` process with today's blindfold
     settings. Returns ``(state, error)``; ``state`` is ``None`` on failure.
@@ -314,7 +350,8 @@ async def _spawn(
         rpc=rpc,
         system_prompt=system_text,
         model=model,
-        seen_item_ids=list(initial_seen_ids),
+        last_prior_ids=list(initial_prior_ids),
+        last_new_message_id=None,
         last_used=time.monotonic(),
         config_dir=fresh_config_dir,
     )
@@ -359,52 +396,16 @@ async def _read_rpc_turn(rpc: _PiRpcSession, *, timeout_s: float) -> tuple[str, 
             return "\n".join(lines), pending_error
 
 
-async def _fetch_last_item_id(client: httpx.AsyncClient, session_id: str) -> str | None:
-    """The record's current last item id — this turn's just-recorded user
-    message, fetched before this turn adds anything else (see
-    :func:`_sync_seen_ids_after_turn`, which needs it as the resync anchor).
-    """
-    quoted = urllib.parse.quote(session_id, safe="")
-    try:
-        resp = await client.get(
-            f"/v1/sessions/{quoted}/items",
-            params={"limit": 1, "order": "desc"},
-            timeout=_REQUEST_TIMEOUT_SECONDS,
-        )
-        resp.raise_for_status()
-        page = resp.json()
-        data = page.get("data") if isinstance(page, dict) else None
-        if isinstance(data, list) and data and isinstance(data[0], dict):
-            item_id = data[0].get("id")
-            if isinstance(item_id, str) and item_id:
-                return item_id
-    except (httpx.HTTPError, ValueError):
-        pass
-    return None
-
-
-async def _sync_seen_ids_after_turn(
-    client: httpx.AsyncClient,
-    *,
-    session_id: str,
-    prior_ids: list[str],
-    new_message_id: str,
+async def _fetch_recent_ids_desc(
+    client: httpx.AsyncClient, session_id: str, *, limit: int
 ) -> list[str] | None:
-    """What this warm process has now seen: *prior_ids* plus everything the
-    record gained from *new_message_id* onward (the new user message itself,
-    then whatever this turn's own posts added), fetched fresh rather than
-    guessed so a validity check next turn can trust it exactly.
-
-    :returns: The updated ids, oldest first, or ``None`` if the record
-        couldn't be read or no longer contains *new_message_id* within the
-        fetch window — callers must treat ``None`` as "can't be trusted" and
-        discard the process rather than reuse it with stale bookkeeping.
-    """
+    """The session record's most recent item ids, newest first, or ``None``
+    on any transport/parse failure."""
     quoted = urllib.parse.quote(session_id, safe="")
     try:
         resp = await client.get(
             f"/v1/sessions/{quoted}/items",
-            params={"limit": _TRAILING_SYNC_FETCH_LIMIT, "order": "desc"},
+            params={"limit": limit, "order": "desc"},
             timeout=_REQUEST_TIMEOUT_SECONDS,
         )
         resp.raise_for_status()
@@ -412,17 +413,58 @@ async def _sync_seen_ids_after_turn(
         items_desc = page.get("data") if isinstance(page, dict) else None
         if not isinstance(items_desc, list):
             return None
-        ids_desc = [
+        return [
             item["id"]
             for item in items_desc
             if isinstance(item, dict) and isinstance(item.get("id"), str)
         ]
     except (httpx.HTTPError, ValueError):
         return None
-    if new_message_id not in ids_desc:
+
+
+async def _fetch_last_item_id(client: httpx.AsyncClient, session_id: str) -> str | None:
+    """The record's current last item id — this turn's just-recorded new
+    message, fetched before this turn (or the validity check's resync)
+    changes the record any further.
+    """
+    ids_desc = await _fetch_recent_ids_desc(client, session_id, limit=1)
+    return ids_desc[0] if ids_desc else None
+
+
+async def _sync_seen_ids_after_turn(
+    client: httpx.AsyncClient,
+    *,
+    session_id: str,
+    prior_ids: list[str],
+    start_id: str,
+    stop_before_id: str,
+) -> list[str] | None:
+    """What a warm process has seen as of just before *stop_before_id* (this
+    turn's new message, not yet sent to it): *prior_ids* (what it started
+    with) plus everything the record gained from *start_id* (its last
+    confirmed new message) up to but excluding *stop_before_id* — the
+    previous turn's own tool calls/reasoning/final answer, whichever of
+    those actually made it into the record. Fetched fresh rather than kept
+    as running state so a post that silently failed (``post_oneshot_items``
+    is best-effort) can't leave a stale, over-trusting bookkeeping entry
+    behind.
+
+    :returns: The ids, oldest first, or ``None`` if the record couldn't be
+        read, or no longer contains *start_id* or *stop_before_id* within
+        the fetch window — callers must treat ``None`` as "can't be
+        trusted" and discard the process rather than reuse it.
+    """
+    ids_desc = await _fetch_recent_ids_desc(client, session_id, limit=_TRAILING_SYNC_FETCH_LIMIT)
+    if ids_desc is None:
         return None
-    trailing_chrono = list(reversed(ids_desc[: ids_desc.index(new_message_id) + 1]))
-    return prior_ids + trailing_chrono
+    ids_chrono = list(reversed(ids_desc))
+    if start_id not in ids_chrono or stop_before_id not in ids_chrono:
+        return None
+    start_index = ids_chrono.index(start_id)
+    stop_index = ids_chrono.index(stop_before_id)
+    if start_index > stop_index:
+        return None
+    return prior_ids + ids_chrono[start_index:stop_index]
 
 
 def _log_turn(
@@ -481,8 +523,21 @@ async def run_warm_or_cold(
     async with _get_lock(session_id):
         prior_ids = _prior_ids(selected_items)
         state = _WARM_SESSIONS.get(session_id)
-        reason = _invalid_reason(
-            state, system_prompt=system_text, model=model, expected_prior_ids=prior_ids
+        # Fetched before spawn/reuse and before this turn's own prompt is
+        # sent: it's both this turn's future resync anchor (state.
+        # last_new_message_id, set below on success) AND, when reusing, the
+        # "stop before" boundary _validity_reason's resync needs so it
+        # doesn't mistake this turn's own (already-recorded) new message for
+        # something the process already saw.
+        new_message_id = await _fetch_last_item_id(client, session_id)
+        reason = await _validity_reason(
+            state,
+            client=client,
+            session_id=session_id,
+            system_prompt=system_text,
+            model=model,
+            expected_prior_ids=prior_ids,
+            new_message_id=new_message_id,
         )
         warm_reused = reason is None
 
@@ -497,7 +552,7 @@ async def run_warm_or_cold(
                 model=model,
                 command=command,
                 workspace=workspace,
-                initial_seen_ids=prior_ids,
+                initial_prior_ids=prior_ids,
             )
             if state is None:
                 setup_ms = (time.monotonic() - setup_started) * 1000
@@ -516,10 +571,6 @@ async def run_warm_or_cold(
                 )
             _WARM_SESSIONS[session_id] = state
         setup_ms = (time.monotonic() - setup_started) * 1000
-
-        # Anchor for the post-turn resync — must be read before this turn's
-        # own items are posted (see _sync_seen_ids_after_turn).
-        new_message_id = await _fetch_last_item_id(client, session_id)
 
         started = time.monotonic()
         cmd_id = f"warm_{turn_id}"
@@ -584,17 +635,14 @@ async def run_warm_or_cold(
                 reason=reason,
             )
 
-        synced = None
-        if new_message_id is not None:
-            synced = await _sync_seen_ids_after_turn(
-                client, session_id=session_id, prior_ids=prior_ids, new_message_id=new_message_id
-            )
-        if synced is None:
-            # Bookkeeping can't be trusted going forward — never reuse with a
-            # guessed seen-ids list; the next turn starts clean instead.
+        if new_message_id is None:
+            # Bookkeeping can't be trusted going forward without this turn's
+            # own anchor id — never reuse on a guess; the next turn starts
+            # clean instead.
             await _discard(session_id, state)
         else:
-            state.seen_item_ids = synced
+            state.last_prior_ids = prior_ids
+            state.last_new_message_id = new_message_id
             state.last_used = time.monotonic()
 
         _log_turn(
