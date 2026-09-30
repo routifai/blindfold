@@ -292,12 +292,15 @@ async def _run_one_shot(
     duration_s = time.monotonic() - started
 
     _logger.info(
-        "blindfold codex-native turn=%s session=%s setup_ms=%.0f process_s=%.2fs ok=%s",
+        "blindfold codex-native turn=%s session=%s setup_ms=%.0f process_s=%.2fs ok=%s "
+        "has_memory_block=%s resumed_with_items=%d",
         turn_id,
         session_id,
         setup_ms,
         duration_s,
         error is None,
+        "<long_term_memory>" in system_text,
+        len(selected_items),
     )
 
     with contextlib.suppress(OSError):
