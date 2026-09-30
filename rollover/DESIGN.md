@@ -78,7 +78,7 @@ A session label `omnigent.context.mode`:
 | `rollover` | The super chat, as described here |
 | `blindfold` | Strict mode: a new CLI session every turn (existing `omnigent.blindfold=true` keeps working) |
 
-Side chats forked from the super chat drop the label, the same rule as blindfold.
+Side chats forked from the super chat are rollover sessions too, seeded Muse-style from the parent's latest summary plus memory (not the transcript). Memory: side chats read main memory and write their own (memory phase).
 
 ### 2. Trigger
 
