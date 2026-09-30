@@ -60,14 +60,25 @@ CHECKPOINT_HEADER = (
 )
 
 
-def _state_file_summarizer_instruction() -> str:
+# Placeholder substituted by the pi-native resident bridge, which can't know
+# the real compaction date at session-launch time (the summary may be built
+# hours or days later, inside Pi's own session_before_compact hook).
+SUMMARIZER_DATE_PLACEHOLDER = "{today}"
+
+
+def state_file_summarizer_instruction(*, today: str | None = None) -> str:
     """Build the "state file, not a narrative" summarizer instruction
     (PLAN.md "A, revision 2" point 4), with today's date filled in by code.
+
+    :param today: ISO date to embed, or ``None`` to use UTC today (the
+        server-side rollover path, where the summary is built right away).
+        Pass :data:`SUMMARIZER_DATE_PLACEHOLDER` for a caller that fills the
+        date in itself at the actual moment of summarization.
     """
-    today = datetime.now(UTC).date().isoformat()
+    resolved_today = today if today is not None else datetime.now(UTC).date().isoformat()
     return (
         f"Write the summary as a state file, not a narrative. Start with "
-        f"'## Context checkpoint — {today}'. Organize by topic: the user's "
+        f"'## Context checkpoint — {resolved_today}'. Organize by topic: the user's "
         "identity, preferences and constraints (including corrections and "
         '"do not" rules) first; each active task with its exact identifiers '
         "(ids, paths, URLs, numbers), a time-zoned timestamp, its status, "
@@ -272,7 +283,7 @@ async def build_rollover_item(
     merged with *previous_summary* (progressive summarization — see
     ``summarize_history``/``build_summarization_prompt``) so it stays
     cumulative across rollovers rather than restarting each time. The LLM's
-    own text is asked for as a state file (``_state_file_summarizer_instruction``)
+    own text is asked for as a state file (``state_file_summarizer_instruction``)
     and then given the fixed, code-authored :data:`CHECKPOINT_HEADER` — never
     written by the LLM itself. ``compacted_messages`` is shaped exactly like
     other producers' (``compaction_to_history_items``, the codex forwarder's
@@ -317,7 +328,7 @@ async def build_rollover_item(
         connection,
         runner_client,
         conversation_id,
-        extra_instructions=_state_file_summarizer_instruction(),
+        extra_instructions=state_file_summarizer_instruction(),
     )
     summary_text = f"{CHECKPOINT_HEADER}\n\n{summary['text']}"
     recent = select_recent(
