@@ -845,8 +845,9 @@ def test_provider_launch_no_compaction_overlay_without_rollover_label(
     )
 
     for labels in (None, {}, {"omnigent.context.mode": "something_else"}):
-        creds.pi_native_provider_launch(tmp_path / "pi-agent", provider, labels=labels)
+        launch = creds.pi_native_provider_launch(tmp_path / "pi-agent", provider, labels=labels)
         assert "compaction" not in captured["overlay"]
+        assert launch.rollover_threshold_tokens is None
 
 
 def test_provider_launch_writes_compaction_settings_for_rollover(
@@ -874,13 +875,16 @@ def test_provider_launch_writes_compaction_settings_for_rollover(
         "omnigent.context.rollover_keep_tokens": "8000",
     }
 
-    creds.pi_native_provider_launch(tmp_path / "pi-agent", provider, labels=labels)
+    launch = creds.pi_native_provider_launch(tmp_path / "pi-agent", provider, labels=labels)
 
     assert captured["overlay"]["compaction"] == {
         "enabled": True,
         "reserveTokens": 200_000 - 120_000,
         "keepRecentTokens": 8_000,
     }
+    # Exposed so the caller can patch the pi-native extension's own
+    # thresholdTokens (written earlier, window-blind) to the same value.
+    assert launch.rollover_threshold_tokens == 120_000
 
 
 def test_provider_launch_keeps_tail_size_with_unknown_context_window(
@@ -903,9 +907,11 @@ def test_provider_launch_keeps_tail_size_with_unknown_context_window(
     )
     labels = {"omnigent.context.mode": "rollover"}
 
-    creds.pi_native_provider_launch(tmp_path / "pi-agent", provider, labels=labels)
+    launch = creds.pi_native_provider_launch(tmp_path / "pi-agent", provider, labels=labels)
 
     assert captured["overlay"]["compaction"] == {"enabled": True, "keepRecentTokens": 16_000}
+    # No known window to derive a threshold from — nothing to patch.
+    assert launch.rollover_threshold_tokens is None
 
 
 def test_provider_launch_returns_env_and_args(tmp_path: Path) -> None:
@@ -919,7 +925,7 @@ def test_provider_launch_returns_env_and_args(tmp_path: Path) -> None:
         auth_header=False,
     )
     agent_dir = tmp_path / "pi-agent"
-    env, args, _warning = creds.pi_native_provider_launch(agent_dir, provider)
+    env, args, _warning, _threshold = creds.pi_native_provider_launch(agent_dir, provider)
 
     assert env == {creds.PI_CODING_AGENT_DIR_ENV_VAR: str(agent_dir)}
     assert args == ["--provider", "omnigent", "--model", "claude-sonnet-4-6"]
@@ -937,7 +943,9 @@ def test_provider_launch_passes_reasoning_effort_as_thinking(tmp_path: Path) -> 
         auth_header=False,
     )
 
-    _env, args, warning = creds.pi_native_provider_launch(tmp_path / "pi-agent", provider, "high")
+    _env, args, warning, _threshold = creds.pi_native_provider_launch(
+        tmp_path / "pi-agent", provider, "high"
+    )
 
     assert args[-2:] == ["--thinking", "high"]
     assert warning is None
@@ -960,7 +968,9 @@ def test_provider_launch_effort_edge_values(
         auth_header=False,
     )
 
-    _env, args, warning = creds.pi_native_provider_launch(tmp_path / "pi-agent", provider, effort)
+    _env, args, warning, _threshold = creds.pi_native_provider_launch(
+        tmp_path / "pi-agent", provider, effort
+    )
 
     assert args[4:] == expected
     assert warning is None
@@ -980,7 +990,9 @@ def test_provider_launch_gateway_routed_model_keeps_thinking_off(
         lambda *_args, **_kwargs: None,
     )
 
-    _env, args, warning = creds.pi_native_provider_launch(tmp_path / "pi-agent", provider, "high")
+    _env, args, warning, _threshold = creds.pi_native_provider_launch(
+        tmp_path / "pi-agent", provider, "high"
+    )
 
     assert args.count("--thinking") == 1
     assert args[-2:] == ["--thinking", "off"]
@@ -1010,7 +1022,7 @@ def test_pi_native_provider_launch_namespaced_model_uses_qualified_arg(
         auth_header=False,
     )
     agent_dir = tmp_path / "pi-agent"
-    _env, args, _warning = creds.pi_native_provider_launch(agent_dir, provider)
+    _env, args, _warning, _threshold = creds.pi_native_provider_launch(agent_dir, provider)
 
     assert args == ["--provider", "omnigent", "--model", "omnigent/moonshotai/kimi-k2.5"]
 
@@ -1034,7 +1046,7 @@ def test_provider_launch_accepts_provider_qualified_selection(tmp_path: Path) ->
         },
     )
 
-    _, args, _ = creds.pi_native_provider_launch(
+    _, args, _, _threshold = creds.pi_native_provider_launch(
         tmp_path / "pi-agent",
         provider,
         selection="omnigent-openai/gpt-5.6-sol",
@@ -1085,7 +1097,7 @@ def test_inline_databricks_gateway_selection_follows_the_model_across_discovery(
 
     provider = creds.resolve_pi_native_provider(model=selection, config_loader=lambda: config)
     assert provider is not None
-    _, args, _ = creds.pi_native_provider_launch(
+    _, args, _, _threshold = creds.pi_native_provider_launch(
         tmp_path / "pi-agent", provider, selection=selection
     )
 
@@ -1114,7 +1126,7 @@ def test_inline_databricks_gateway_default_launches_with_thinking_off(
 
     provider = creds.resolve_pi_native_provider(config_loader=_databricks_openai_gateway_config)
     assert provider is not None
-    _, args, effort_warning = creds.pi_native_provider_launch(
+    _, args, effort_warning, _threshold = creds.pi_native_provider_launch(
         tmp_path / "pi-agent", provider, reasoning_effort="high"
     )
 
@@ -1330,7 +1342,7 @@ def test_pi_native_model_options_default_row_is_the_no_selection_launch(
     options = creds.pi_native_model_options(config_loader=lambda: config)
     provider = creds.resolve_pi_native_provider(config_loader=lambda: config)
     assert provider is not None
-    _, args, _ = creds.pi_native_provider_launch(tmp_path / "pi-agent", provider)
+    _, args, _, _threshold = creds.pi_native_provider_launch(tmp_path / "pi-agent", provider)
 
     assert [o["id"] for o in options if o["isDefault"]] == ["omnigent-openai/system.ai.gpt-5"]
     assert args[:4] == ["--provider", "omnigent-openai", "--model", "system.ai.gpt-5"]
@@ -3008,7 +3020,9 @@ def test_uncataloged_model_launch_arg_matches_rendered_provider(
         lambda *_args, **_kwargs: None,
     )
 
-    _env, args, _warning = creds.pi_native_provider_launch(tmp_path / "pi-agent", provider)
+    _env, args, _warning, _threshold = creds.pi_native_provider_launch(
+        tmp_path / "pi-agent", provider
+    )
 
     assert args == [
         "--provider",

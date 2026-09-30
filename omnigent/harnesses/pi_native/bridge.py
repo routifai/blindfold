@@ -485,6 +485,36 @@ def inject_relay_into_config(bridge_dir: Path, relay_url: str, relay_token: str)
     return True
 
 
+def set_rollover_threshold_tokens(bridge_dir: Path, threshold_tokens: int) -> bool:
+    """Rewrite ``rollover.thresholdTokens`` in an already-written ``config.json``.
+
+    ``write_extension_files`` runs before the provider/model (and its context
+    window) are resolved, so its own ``thresholdTokens`` is window-blind. Once
+    the launch resolves a model window, the caller re-derives the threshold
+    from it and patches it in here — one source of truth
+    (``resolve_rollover_threshold``) instead of Pi's settings and the
+    extension disagreeing on when to compact.
+
+    :param bridge_dir: Native Pi bridge directory.
+    :param threshold_tokens: The window-derived threshold to write.
+    :returns: ``True`` when the config was rewritten; ``False`` when the
+        config is missing/unreadable or has no ``rollover`` block (non-rollover
+        session — nothing to patch).
+    """
+    path = config_path(bridge_dir)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(payload, dict) or not isinstance(payload.get("rollover"), dict):
+        return False
+    if payload["rollover"].get("thresholdTokens") == threshold_tokens:
+        return False
+    payload["rollover"]["thresholdTokens"] = threshold_tokens
+    _atomic_json(path, payload)
+    return True
+
+
 def _extension_source() -> str:
     """
     Return the packaged Pi extension source.

@@ -2518,6 +2518,7 @@ async def _auto_create_pi_terminal(
         pi_native_env_unset,
         pi_session_dir,
         prepare_bridge_dir,
+        set_rollover_threshold_tokens,
         write_extension_files,
     )
     from omnigent.harnesses.pi_native.bridge import extension_path as pi_extension_path
@@ -2662,6 +2663,10 @@ async def _auto_create_pi_terminal(
             )
             pi_env.update(launch.env)
             pi_args.extend(launch.args)
+            # The extension config was written before the model's window was
+            # known; patch in the threshold Pi's own settings use.
+            if launch.rollover_threshold_tokens is not None:
+                set_rollover_threshold_tokens(bridge_dir, launch.rollover_threshold_tokens)
             # An unroutable model leaves Pi unable to select it, which looks
             # like a silent hang; prefer that notice over the credential one
             # since it names the model the user actually picked.

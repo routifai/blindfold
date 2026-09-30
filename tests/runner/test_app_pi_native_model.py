@@ -487,3 +487,96 @@ async def test_auto_create_pi_terminal_rollover_gets_recall_tool_and_instruction
         )
     )
     assert "session_history" in {tool["name"] for tool in config["tools"]}
+
+
+@pytest.mark.asyncio
+async def test_auto_create_pi_terminal_patches_extension_threshold_from_model_window(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The extension's ``thresholdTokens`` matches Pi's own window-derived threshold.
+
+    ``write_extension_files`` runs before the provider/model resolve, so its
+    default ``thresholdTokens`` is window-blind (100k). Once
+    ``pi_native_provider_launch`` resolves the model's context window, the
+    orchestration must patch the extension config to the SAME window-derived
+    value it hands to Pi's own ``compaction.reserveTokens`` — one source of
+    truth (``resolve_rollover_threshold``) instead of the two disagreeing on
+    when to compact.
+    """
+    import omnigent.harnesses.pi_native.bridge as pi_bridge
+    import omnigent.harnesses.pi_native.credentials as creds
+    from omnigent.context.labels import CONTEXT_MODE_LABEL, ROLLOVER_MODE_VALUE
+
+    session_id = "conv_pi_rollover_threshold"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(pi_bridge, "_BRIDGE_ROOT", tmp_path / "pi-native")
+    monkeypatch.setenv("OMNIGENT_RUNNER_WORKSPACE", str(workspace))
+    monkeypatch.setenv("RUNNER_SERVER_URL", "http://ap.example")
+    monkeypatch.setattr("omnigent.runner._entry._make_auth_token_factory", lambda: None)
+    monkeypatch.setattr(
+        "omnigent.harnesses.pi_native.main.resolve_pi_executable", lambda: "/usr/bin/pi"
+    )
+    # A 200k-window model with no explicit rollover_at_tokens label: the
+    # window-derived default (60% of 200k = 120k) is the only place this
+    # number can come from.
+    provider = creds.PiProviderConfig(
+        provider_id="omnigent",
+        base_url="https://api.anthropic.com",
+        api="anthropic-messages",
+        model="claude-sonnet-4-6",
+        api_key="sk-secret",
+        auth_header=False,
+        extra_models=[{"id": "claude-sonnet-4-6", "contextWindow": 200_000}],
+    )
+    monkeypatch.setattr(
+        creds, "resolve_pi_native_provider", lambda *, model=None, config_loader=None: provider
+    )
+
+    class _SnapshotClient:
+        async def get(
+            self, url: str, *, timeout: float, params: dict[str, str] | None = None
+        ) -> httpx.Response:
+            del url, timeout
+            return httpx.Response(
+                200,
+                json={
+                    "workspace": str(workspace),
+                    "terminal_launch_args": None,
+                    "external_session_id": None,
+                    "labels": {CONTEXT_MODE_LABEL: ROLLOVER_MODE_VALUE},
+                },
+                request=httpx.Request("GET", f"/v1/sessions/{session_id}"),
+            )
+
+    class _FakeResourceRegistry:
+        terminal_registry = None
+
+        async def launch_required_terminal(
+            self, session_id: str, terminal_name: str, session_key: str, spec: Any, **_: Any
+        ) -> SessionResourceView:
+            del terminal_name, session_key, spec
+            return SessionResourceView(
+                id="terminal_pi_main", type="terminal", session_id=session_id, name="pi"
+            )
+
+    spec = AgentSpec(
+        spec_version=1,
+        name="pi-rollover-threshold",
+        executor=ExecutorSpec(type="omnigent", config={"harness": "pi-native"}),
+    )
+    await _auto_create_pi_terminal(
+        session_id,
+        _FakeResourceRegistry(),  # type: ignore[arg-type]
+        lambda _sid, _event: None,
+        server_client=_SnapshotClient(),  # type: ignore[arg-type]
+        agent_spec=spec,
+    )
+
+    config = json.loads(
+        pi_bridge.config_path(pi_bridge.bridge_dir_for_session_id(session_id)).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert config["rollover"]["thresholdTokens"] == 120_000

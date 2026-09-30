@@ -1939,11 +1939,18 @@ class PiNativeLaunch(NamedTuple):
     :param args: ``--provider``/``--model``/``--thinking`` args to append.
     :param effort_warning: User-facing notice when the requested effort could
         not be honoured; ``None`` otherwise.
+    :param rollover_threshold_tokens: The window-derived rollover threshold
+        computed here (see ``resolve_rollover_threshold``), when the session
+        is a rollover session with a known model context window; ``None``
+        otherwise. Callers patch this into the already-written pi-native
+        extension config (``bridge.set_rollover_threshold_tokens``) so the
+        JS extension compacts at the same point Pi's own settings do.
     """
 
     env: dict[str, str]
     args: list[str]
     effort_warning: str | None = None
+    rollover_threshold_tokens: int | None = None
 
 
 def _model_context_window(
@@ -2042,6 +2049,7 @@ def pi_native_provider_launch(
         overlay["enabledModels"] = enabled_refs
     from omnigent.context.labels import is_rollover
 
+    rollover_threshold_tokens: int | None = None
     if is_rollover(labels):
         from omnigent.context.rollover import resolve_keep_tokens, resolve_rollover_threshold
 
@@ -2054,8 +2062,10 @@ def pi_native_provider_launch(
         }
         context_window = _model_context_window(rendered, model_provider_id, selected_model)
         if context_window is not None:
-            threshold = resolve_rollover_threshold(labels, model_window=context_window)
-            compaction["reserveTokens"] = max(context_window - threshold, 1)
+            rollover_threshold_tokens = resolve_rollover_threshold(
+                labels, model_window=context_window
+            )
+            compaction["reserveTokens"] = max(context_window - rollover_threshold_tokens, 1)
         overlay["compaction"] = compaction
     prepare_managed_pi_agent_dir(agent_dir, overlay=overlay)
     env = {PI_CODING_AGENT_DIR_ENV_VAR: str(agent_dir)}
@@ -2097,4 +2107,9 @@ def pi_native_provider_launch(
             _LOGGER.warning("pi-native: %s", effort_warning)
     elif thinking is not None:
         args.extend(["--thinking", thinking])
-    return PiNativeLaunch(env=env, args=args, effort_warning=effort_warning)
+    return PiNativeLaunch(
+        env=env,
+        args=args,
+        effort_warning=effort_warning,
+        rollover_threshold_tokens=rollover_threshold_tokens,
+    )
