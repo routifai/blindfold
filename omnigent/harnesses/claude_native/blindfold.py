@@ -53,7 +53,6 @@ import asyncio
 import contextlib
 import json
 import logging
-import os
 import shutil
 import tempfile
 import time
@@ -289,7 +288,9 @@ async def _run_one_shot(
                     handle.write(json.dumps(record, separators=(",", ":")) + "\n")
             args += ["--resume", fresh_external_id]
 
-    env = dict(os.environ)
+    from omnigent.context_assembly.blindfold import one_shot_env
+
+    env = one_shot_env(keep=frozenset({"ANTHROPIC_API_KEY"}))
     env["CLAUDE_CONFIG_DIR"] = str(fresh_config_dir)
     # No CLAUDE.md files (including ones Claude Code attaches when a tool reads
     # a nested directory) and no auto-memory: only the assembler's context.

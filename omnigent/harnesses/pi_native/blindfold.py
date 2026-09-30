@@ -34,7 +34,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-import os
 import shutil
 import tempfile
 import time
@@ -234,7 +233,9 @@ async def _run_one_shot(
 
     args.append(new_message_text)
 
-    env = dict(os.environ)
+    from omnigent.context_assembly.blindfold import one_shot_env
+
+    env = one_shot_env(keep=frozenset({"OPENROUTER_API_KEY"}))
     env["PI_CODING_AGENT_DIR"] = str(fresh_config_dir)
     resolved_command = shutil.which(command) or command
 

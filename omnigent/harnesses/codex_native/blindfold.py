@@ -296,7 +296,9 @@ async def _run_one_shot(
     if model:
         args += ["--model", model]
 
-    env = dict(os.environ)
+    from omnigent.context_assembly.blindfold import one_shot_env
+
+    env = one_shot_env(keep=frozenset())
     env["CODEX_HOME"] = str(fresh_codex_home)
     resolved_command = shutil.which(command) or command
 

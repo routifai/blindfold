@@ -52,6 +52,26 @@ _REQUEST_TIMEOUT_SECONDS = 10.0
 _RECENT_ITEMS_FETCH_LIMIT = 300
 
 
+_SECRET_SUFFIXES = ("_API_KEY", "_TOKEN", "_SECRET", "_SECRET_KEY", "_PASSWORD", "_AUTH_TOKEN")
+
+
+def one_shot_env(*, keep: frozenset[str] = frozenset()) -> dict[str, str]:
+    """The environment for a blindfolded one-shot CLI: the runner's, minus secrets.
+
+    The model can read its own environment with shell tools (``env``), so a
+    one-shot only gets the one credential its CLI needs.
+
+    :param keep: Secret variable names this CLI needs, e.g.
+        ``frozenset({"ANTHROPIC_API_KEY"})``.
+    :returns: A copy of ``os.environ`` without other secret-looking variables.
+    """
+    return {
+        name: value
+        for name, value in os.environ.items()
+        if name in keep or not name.upper().endswith(_SECRET_SUFFIXES)
+    }
+
+
 def is_blindfolded(labels: dict[str, str] | None) -> bool:
     """Whether *labels* mark a session for blindfold-mode context assembly.
 

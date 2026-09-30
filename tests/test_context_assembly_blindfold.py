@@ -274,3 +274,20 @@ class TestServerConnectionFile:
 
         (tmp_path / _CONNECTION_FILE).write_text("not json", encoding="utf-8")
         assert read_server_connection(tmp_path) is None
+
+
+class TestOneShotEnv:
+    def test_keeps_only_the_listed_secret(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from omnigent.context_assembly.blindfold import one_shot_env
+
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "a")
+        monkeypatch.setenv("OPENAI_API_KEY", "b")
+        monkeypatch.setenv("OPENROUTER_API_KEY", "c")
+        monkeypatch.setenv("GITHUB_TOKEN", "d")
+        monkeypatch.setenv("PATH", "/usr/bin")
+        env = one_shot_env(keep=frozenset({"ANTHROPIC_API_KEY"}))
+        assert env["ANTHROPIC_API_KEY"] == "a"
+        assert "OPENAI_API_KEY" not in env
+        assert "OPENROUTER_API_KEY" not in env
+        assert "GITHUB_TOKEN" not in env
+        assert env["PATH"] == "/usr/bin"
