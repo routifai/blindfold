@@ -29,7 +29,8 @@ from omnigent.context_assembly import (
 from omnigent.context_assembly import (
     observe as _observe_turn,
 )
-from omnigent.context_assembly.labels import HISTORY_POLICY_LABEL, HISTORY_POLICY_NONE
+from omnigent.context_assembly.assembler import _parse_max_messages
+from omnigent.context_assembly.labels import MAX_MESSAGES_LABEL
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.runtime.agent_cache import AgentCache
 from omnigent.runtime.prompt import raw_author_instructions
@@ -149,10 +150,11 @@ def register_context_routes(
 
         instructions = await _agent_instructions_for(conv)
 
-        # The "none" test-hook policy never looks at the record (see
+        # A 1-message window never looks at the record (see
         # assembler.select_history_refs) — skip the fetch entirely so a
         # "blind" proving-test turn costs one DB round trip, not two.
-        if body.session.labels.get(HISTORY_POLICY_LABEL) == HISTORY_POLICY_NONE:
+        max_messages = _parse_max_messages(body.session.labels.get(MAX_MESSAGES_LABEL))
+        if max_messages <= 1:
             items: list[dict] = []
         else:
             items = await _fetch_recent_items(session_id)

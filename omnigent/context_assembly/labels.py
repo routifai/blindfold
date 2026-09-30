@@ -1,15 +1,12 @@
 """Session-label keys the context assembler reacts to.
 
 ``omnigent.blindfold`` selects the lifecycle (fresh CLI session every turn,
-vendor memory off — see ``omnigent/context_assembly/README.md`` and the
-per-harness wiring in ``omnigent/runner/native/orchestration.py``).
+vendor memory off — see the per-harness wiring in
+``omnigent/runner/native/orchestration.py``).
 
-The ``omnigent.context.*`` keys are **test hooks only**: v0.2 ships one
-default policy (system text from the agent's instructions, empty memory,
-most-recent-items-that-fit history). These labels let a test pin a
-deterministic policy instead of depending on real conversation length or a
-real memory store, so the proving tests in the contract's §9 are
-reproducible. Production callers should never need to set them.
+``omnigent.context.*`` configures the v0.2 default policy. It ships one knob,
+``max_messages``, plus a memory-fixture test hook; production callers can
+leave both unset and get the server default.
 """
 
 from __future__ import annotations
@@ -18,11 +15,13 @@ from __future__ import annotations
 # contract: fresh CLI session every turn, vendor memory off, fail closed.
 BLINDFOLD_LABEL = "omnigent.blindfold"
 
-# Test hook. "none" -> history carries only the new message. "recent"
-# (default when absent) -> the most recent items that fit the budget.
-HISTORY_POLICY_LABEL = "omnigent.context.history"
-HISTORY_POLICY_NONE = "none"
-HISTORY_POLICY_RECENT = "recent"
+# History window size: the last N *messages* (user + assistant `message`
+# items; a message's function_call/function_call_output/native_tool/reasoning
+# items ride along attached to it, uncounted), the last one always being the
+# new user message. Unset/invalid -> DEFAULT_MAX_MESSAGES. No summarization
+# or compaction in v0.2 — older messages are simply dropped.
+MAX_MESSAGES_LABEL = "omnigent.context.max_messages"
+DEFAULT_MAX_MESSAGES = 20
 
 # Test hook. When set, memory.items carries exactly one synthesized
 # {"kind": "fact", "text": <value>} item instead of the real (currently

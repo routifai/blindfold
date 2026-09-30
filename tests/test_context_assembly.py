@@ -27,7 +27,8 @@ from omnigent.context_assembly import (
 )
 from omnigent.context_assembly.labels import (
     BLINDFOLD_LABEL,
-    HISTORY_POLICY_LABEL,
+    DEFAULT_MAX_MESSAGES,
+    MAX_MESSAGES_LABEL,
     MEMORY_FIXTURE_LABEL,
 )
 
@@ -56,6 +57,42 @@ def _history(n: int, *, word_count: int = 1) -> list[dict[str, Any]]:
     return items
 
 
+def _turn_with_tool_call(prefix: str, *, response_id: str) -> list[dict[str, Any]]:
+    """One assistant turn: a function_call + its output, then the assistant
+    text message — all sharing *response_id*, matching real record order
+    (tool round-trip precedes the final assistant message it belongs to)."""
+    return [
+        {
+            "id": f"{prefix}_call",
+            "response_id": response_id,
+            "type": "function_call",
+            "status": "completed",
+            "created_at": 0,
+            "name": "read_file",
+            "call_id": f"{prefix}_call_id",
+            "arguments": "{}",
+        },
+        {
+            "id": f"{prefix}_output",
+            "response_id": response_id,
+            "type": "function_call_output",
+            "status": "completed",
+            "created_at": 0,
+            "call_id": f"{prefix}_call_id",
+            "output": "file contents",
+        },
+        {
+            "id": f"{prefix}_msg",
+            "response_id": response_id,
+            "type": "message",
+            "status": "completed",
+            "created_at": 0,
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "done"}],
+        },
+    ]
+
+
 def _request(
     *,
     new_item_id: str,
@@ -79,55 +116,88 @@ def _request(
 
 
 class TestSelectHistoryRefs:
-    def test_none_policy_returns_only_new_item(self) -> None:
+    def test_max_messages_one_returns_only_new_item(self) -> None:
         items = _history(10)
         refs, over = select_history_refs(
-            items, new_item_id="item_9", policy="none", max_input_tokens=24_000, model="claude-haiku-4-5"
+            items, new_item_id="item_9", max_messages=1, max_input_tokens=24_000, model="claude-haiku-4-5"
         )
         assert refs == ["item_9"]
         assert over is False
 
-    def test_recent_policy_includes_everything_when_budget_is_generous(self) -> None:
+    def test_max_messages_covers_everything_when_the_window_is_bigger_than_history(self) -> None:
         items = _history(10)
         refs, over = select_history_refs(
-            items, new_item_id="item_9", policy="recent", max_input_tokens=24_000, model="claude-haiku-4-5"
+            items, new_item_id="item_9", max_messages=20, max_input_tokens=24_000, model="claude-haiku-4-5"
         )
         assert refs == [f"item_{i}" for i in range(10)]
         assert over is False
 
-    def test_recent_policy_drops_oldest_first_under_a_tight_budget(self) -> None:
-        # Each item is heavy (50 words, ~70 tokens); a budget that fits the
+    def test_max_messages_keeps_the_last_n_messages_ending_with_the_anchor(self) -> None:
+        items = _history(10)
+        refs, _ = select_history_refs(
+            items, new_item_id="item_9", max_messages=3, max_input_tokens=24_000, model="claude-haiku-4-5"
+        )
+        assert refs == ["item_7", "item_8", "item_9"]
+
+    def test_tool_calls_and_results_ride_with_their_assistant_message(self) -> None:
+        # user -> [assistant turn with a tool round-trip] -> new user message.
+        # max_messages=2 keeps the last 2 *messages* (the tool-turn's assistant
+        # message + the new one), which must pull the tool call/output with it.
+        items = [
+            _message_item("u0", role="user", text="hi", created_at=0),
+            *_turn_with_tool_call("t0", response_id="resp_t0"),
+            _message_item("u1", role="user", text="new message", created_at=10),
+        ]
+        refs, _ = select_history_refs(
+            items, new_item_id="u1", max_messages=2, max_input_tokens=24_000, model="claude-haiku-4-5"
+        )
+        assert refs == ["t0_call", "t0_output", "t0_msg", "u1"]
+
+    def test_tool_round_trip_is_dropped_as_a_whole_group_when_out_of_window(self) -> None:
+        items = [
+            _message_item("u0", role="user", text="hi", created_at=0),
+            *_turn_with_tool_call("t0", response_id="resp_t0"),
+            _message_item("u1", role="user", text="new message", created_at=10),
+        ]
+        # Window of 1 -> only the new message; the whole earlier tool group
+        # (call + output + its message) is dropped together, never split.
+        refs, _ = select_history_refs(
+            items, new_item_id="u1", max_messages=1, max_input_tokens=24_000, model="claude-haiku-4-5"
+        )
+        assert refs == ["u1"]
+
+    def test_budget_drops_whole_message_groups_oldest_first(self) -> None:
+        # Each message is heavy (50 words, ~70 tokens); a budget that fits the
         # anchor alone but not all 20 keeps only a recent handful.
         items = _history(20, word_count=50)
         refs, over = select_history_refs(
-            items, new_item_id="item_19", policy="recent", max_input_tokens=200, model="claude-haiku-4-5"
+            items, new_item_id="item_19", max_messages=20, max_input_tokens=200, model="claude-haiku-4-5"
         )
         assert refs[-1] == "item_19"
         assert len(refs) < 20
-        # Whatever was kept must be a contiguous, in-order suffix of the record.
         kept_indices = [int(r.split("_")[1]) for r in refs]
         assert kept_indices == list(range(kept_indices[0], 20))
         assert over is False
 
-    def test_new_item_always_included_even_alone_over_budget(self) -> None:
+    def test_new_message_group_always_included_even_alone_over_budget(self) -> None:
         items = _history(5, word_count=5000)
         refs, over = select_history_refs(
-            items, new_item_id="item_4", policy="recent", max_input_tokens=1, model="claude-haiku-4-5"
+            items, new_item_id="item_4", max_messages=5, max_input_tokens=1, model="claude-haiku-4-5"
         )
         assert refs == ["item_4"]
         assert over is True
 
-    def test_unknown_policy_falls_back_to_recent(self) -> None:
+    def test_non_positive_max_messages_is_clamped_to_one(self) -> None:
         items = _history(4)
         refs, _ = select_history_refs(
-            items, new_item_id="item_3", policy="bogus", max_input_tokens=24_000, model="claude-haiku-4-5"
+            items, new_item_id="item_3", max_messages=0, max_input_tokens=24_000, model="claude-haiku-4-5"
         )
-        assert refs == [f"item_{i}" for i in range(4)]
+        assert refs == ["item_3"]
 
     def test_missing_anchor_selects_nothing(self) -> None:
         items = _history(3)
         refs, over = select_history_refs(
-            items, new_item_id="item_does_not_exist", policy="recent", max_input_tokens=24_000, model="x"
+            items, new_item_id="item_does_not_exist", max_messages=20, max_input_tokens=24_000, model="x"
         )
         assert refs == []
         assert over is False
@@ -154,10 +224,12 @@ class TestAssembleDefaultPolicy:
         assert response.memory.items == []
         assert response.audit.memory_items == 0
 
-    def test_history_defaults_to_recent_and_ends_with_new_message(self) -> None:
+    def test_history_defaults_to_server_default_window(self) -> None:
         items = _history(6)
         request = _request(new_item_id="item_5")
         response = assemble(request, items_provider=lambda: items, agent_instructions="x")
+        # DEFAULT_MAX_MESSAGES (20) comfortably covers 6 messages.
+        assert DEFAULT_MAX_MESSAGES > 6
         assert [ref.ref for ref in response.history.items] == [f"item_{i}" for i in range(6)]
         assert response.history.summary is None
         assert response.audit.history_items == 6
@@ -172,28 +244,45 @@ class TestAssembleDefaultPolicy:
 
 
 class TestTestHookLabels:
-    def test_history_none_label_blinds_the_turn(self) -> None:
+    def test_max_messages_one_blinds_the_turn(self) -> None:
         items = _history(6)
-        request = _request(new_item_id="item_5", labels={HISTORY_POLICY_LABEL: "none"})
+        request = _request(new_item_id="item_5", labels={MAX_MESSAGES_LABEL: "1"})
         response = assemble(request, items_provider=lambda: items, agent_instructions="x")
         assert [ref.ref for ref in response.history.items] == ["item_5"]
 
-    def test_history_none_label_never_calls_items_provider(self) -> None:
-        # The "none" policy's anchor is the request itself — fetching the
+    def test_max_messages_one_never_calls_items_provider(self) -> None:
+        # A 1-message window's anchor is the request itself — fetching the
         # full record would be wasted I/O the contract doesn't require.
-        request = _request(new_item_id="item_5", labels={HISTORY_POLICY_LABEL: "none"})
+        request = _request(new_item_id="item_5", labels={MAX_MESSAGES_LABEL: "1"})
 
         def _boom() -> list[dict[str, Any]]:
-            raise AssertionError("items_provider should not be called for history=none")
+            raise AssertionError("items_provider should not be called for max_messages=1")
 
         response = assemble(request, items_provider=_boom, agent_instructions="x")
         assert [ref.ref for ref in response.history.items] == ["item_5"]
+
+    def test_max_messages_three_quotes_an_injected_earlier_message(self) -> None:
+        # The E2E "injected" shape: codeword message, its reply, new message.
+        items = [
+            _message_item("codeword", role="user", text="my codeword is PAPAYA-42", created_at=0),
+            _message_item("reply", role="assistant", text="Got it.", created_at=1),
+            _message_item("ask", role="user", text="what was the last message I sent?", created_at=2),
+        ]
+        request = _request(new_item_id="ask", labels={MAX_MESSAGES_LABEL: "3"})
+        response = assemble(request, items_provider=lambda: items, agent_instructions="x")
+        assert [ref.ref for ref in response.history.items] == ["codeword", "reply", "ask"]
+
+    def test_invalid_max_messages_label_falls_back_to_the_default(self) -> None:
+        items = _history(6)
+        request = _request(new_item_id="item_5", labels={MAX_MESSAGES_LABEL: "not-a-number"})
+        response = assemble(request, items_provider=lambda: items, agent_instructions="x")
+        assert len(response.history.items) == 6
 
     def test_memory_fixture_label_injects_one_fact(self) -> None:
         request = _request(
             new_item_id="item_0",
             labels={
-                HISTORY_POLICY_LABEL: "none",
+                MAX_MESSAGES_LABEL: "1",
                 MEMORY_FIXTURE_LABEL: "The user's codeword is MANGO-7",
             },
         )
@@ -207,7 +296,7 @@ class TestTestHookLabels:
     def test_blindfold_label_alone_does_not_change_the_default_policy(self) -> None:
         # omnigent.blindfold selects the CLI lifecycle, not the assembly
         # policy — a blindfolded session with no test-hook labels still gets
-        # the ordinary "recent" default.
+        # the ordinary server-default window.
         items = _history(4)
         request = _request(new_item_id="item_3", labels={BLINDFOLD_LABEL: "true"})
         response = assemble(request, items_provider=lambda: items, agent_instructions="x")
@@ -223,7 +312,7 @@ class TestRenderSystemText:
     def test_memory_is_appended_as_a_tagged_block(self) -> None:
         request = _request(
             new_item_id="item_0",
-            labels={HISTORY_POLICY_LABEL: "none", MEMORY_FIXTURE_LABEL: "Prefers short answers."},
+            labels={MAX_MESSAGES_LABEL: "1", MEMORY_FIXTURE_LABEL: "Prefers short answers."},
         )
         response = assemble(request, items_provider=lambda: [], agent_instructions="Rules.")
         rendered = render_system_text(response)
@@ -234,7 +323,7 @@ class TestRenderSystemText:
     def test_memory_block_stands_alone_with_no_system_text(self) -> None:
         request = _request(
             new_item_id="item_0",
-            labels={HISTORY_POLICY_LABEL: "none", MEMORY_FIXTURE_LABEL: "fact"},
+            labels={MAX_MESSAGES_LABEL: "1", MEMORY_FIXTURE_LABEL: "fact"},
         )
         response = assemble(request, items_provider=lambda: [], agent_instructions=None)
         rendered = render_system_text(response)

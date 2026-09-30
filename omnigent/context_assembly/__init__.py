@@ -16,9 +16,8 @@ from omnigent.context_assembly.assembler import (
 )
 from omnigent.context_assembly.labels import (
     BLINDFOLD_LABEL,
-    HISTORY_POLICY_LABEL,
-    HISTORY_POLICY_NONE,
-    HISTORY_POLICY_RECENT,
+    DEFAULT_MAX_MESSAGES,
+    MAX_MESSAGES_LABEL,
     MEMORY_FIXTURE_LABEL,
 )
 from omnigent.context_assembly.models import (
@@ -42,9 +41,8 @@ from omnigent.context_assembly.models import (
 
 __all__ = [
     "BLINDFOLD_LABEL",
-    "HISTORY_POLICY_LABEL",
-    "HISTORY_POLICY_NONE",
-    "HISTORY_POLICY_RECENT",
+    "DEFAULT_MAX_MESSAGES",
+    "MAX_MESSAGES_LABEL",
     "MEMORY_FIXTURE_LABEL",
     "AssembleAudit",
     "AssembleRequest",

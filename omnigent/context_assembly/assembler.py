@@ -11,9 +11,12 @@ Default policy:
 - ``system.text``: the agent's own instructions, unchanged (``mode:
   "append"`` — the CLI keeps its base prompt).
 - ``memory.items``: ``[]`` (no memory store exists yet).
-- ``history.items``: the most recent record items that fit
-  ``budget.max_input_tokens``, oldest dropped first, always ending with the
-  new message. No summary.
+- ``history.items``: the last ``max_messages`` messages (user + assistant
+  ``message`` items — a message's attached tool-call/tool-result items ride
+  along, uncounted), oldest dropped first, always ending with the new
+  message. ``budget.max_input_tokens`` is still a hard ceiling on top of that
+  window. No summary, no compaction — v0.2 keeps this minimal on purpose;
+  summarization is reserved for a later version (contract §5/"Reserved").
 
 Session labels can override the policy for tests (see ``labels.py``); this
 is the only branching in the default policy.
@@ -29,9 +32,8 @@ from collections.abc import Callable
 from typing import Any
 
 from omnigent.context_assembly.labels import (
-    HISTORY_POLICY_LABEL,
-    HISTORY_POLICY_NONE,
-    HISTORY_POLICY_RECENT,
+    DEFAULT_MAX_MESSAGES,
+    MAX_MESSAGES_LABEL,
     MEMORY_FIXTURE_LABEL,
 )
 from omnigent.context_assembly.models import (
@@ -50,11 +52,10 @@ from omnigent.runtime.compaction import count_tokens
 _logger = logging.getLogger(__name__)
 
 # A pathological session (tens of thousands of items) would make the
-# backward budget scan below O(n^2) in `count_tokens` calls; the contract's
-# own p95/timeout budget (500ms / 2s) means we should never spend that on a
-# single turn. Recent items overwhelmingly decide the outcome anyway, so
-# scanning further back than this can't change which items fit the budget
-# for any realistic max_input_tokens.
+# group-boundary scan below expensive; the contract's own p95/timeout budget
+# (500ms / 2s) means we should never spend that on a single turn. The window
+# is message-count bounded anyway, so scanning further back than this can't
+# change the outcome for any realistic max_messages.
 _MAX_SCAN_ITEMS = 2000
 
 ItemsProvider = Callable[[], list[dict[str, Any]]]
@@ -73,15 +74,38 @@ def _item_by_id(items: list[dict[str, Any]], item_id: str) -> dict[str, Any] | N
     return None
 
 
+def _parse_max_messages(raw: str | None) -> int:
+    """Parse the ``omnigent.context.max_messages`` label, falling back safely.
+
+    :param raw: The label's string value, or ``None`` when unset.
+    :returns: A positive int — the parsed value, or
+        :data:`DEFAULT_MAX_MESSAGES` when unset, non-numeric, or non-positive.
+    """
+    if raw is None:
+        return DEFAULT_MAX_MESSAGES
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_MAX_MESSAGES
+    return value if value > 0 else DEFAULT_MAX_MESSAGES
+
+
 def select_history_refs(
     items: list[dict[str, Any]],
     *,
     new_item_id: str,
-    policy: str,
+    max_messages: int,
     max_input_tokens: int,
     model: str,
 ) -> tuple[list[str], bool]:
     """Pick which item ids belong in ``history.items`` (contract §3/§6/§7).
+
+    The window counts only ``type == "message"`` items (user/assistant
+    turns); a message's ``function_call`` / ``function_call_output`` /
+    ``native_tool`` / ``reasoning`` items are not counted but ride along with
+    whichever message they precede in the record (tool calls/results always
+    appear before the assistant message they belong to in item order), so a
+    kept assistant message brings its whole tool round-trip with it.
 
     :param items: This session's record, chronological (oldest first), as
         flat ``ConversationItem.to_api_dict()`` dicts.
@@ -90,41 +114,54 @@ def select_history_refs(
         missing from *items* there is no safe anchor, so the selection is
         empty (fail-closed at the caller, which always has at least the raw
         new message to fall back to).
-    :param policy: ``"none"`` (only the new message) or ``"recent"`` (the
-        most recent items that fit the budget). Any other value is treated
-        as ``"recent"``, the contract's default.
-    :param max_input_tokens: Budget from the request (contract §2).
+    :param max_messages: How many messages the window keeps, the last always
+        being the new message. Clamped to at least 1.
+    :param max_input_tokens: A hard ceiling on top of the message window
+        (contract §2/§6.2) — whole message-groups are dropped, oldest first,
+        until the selection fits, but the new message's own group is never
+        dropped.
     :param model: Harness model id, used only to pick a tokenizer encoding
         for the estimate (contract §3's `estimated_tokens` is explicitly an
         estimate, not authoritative).
     :returns: ``(ordered item ids oldest-to-newest, still_over_budget)``.
-        ``still_over_budget`` is ``True`` only when the new message alone
-        already exceeds the budget — every other case fits by construction
-        (older items are dropped until it does).
+        ``still_over_budget`` is ``True`` only when the new message's own
+        group alone already exceeds the budget.
     """
     if new_item_id not in {item.get("id") for item in items}:
         return [], False
 
-    if policy == HISTORY_POLICY_NONE:
-        anchor = _item_by_id(items, new_item_id)
-        selected = [anchor] if anchor is not None else []
-        over = bool(selected) and count_tokens(selected, model) > max_input_tokens
-        return [new_item_id], over
-
-    # HISTORY_POLICY_RECENT (default): walk backward from the new message,
-    # keeping the most recent items that still fit — oldest dropped first.
     new_index = next(i for i, item in enumerate(items) if item.get("id") == new_item_id)
     window = items[: new_index + 1][-_MAX_SCAN_ITEMS:]
 
-    selected: list[dict[str, Any]] = []
-    for item in reversed(window):
-        candidate = [item, *selected]
-        # The new message itself (selected == []) is never dropped, even
-        # over budget — the contract's own proving test sends it alone.
-        if selected and count_tokens(candidate, model) > max_input_tokens:
-            break
-        selected = candidate
-    over_budget = count_tokens(selected, model) > max_input_tokens if selected else False
+    message_indices = [i for i, item in enumerate(window) if item.get("type") == "message"]
+    if not message_indices:
+        # The new item is always a message, so this only fires on malformed
+        # input; fail safe to the bare anchor rather than an empty selection.
+        return [new_item_id], False
+
+    kept_message_indices = message_indices[-max(max_messages, 1) :]
+    group_count = len(kept_message_indices)
+    start = min(kept_message_indices)
+    # Extend left over any items that precede the earliest kept message and
+    # share its response_id — its attached tool calls/results.
+    boundary_response_id = window[start].get("response_id")
+    while (
+        start > 0
+        and window[start - 1].get("type") != "message"
+        and window[start - 1].get("response_id") == boundary_response_id
+    ):
+        start -= 1
+    selected = window[start:]
+
+    # The budget is a hard ceiling on top of the message window: drop whole
+    # message-groups from the front until it fits, but never the new
+    # message's own (last) group.
+    while group_count > 1 and count_tokens(selected, model) > max_input_tokens:
+        first_message_pos = next(i for i, it in enumerate(selected) if it.get("type") == "message")
+        selected = selected[first_message_pos + 1 :]
+        group_count -= 1
+
+    over_budget = bool(selected) and count_tokens(selected, model) > max_input_tokens
     return [item["id"] for item in selected if isinstance(item.get("id"), str)], over_budget
 
 
@@ -161,9 +198,8 @@ def assemble(
     :param request: The turn's `AssembleRequest`.
     :param items_provider: Returns this session's full record, chronological,
         as flat item dicts. Called at most once. Kept as a callable (rather
-        than requiring the caller to always fetch) so a caller that only
-        needs the "none" test-hook policy can skip the fetch entirely — see
-        the lazy-call ordering below.
+        than requiring the caller to always fetch) so a 1-message window can
+        skip the fetch entirely — see the lazy-call ordering below.
     :param agent_instructions: The bound agent's raw instructions text (the
         default policy's `system.text`), or ``None`` for an agent with none.
     :returns: The `AssembleResponse`. Never raises for a well-formed request
@@ -173,7 +209,7 @@ def assemble(
         contract §7 — see :func:`assemble_or_fail_closed`.
     """
     labels = request.session.labels
-    history_policy = labels.get(HISTORY_POLICY_LABEL, HISTORY_POLICY_RECENT)
+    max_messages = _parse_max_messages(labels.get(MAX_MESSAGES_LABEL))
     memory_fixture = labels.get(MEMORY_FIXTURE_LABEL)
 
     system_text = agent_instructions or ""
@@ -189,9 +225,10 @@ def assemble(
         digest=_digest([item.model_dump() for item in memory_items]),
     )
 
-    # "none" never needs the full record — the anchor is the new item itself,
-    # which the request already names. Skip the (potentially large) fetch.
-    if history_policy == HISTORY_POLICY_NONE:
+    # A 1-message window is always just the new item itself (it has no
+    # attached tool calls yet — nothing has responded to it) — skip the
+    # (potentially large) record fetch.
+    if max_messages <= 1:
         refs: list[str] = [request.new_item_id]
         estimated_tokens = 0
     else:
@@ -199,7 +236,7 @@ def assemble(
         refs, _ = select_history_refs(
             items,
             new_item_id=request.new_item_id,
-            policy=history_policy,
+            max_messages=max_messages,
             max_input_tokens=request.budget.max_input_tokens,
             model=request.harness.model,
         )
