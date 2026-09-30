@@ -28,3 +28,10 @@ DEFAULT_MAX_MESSAGES = 20
 # always-empty) memory store. Lets a test prove the memory channel end to
 # end without standing up a memory store.
 MEMORY_FIXTURE_LABEL = "omnigent.context.memory_fixture"
+
+
+# Every label that configures blindfold mode for a session; a side chat forked
+# from a blindfolded session drops all of them.
+BLINDFOLD_SESSION_LABELS: frozenset[str] = frozenset(
+    {BLINDFOLD_LABEL, MAX_MESSAGES_LABEL, MEMORY_FIXTURE_LABEL}
+)

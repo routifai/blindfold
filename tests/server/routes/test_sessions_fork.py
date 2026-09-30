@@ -2455,3 +2455,34 @@ def test_fork_enforces_current_policy_before_creating_destination(
         assert not conv_store.fork_calls
         assert len(conv_store._convs) == 1
         assert file_store.files == original_files
+
+
+@pytest.mark.asyncio
+async def test_side_chat_from_blindfolded_session_uses_harness_memory() -> None:
+    """A side chat drops blindfold mode; a plain fork of the same session keeps it.
+
+    The long-running blindfolded session is a "super chat" whose context the
+    assembler owns; a side chat opened from it is an ordinary session where
+    the harness manages its own memory, so it must not inherit the switch.
+    """
+    blindfold_labels = {
+        "omnigent.blindfold": "true",
+        "omnigent.context.max_messages": "5",
+        "omnigent.context.memory_fixture": "fixture",
+    }
+    conv = _make_conversation(labels=dict(blindfold_labels))
+    conv_store = _ConversationStore(conversations={"e9f8f58523cec9a57d3bdf93be543e8c": conv})
+    client = TestClient(_build_app(conv_store))
+
+    side = client.post(
+        "/v1/sessions/e9f8f58523cec9a57d3bdf93be543e8c/fork", json={"side_chat": True}
+    )
+    plain = client.post("/v1/sessions/e9f8f58523cec9a57d3bdf93be543e8c/fork", json={})
+
+    assert side.status_code == 201, f"got {side.status_code}: {side.text}"
+    assert plain.status_code == 201, f"got {plain.status_code}: {plain.text}"
+    # The store applies the drop (covered by its own tests); the route must ask
+    # for it on the side chat only.
+    side_call, plain_call = conv_store.fork_calls
+    assert set(blindfold_labels) <= side_call["dropped_label_keys"]
+    assert not set(blindfold_labels) & plain_call["dropped_label_keys"]

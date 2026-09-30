@@ -3247,6 +3247,12 @@ def register_core_routes(
         # in generic native-wrapper UI state. Drop it whenever the agent changes.
         if switching_agent:
             dropped_label_keys_set.add(_CLAUDE_NATIVE_PERMISSION_MODE_LABEL_KEY)
+        # A side chat is a normal session with the harness's own memory, even
+        # when opened from a blindfolded one; a plain fork stays a true copy.
+        if body.side_chat:
+            from omnigent.context_assembly.labels import BLINDFOLD_SESSION_LABELS
+
+            dropped_label_keys_set |= BLINDFOLD_SESSION_LABELS
         dropped_label_keys: frozenset[str] = frozenset(dropped_label_keys_set)
 
         # DANGEROUS codex full-bypass. The source's bypass label is always
