@@ -8209,7 +8209,14 @@ async def _auto_create_claude_terminal(
     from omnigent.context.labels import is_rollover
 
     session_labels = session_init.snapshot.labels if session_init is not None else None
-    rollover = is_rollover(session_labels)
+    # Without a startup snapshot (e.g. a relaunch), read the labels live so a
+    # rollover session never launches without its setup.
+    rollover_labels: Mapping[str, str] | None = session_labels
+    if session_init is None:
+        rollover_labels = await _session_labels_for_runner_spawn(
+            server_client=server_client, session_id=session_id
+        )
+    rollover = is_rollover(rollover_labels)
     from omnigent.runtime.prompt import ROLLOVER_CONTEXT_INSTRUCTION
 
     started_at = time.monotonic()
@@ -8743,7 +8750,7 @@ async def _auto_create_claude_terminal(
                         or None
                     )
     # Size the rollover ceiling from the settled launch model's window.
-    compact_at_tokens = _rollover_compact_at(session_labels, model=launch_model)
+    compact_at_tokens = _rollover_compact_at(rollover_labels, model=launch_model)
     # Give an exact launch model (a Smart Routing pick is resolved before the
     # terminal exists) a spelling of its own in the picker, so a later
     # ``/model`` can return to it instead of stepping onto whatever the family

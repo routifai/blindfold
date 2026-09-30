@@ -1102,6 +1102,68 @@ async def test_auto_create_claude_terminal_passes_session_effort(
 
 
 @pytest.mark.asyncio
+async def test_auto_create_claude_terminal_without_snapshot_applies_rollover(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no startup snapshot, rollover setup comes from the live labels."""
+    monkeypatch.setattr(claude_native_bridge, "_TRUSTED_PARENT", tmp_path)
+    monkeypatch.setattr(claude_native_bridge, "_BRIDGE_ROOT", tmp_path / "root")
+    monkeypatch.setenv("RUNNER_SERVER_URL", "http://127.0.0.1:8000")
+
+    async def _no_op_forwarder(**kwargs: Any) -> None:
+        del kwargs
+
+    monkeypatch.setattr(
+        "omnigent.harnesses.claude_native.forwarder.supervise_forwarder",
+        _no_op_forwarder,
+    )
+    captured: dict[str, Any] = {}
+
+    class _FakeResourceRegistry:
+        terminal_registry = None
+
+        async def launch_required_terminal(
+            self,
+            *,
+            session_id: str,
+            terminal_name: str,
+            session_key: str,
+            spec: Any,
+            resource_role: str | None = None,
+            parent_os_env: Any = None,
+        ) -> SessionResourceView:
+            del terminal_name, session_key
+            captured["spec"] = spec
+            return SessionResourceView(
+                id="terminal_claude_main",
+                type="terminal",
+                session_id=session_id,
+                name="claude:main",
+                metadata={"terminal_name": "claude", "session_key": "main", "running": True},
+            )
+
+    def _handle_request(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"labels": {"omnigent.context.mode": "rollover"}})
+
+    fake_client = httpx.AsyncClient(
+        base_url="http://test-server", transport=httpx.MockTransport(_handle_request)
+    )
+    await _auto_create_claude_terminal(
+        "0a1b2c3d4e5f60718293a4b5c6d7e8f9",
+        _FakeResourceRegistry(),
+        lambda _sid, _evt: None,
+        server_client=fake_client,
+        session_init=None,
+    )
+    await fake_client.aclose()
+
+    args = captured["spec"].args
+    assert "mcp__omnigent__session_history" in args[args.index("--allowedTools") + 1]
+    assert "CLAUDE_CODE_AUTO_COMPACT_WINDOW" in captured["spec"].env
+
+
+@pytest.mark.asyncio
 async def test_auto_create_claude_terminal_rejects_windows_native_claude_under_wsl(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
