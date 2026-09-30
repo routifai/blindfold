@@ -471,3 +471,31 @@ async def test_checkpoint_marker_differs_from_the_summarizer_request() -> None:
     assert marker == _CHECKPOINT_MARKER_TEXT
     assert "not a message from the user" in marker
     assert _SUMMARY_REQUEST_TEXT != _CHECKPOINT_MARKER_TEXT
+
+
+@pytest.mark.asyncio
+async def test_summarizer_gets_one_transcript_message_not_live_turns() -> None:
+    """Live chat turns let a weak summarizer continue the chat; a single quoted
+    transcript (with the previous summary on top) can only be summarized."""
+    client = _ReturnsTextClient("ROLLING SUMMARY")
+    await build_rollover_item(
+        _turn(1) + _turn(2),
+        previous_summary="OLD SUMMARY",
+        keep_messages=2,
+        keep_tokens=_HUGE_TOKENS,
+        model="gpt-4o",
+        llm_client=client,
+    )
+    assert client.seen_messages is not None
+    user_texts = [
+        block["text"]
+        for message in client.seen_messages
+        if message.get("role") == "user"
+        for block in message["content"]
+        if isinstance(block, dict) and "text" in block
+    ]
+    transcript = user_texts[0]
+    assert "OLD SUMMARY" in transcript
+    assert "<conversation>" in transcript
+    assert not any(m.get("role") == "assistant" for m in client.seen_messages)
+    assert "automatically generated summary" in client.seen_instructions + transcript

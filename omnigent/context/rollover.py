@@ -271,6 +271,54 @@ def _items_for_summarizer(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return projected
 
 
+_TRANSCRIPT_OUTPUT_LIMIT = 2_000
+
+
+def _block_text(content: Any) -> str:
+    """Join the text blocks of a message's content."""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    return "\n".join(
+        str(block.get("text", "")) for block in content if isinstance(block, dict)
+    ).strip()
+
+
+def _transcript_message(
+    items: list[dict[str, Any]], previous_summary: str | None
+) -> dict[str, Any]:
+    """Render the window as one transcript message for the summarizer.
+
+    Sent as live chat turns, a weak model continues the conversation instead
+    of summarizing it; as quoted text it can only be summarized.
+    """
+    lines: list[str] = []
+    if previous_summary:
+        lines += [_SUMMARY_REQUEST_TEXT, "", previous_summary, ""]
+    lines.append("<conversation>")
+    for item in items:
+        kind = item.get("type")
+        if kind == "message":
+            role = str(item.get("role", "user")).upper()
+            lines.append(f"{role}: {_block_text(item.get('content'))}")
+        elif kind == "function_call":
+            lines.append(f"TOOL CALL {item.get('name')}: {item.get('arguments', '')}")
+        elif kind == "function_call_output":
+            output = str(item.get("output", ""))[:_TRANSCRIPT_OUTPUT_LIMIT]
+            lines.append(f"TOOL RESULT: {output}")
+    lines += [
+        "</conversation>",
+        "",
+        "Write the context checkpoint for the conversation above now.",
+    ]
+    return {
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "input_text", "text": "\n".join(lines)}],
+    }
+
+
 def _summary_exchange(
     summary_text: str, request_text: str = _SUMMARY_REQUEST_TEXT
 ) -> list[dict[str, Any]]:
@@ -342,9 +390,11 @@ async def build_rollover_item(
     if not items_since_previous_compaction:
         raise ValueError("build_rollover_item requires at least one item to summarize")
 
-    messages_to_summarize = _items_for_summarizer(items_since_previous_compaction)
-    if previous_summary:
-        messages_to_summarize = _summary_exchange(previous_summary) + messages_to_summarize
+    messages_to_summarize = [
+        _transcript_message(
+            _items_for_summarizer(items_since_previous_compaction), previous_summary
+        )
+    ]
 
     summary = await summarize_history(
         messages_to_summarize,
