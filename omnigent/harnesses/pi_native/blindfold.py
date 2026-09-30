@@ -159,6 +159,10 @@ async def _run_one_shot(
     command: str,
 ) -> BlindfoldTurnResult:
     """Run one disposable ``pi --print`` process and report the outcome."""
+    # Measured separately from the process wall time below so a latency
+    # table can tell "building the fresh config dir/history file" apart
+    # from "the CLI process itself" (dominated by the model call).
+    setup_started = time.monotonic()
     fresh_config_dir = Path(tempfile.mkdtemp(prefix="omnigent-blindfold-pi-"))
     workspace = Path.cwd().resolve()
     fresh_external_id = str(uuid.uuid4())
@@ -194,6 +198,7 @@ async def _run_one_shot(
 
     response_text: str | None = None
     error: str | None = None
+    setup_ms = (time.monotonic() - setup_started) * 1000
     started = time.monotonic()
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -225,9 +230,10 @@ async def _run_one_shot(
     duration_s = time.monotonic() - started
 
     _logger.info(
-        "blindfold pi-native turn=%s session=%s duration=%.2fs ok=%s",
+        "blindfold pi-native turn=%s session=%s setup_ms=%.0f process_s=%.2fs ok=%s",
         turn_id,
         session_id,
+        setup_ms,
         duration_s,
         error is None,
     )

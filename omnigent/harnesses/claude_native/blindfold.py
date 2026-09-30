@@ -213,6 +213,10 @@ async def _run_one_shot(
     command: str,
 ) -> BlindfoldTurnResult:
     """Run one disposable ``claude -p`` process and report the outcome."""
+    # Measured separately from the process wall time below so a latency
+    # table can tell "building the fresh config dir + transcript" apart from
+    # "the CLI process itself" (dominated by the model call).
+    setup_started = time.monotonic()
     # A fresh, disposable CLAUDE_CONFIG_DIR per turn is the whole point
     # (contract §5.2: vendor memory off) — plain system tempdir, deleted at
     # the end of this function regardless of outcome.
@@ -254,6 +258,7 @@ async def _run_one_shot(
 
     response_text: str | None = None
     error: str | None = None
+    setup_ms = (time.monotonic() - setup_started) * 1000
     started = time.monotonic()
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -285,9 +290,10 @@ async def _run_one_shot(
     duration_s = time.monotonic() - started
 
     _logger.info(
-        "blindfold claude-native turn=%s session=%s duration=%.2fs ok=%s",
+        "blindfold claude-native turn=%s session=%s setup_ms=%.0f process_s=%.2fs ok=%s",
         turn_id,
         session_id,
+        setup_ms,
         duration_s,
         error is None,
     )
