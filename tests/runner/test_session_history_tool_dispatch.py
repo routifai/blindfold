@@ -25,7 +25,9 @@ CONV = "conv_native_test"
 
 
 def _make_spec() -> AgentSpec:
-    return AgentSpec(spec_version=1, skills=[], mcp_servers=[], local_tools=[], skills_filter="none")
+    return AgentSpec(
+        spec_version=1, skills=[], mcp_servers=[], local_tools=[], skills_filter="none"
+    )
 
 
 def _client(handler: httpx.MockTransport | None = None, **kwargs: object) -> httpx.AsyncClient:
@@ -41,7 +43,9 @@ def _item(item_id: str, role: str, text: str, created_at: int = 0) -> dict[str, 
         "id": item_id,
         "type": "message",
         "role": role,
-        "content": [{"type": "output_text" if role == "assistant" else "input_text", "text": text}],
+        "content": [
+            {"type": "output_text" if role == "assistant" else "input_text", "text": text}
+        ],
         "created_at": created_at,
     }
 
@@ -183,7 +187,12 @@ async def test_status_via_rest_reads_labels() -> None:
         assert request.url.path == f"/v1/sessions/{CONV}/labels"
         return httpx.Response(
             200,
-            json={"labels": {"omnigent.last_context_tokens": "100", "omnigent.last_context_window": "1000"}},
+            json={
+                "labels": {
+                    "omnigent.last_context_tokens": "100",
+                    "omnigent.last_context_window": "1000",
+                }
+            },
         )
 
     client = _client(handler)

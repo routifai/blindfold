@@ -15,8 +15,12 @@ from dataclasses import dataclass
 import pytest
 
 from omnigent.context.labels import CONTEXT_MODE_LABEL
-from omnigent.entities.conversation import FunctionCallData, FunctionCallOutputData, MessageData
-from omnigent.entities.conversation import NewConversationItem
+from omnigent.entities.conversation import (
+    FunctionCallData,
+    FunctionCallOutputData,
+    MessageData,
+    NewConversationItem,
+)
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
 from omnigent.tools.base import ToolContext
 from omnigent.tools.builtins.session_history import (
@@ -234,7 +238,9 @@ def test_group_into_turns_caps_at_limit_and_resumes() -> None:
     desc = list(reversed(chrono))
 
     def fetch_page(before: str | None) -> tuple[list[dict], bool]:
-        start = 0 if before is None else next(i for i, it in enumerate(desc) if it["id"] == before) + 1
+        start = (
+            0 if before is None else next(i for i, it in enumerate(desc) if it["id"] == before) + 1
+        )
         batch = desc[start : start + 2]
         return batch, (start + 2) < len(desc)
 

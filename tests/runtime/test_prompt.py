@@ -448,9 +448,7 @@ def test_rollover_instruction_absent_for_non_rollover_labels() -> None:
 
 def test_rollover_instruction_present_for_rollover_session() -> None:
     spec = _spec("Agent prompt")
-    out = build_instructions(
-        spec, None, [], labels={"omnigent.context.mode": "rollover"}
-    )
+    out = build_instructions(spec, None, [], labels={"omnigent.context.mode": "rollover"})
     assert ROLLOVER_CONTEXT_INSTRUCTION in out
     # Appended after the author's own instructions and after the other
     # unconditional framework instruction, per the framework-instructions
@@ -462,9 +460,7 @@ def test_rollover_instruction_present_for_rollover_session() -> None:
 
 def test_rollover_instruction_present_in_nullable_variant() -> None:
     spec = _spec(None)
-    out = build_instructions_nullable(
-        spec, None, [], labels={"omnigent.context.mode": "rollover"}
-    )
+    out = build_instructions_nullable(spec, None, [], labels={"omnigent.context.mode": "rollover"})
     assert out is not None
     assert ROLLOVER_CONTEXT_INSTRUCTION in out
 

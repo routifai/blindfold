@@ -1685,7 +1685,5 @@ def test_session_history_present_for_rollover_session() -> None:
 
 def test_session_history_registration_is_not_a_spec_opt_in() -> None:
     """Every agent spec gets it in a rollover session — no per-agent declaration."""
-    mgr = ToolManager(
-        _make_spec(local_tools=[]), labels={"omnigent.context.mode": "rollover"}
-    )
+    mgr = ToolManager(_make_spec(local_tools=[]), labels={"omnigent.context.mode": "rollover"})
     assert "session_history" in mgr.get_tool_names()
