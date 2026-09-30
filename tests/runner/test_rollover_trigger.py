@@ -132,10 +132,21 @@ _NATIVE_SPEC = AgentSpec(
     ),
 )
 
+_PI_NATIVE_SPEC = AgentSpec(
+    spec_version=1,
+    name="t",
+    executor=ExecutorSpec(type="omnigent", config={"harness": "pi-native"}, model="test-model"),
+)
+
 
 async def _resolver(agent_id: str, session_id: str | None = None) -> AgentSpec:
     del agent_id, session_id
     return _NATIVE_SPEC
+
+
+async def _pi_resolver(agent_id: str, session_id: str | None = None) -> AgentSpec:
+    del agent_id, session_id
+    return _PI_NATIVE_SPEC
 
 
 async def _create_native_session(app: Any, conv_id: str) -> None:
@@ -245,6 +256,37 @@ async def test_triggers_and_recycles_pane_when_over_threshold(
     # number can't immediately re-trigger on the next turn.
     assert len(fake_client.posted_usage_events) == 1
     assert fake_client.posted_usage_events[0]["data"]["context_tokens"] == data["token_count"]
+
+
+@pytest.mark.asyncio
+async def test_pi_native_never_pane_recycles_even_over_threshold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """pi-native rolls over through Pi's own compaction (the resident
+    extension's session_before_compact hook), never the pane-recycle path —
+    recycling the pane too would double-compact the session."""
+    conv_id = "conv_rollover_pi_native"
+    items = [_msg(f"m{i}", "user" if i % 2 == 0 else "assistant", f"msg {i}") for i in range(10)]
+    labels = {
+        "omnigent.context.mode": "rollover",
+        "omnigent.context.rollover_at_tokens": "1",
+    }
+    fake_client = _FakeServerClient(items, labels=labels)
+    pm = _FakeProcessManager(_ScriptedHarnessClient([]))
+    app = create_runner_app(
+        process_manager=pm,  # type: ignore[arg-type]
+        spec_resolver=_pi_resolver,
+        server_client=fake_client,
+    )
+    await _create_native_session(app, conv_id)
+    monkeypatch.setattr("omnigent.runner.app._get_runner_llm_client", lambda: _FakeLLMClient())
+    fake_reaper = _FakeReaper()
+    app.state.native_pane_reaper = fake_reaper
+
+    await app.state.maybe_apply_rollover(conv_id)
+
+    assert fake_client.posted_events == []
+    assert fake_reaper.reaped_ids == []
 
 
 @pytest.mark.asyncio
