@@ -948,7 +948,7 @@ def should_dispatch_locally(tool_name: str) -> bool:
 # ``id(spec)`` because AgentSpec is an unhashable dataclass. The weakref
 # guards against id reuse after the spec is garbage-collected.
 _granted_tool_names_cache: dict[
-    tuple[int, str | None], tuple[weakref.ref[AgentSpec], frozenset[str]]
+    tuple[int, str | None, bool], tuple[weakref.ref[AgentSpec], frozenset[str]]
 ] = {}
 _GRANTED_TOOL_NAMES_CACHE_MAX = 256
 
@@ -6376,7 +6376,7 @@ async def _session_history_read_via_rest(
 
     turns: list[list[_JsonObject]] = []
     current: list[_JsonObject] = []
-    next_fetch_cursor = cursor
+    next_fetch_cursor: str | None = cursor
     scanned = 0
     try:
         while len(turns) < limit and scanned < _session_history._READ_MAX_ITEMS_SCANNED:
@@ -6400,8 +6400,12 @@ async def _session_history_read_via_rest(
                 # record is exhausted.
                 if hit_limit_at == len(items) - 1 and not has_more:
                     return _session_history_read_response(turns, None)
-                return _session_history_read_response(turns, items[hit_limit_at].get("id"))
-            next_fetch_cursor = items[-1].get("id")
+                cut_id = items[hit_limit_at].get("id")
+                return _session_history_read_response(
+                    turns, cut_id if isinstance(cut_id, str) else None
+                )
+            last_id = items[-1].get("id")
+            next_fetch_cursor = last_id if isinstance(last_id, str) else None
             if not has_more:
                 if current:
                     turns.append(list(reversed(current)))

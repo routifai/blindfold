@@ -235,3 +235,17 @@ BACKGROUND_TITLE_CLAUDE_ECONOMY_MODEL = _BACKGROUND_TITLE_FALLBACKS["claude"].mo
 
 #: The codex-family arm background session titles pin.
 BACKGROUND_TITLE_CODEX_ECONOMY_MODEL = _BACKGROUND_TITLE_FALLBACKS["codex"].model_ids[0]
+
+
+_ROLLOVER_SUMMARY_FALLBACK = StaticModelFallback(
+    model_ids=("gpt-4o",),
+    owner="Rollover checkpoint summaries (omnigent.context.rollover)",
+    provenance="the summarizer model used when a rollover session's spec names none",
+    discovery_gap=(
+        "a rollover summary can run before any spec or live catalog has resolved "
+        "the session's model"
+    ),
+)
+
+#: Summarizer model for a rollover checkpoint when the session names no model.
+ROLLOVER_SUMMARY_FALLBACK_MODEL = _ROLLOVER_SUMMARY_FALLBACK.model_ids[0]

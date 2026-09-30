@@ -93,6 +93,7 @@ from omnigent.llms.summarize import (
     build_summarization_prompt,
     extract_summary_text,
 )
+from omnigent.models.model_fallbacks import ROLLOVER_SUMMARY_FALLBACK_MODEL
 from omnigent.native.native_coding_agents import (
     native_coding_agent_for_agent_name,
     native_coding_agent_for_harness,
@@ -3157,7 +3158,7 @@ def create_runner_app(
     # (e.g. an overlapping continuation) never rolls it over twice at once.
     _rollover_in_progress: set[str] = set()
     _ROLLOVER_FETCH_MAX_PAGES = 25
-    _DEFAULT_ROLLOVER_MODEL = "gpt-4o"
+    _DEFAULT_ROLLOVER_MODEL = ROLLOVER_SUMMARY_FALLBACK_MODEL
     # Conversations whose claude-sdk `/compact` published an up-front
     # `response.compaction.in_progress`. Used to (a) swallow the executor's own
     # later `in_progress` so the web shows a single spinner, and (b) publish a
