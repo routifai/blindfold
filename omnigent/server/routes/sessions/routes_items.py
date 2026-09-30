@@ -114,6 +114,52 @@ def register_items_routes(
             has_more=page.has_more,
         )
 
+    # ── GET /sessions/{session_id}/items/search ──────────────────
+    # Session-scoped full-text search over conversation items — the REST
+    # counterpart to ``ConversationStore.search(query, conversation_id=...)``
+    # for callers (the runner's native-relay tool dispatch) with no
+    # in-process store. Mirrors ``list_session_items`` above, scoped by
+    # the same access check.
+
+    @router.get(
+        "/sessions/{session_id}/items/search",
+        response_model=None,
+        responses={200: {"model": PaginatedList}},
+    )
+    async def search_session_items(
+        request: Request,
+        session_id: str,
+        query: str = Query(min_length=1),
+        limit: int = Query(default=10, ge=1, le=20),
+    ) -> PaginatedList:
+        """
+        Full-text search over one session's own conversation items.
+
+        :param session_id: Session/conversation identifier,
+            e.g. ``"conv_abc123"``.
+        :param query: The search query string.
+        :param limit: Maximum number of results (1-20, default 10).
+        :returns: A :class:`PaginatedList` of matching item dicts,
+            ranked by relevance (``first_id``/``last_id``/``has_more``
+            unset — search results are not cursor-paginated).
+        :raises OmnigentError: 404 if no session exists.
+        """
+        user_id = _get_user_id(request, auth_provider)
+        access = await _require_access_and_level(
+            user_id, session_id, LEVEL_READ, permission_store, conversation_store
+        )
+        if access.conversation is None:
+            conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
+            if conv is None:
+                raise _session_not_found()
+        items = await asyncio.to_thread(
+            conversation_store.search,
+            query,
+            conversation_id=session_id,
+            limit=limit,
+        )
+        return PaginatedList(data=[m.to_api_dict() for m in items])
+
     # ── GET /sessions/{session_id}/child_sessions ────────────────
 
     @router.get(

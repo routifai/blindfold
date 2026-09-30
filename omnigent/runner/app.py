@@ -47,6 +47,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from omnigent._platform import normalize_interactive_shells
 from omnigent.acp_cli_harnesses import ACP_CLI_HARNESSES
+from omnigent.context.labels import CONTEXT_MODE_LABEL
 from omnigent.debug_logging import (
     debug_event,
     phase_scope,
@@ -3029,6 +3030,12 @@ def create_runner_app(
     # effort only from the forwarded turn body, which is built field by field.
     _session_reasoning_effort: dict[str, str] = {}
     _session_skills_cache: dict[str, tuple[float, list[SkillSpec]]] = {}
+    # session_id → the session's rollover-mode label, once resolved. Durable
+    # for the runner process's lifetime (unlike _session_init_envelopes' 60s
+    # TTL): rollover mode is set once at session creation and never changes,
+    # so tool-call-time gating (mcp_execute) never re-fetches it. Empty dict
+    # means "resolved, not rollover" — distinct from "not yet resolved".
+    _session_rollover_labels_cache: dict[str, dict[str, str]] = {}
     _session_workspace_cache: dict[str, str | None] = {}  # session_id → workspace path
     _session_cursor_model_names: dict[str, dict[str, str]] = {}
     _session_claude_launch_configs: dict[str, ClaudeNativeUcodeConfig | None] = {}
@@ -8602,6 +8609,38 @@ def create_runner_app(
         subagent_work_id_for_session=_subagent_work_id_for_session,
     )
 
+    def _remember_rollover_labels(session_id: str, labels: Mapping[str, str] | None) -> None:
+        """Cache just the rollover-mode label from a full label set, once known.
+
+        Warms :data:`_session_rollover_labels_cache` for free wherever full
+        session labels are already being fetched for another reason (relay
+        start, codex/antigravity spawn-env), so ``_rollover_labels_for_session``
+        rarely needs its own round trip.
+        """
+        if labels is None:
+            return
+        value = labels.get(CONTEXT_MODE_LABEL)
+        _session_rollover_labels_cache[session_id] = (
+            {CONTEXT_MODE_LABEL: value} if value is not None else {}
+        )
+
+    async def _rollover_labels_for_session(session_id: str) -> dict[str, str]:
+        """Durable per-session lookup of just the rollover-mode label.
+
+        Unlike ``_fresh_session_init_envelope`` (60s TTL), this is cached for
+        the runner process's lifetime once resolved — rollover mode is set
+        once at session creation and never changes, so tool-call-time gating
+        (``mcp_execute``) pays at most one lookup per session.
+        """
+        cached = _session_rollover_labels_cache.get(session_id)
+        if cached is not None:
+            return cached
+        labels = await _session_labels_for_runner_spawn(
+            server_client=server_client, session_id=session_id
+        )
+        _remember_rollover_labels(session_id, labels)
+        return _session_rollover_labels_cache.get(session_id, {})
+
     def _discard_comment_relay(session_id: str, relay: ClaudeNativeToolRelay) -> None:
         """Unbind and close *relay*, unless another path already replaced it.
 
@@ -8636,6 +8675,12 @@ def create_runner_app(
             post_tools_changed,
             start_tool_relay,
         )
+
+        # Warm the durable rollover-labels cache for free whenever the caller
+        # already has full session labels in hand (session create, codex/
+        # antigravity spawn-env) — mcp_execute's grant check then rarely
+        # needs its own lookup.
+        _remember_rollover_labels(session_id, session_labels)
 
         try:
             spec_entry = await _resolve_session_spec_entry(session_id)
@@ -8697,8 +8742,13 @@ def create_runner_app(
 
         from omnigent.runner.tool_dispatch import build_native_relay_tool_schemas
 
+        relay_labels = (
+            session_labels
+            if session_labels is not None
+            else await _rollover_labels_for_session(session_id)
+        )
         relay_schemas: list[_JsonObject] = build_native_relay_tool_schemas(
-            _unwrap_spec_entry(spec_entry)
+            _unwrap_spec_entry(spec_entry), labels=relay_labels
         )
 
         _captured_session_id = session_id
@@ -9018,15 +9068,21 @@ def create_runner_app(
             )
             # Gated harnesses use nullable to avoid the fallback literal.
             _authored_bg = raw_author_instructions(cached_spec) is not None
+            # Cache hit in steady state (see _rollover_labels_for_session):
+            # every native session already warmed this at relay start, and
+            # SDK/subprocess harnesses that never touch that path pay one
+            # lookup on their first turn.
+            _bg_labels = await _rollover_labels_for_session(conv)
             if harness_name in _GATED_COMPOSED_INSTRUCTION_HARNESSES:
                 instructions = build_instructions_nullable(
-                    cached_spec, _raw_per_request_instructions, []
+                    cached_spec, _raw_per_request_instructions, [], labels=_bg_labels
                 )
             else:
                 instructions = build_instructions(
                     cached_spec,
                     _raw_per_request_instructions,
                     [],
+                    labels=_bg_labels,
                 )
             # Warn once per (conversation, harness, delivery) if the agent has
             # authored instructions but the harness can't deliver them.
@@ -9263,7 +9319,10 @@ def create_runner_app(
             codex_bdir = codex_bridge_dir_for_id(codex_bid or conv)
             write_mcp_bridge_config(codex_bdir)
             await _ensure_comment_relay_started(
-                conv, explicit_bridge_dir=codex_bdir, await_notify=False
+                conv,
+                explicit_bridge_dir=codex_bdir,
+                await_notify=False,
+                session_labels=codex_labels,
             )
         elif harness_name == "antigravity-native":
             from omnigent.harnesses.antigravity_native.bridge import (
@@ -9282,7 +9341,10 @@ def create_runner_app(
             antigravity_bdir = antigravity_bridge_dir_for_id(antigravity_bid or conv)
             write_mcp_bridge_config(antigravity_bdir)
             await _ensure_comment_relay_started(
-                conv, explicit_bridge_dir=antigravity_bdir, await_notify=False
+                conv,
+                explicit_bridge_dir=antigravity_bdir,
+                await_notify=False,
+                session_labels=antigravity_labels,
             )
         elif harness_name == "hermes":
             from omnigent.harnesses.hermes_native.bridge import (
@@ -9652,10 +9714,11 @@ def create_runner_app(
                     if _instr_spec_ds is not None:
                         _per_req_instr = cast(str | None, body.get("instructions"))
                         _authored_ds = raw_author_instructions(_instr_spec_ds) is not None
+                        _ds_labels = await _rollover_labels_for_session(conv_id)
                         _ic_ds = InstructionComposition(
                             authored_present=_authored_ds,
                             composed=build_instructions_nullable(
-                                _instr_spec_ds, _per_req_instr, []
+                                _instr_spec_ds, _per_req_instr, [], labels=_ds_labels
                             ),
                         )
                         # Gated harnesses get nullable — skip the fallback literal.
@@ -9667,7 +9730,7 @@ def create_runner_app(
                             _instr_body = {
                                 **body,
                                 "instructions": build_instructions(
-                                    _instr_spec_ds, _per_req_instr, []
+                                    _instr_spec_ds, _per_req_instr, [], labels=_ds_labels
                                 ),
                             }
                         if _authored_ds and harness_name:
@@ -13397,6 +13460,11 @@ def create_runner_app(
                 _agent_id_local = _session_agent_ids.get(session_id)
                 try:
                     dispatch_workspace = await _session_runtime_cwd(session_id)
+                    # Almost always a cache hit: the relay that makes this
+                    # call possible at all already warmed it at start (see
+                    # _ensure_comment_relay_started). The fallback fetch only
+                    # covers a tool call that somehow beats that warm-up.
+                    dispatch_labels = await _rollover_labels_for_session(session_id)
                     output = await execute_tool(
                         tool_name=tool_name,
                         arguments=_json.dumps(arguments),
@@ -13411,6 +13479,7 @@ def create_runner_app(
                         runner_workspace=dispatch_workspace,
                         local_tool_workdir=spec_workdir,
                         mcp_manager=None,
+                        labels=dispatch_labels,
                         session_inbox=_session_inboxes.get(session_id),
                         session_async_tasks=_session_async_tasks.get(session_id),
                         harness_client=None,

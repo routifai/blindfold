@@ -55,6 +55,7 @@ from omnigent.tools.builtins.scheduled_tasks import (
     SysScheduledTaskListTool,
     SysScheduledTaskUpdateTool,
 )
+from omnigent.tools.builtins.session_history import SessionHistoryTool
 from omnigent.tools.builtins.session_rename import SysSessionRenameTool
 from omnigent.tools.builtins.spawn import (
     SysSessionCloseTool,
@@ -80,6 +81,7 @@ __all__ = [
     "NimbleExtractTool",
     "NimbleResearchTool",
     "ReadSkillFileTool",
+    "SessionHistoryTool",
     "SysAdviseModelsTool",
     "SysAgentDownloadTool",
     "SysAgentGetTool",
@@ -267,6 +269,11 @@ _BUILTIN_REGISTRY: dict[str, _BuiltinFactory | None] = {
     "web_fetch": None,
     "list_comments": None,
     "update_comment": None,
+    # ``session_history`` is auto-registered by
+    # ``ToolManager._register_session_history_tool`` for rollover sessions
+    # only (label-driven, see omnigent/context/labels.py). Reserved here so
+    # user specs cannot shadow it.
+    "session_history": None,
     # ``sys_list_models`` is auto-registered by
     # ``ToolManager._register_sub_agent_tools`` with the dispatch grant
     # and intercepted by name in the runner's tool dispatch — reserved

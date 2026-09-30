@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
+from omnigent.context.labels import is_rollover
 from omnigent.entities import (
     ConversationItem,
     FunctionCallData,
@@ -59,8 +60,24 @@ EMBEDDED_BROWSER_PRIORITY_INSTRUCTION = (
     "attached) or for non-interactive bulk fetching."
 )
 
+# Rollover sessions compact older history into a summary, so exact wording can
+# be lost; appended only when the session's labels select rollover.
+ROLLOVER_CONTEXT_INSTRUCTION = (
+    "Rollover: this session periodically compacts older messages into a "
+    "summary; the summary may omit details, and is a pointer, not the "
+    "truth. Standing instructions and memory are live every turn and are "
+    "not part of the compacted summary. When earlier context matters — the "
+    'original request, exact wording, a prior decision, "what did I '
+    'say/decide" — recover it with the session_history tool (search, or '
+    "read paging backward) before answering. State plainly what you "
+    "couldn't recover. Never present an inference as what happened."
+)
 
-def _framework_instructions_for(spec: AgentSpec) -> list[str]:
+
+def _framework_instructions_for(
+    spec: AgentSpec,
+    labels: Mapping[str, str] | None = None,
+) -> list[str]:
     """
     Framework instructions that apply to every turn of ``spec``.
 
@@ -75,13 +92,20 @@ def _framework_instructions_for(spec: AgentSpec) -> list[str]:
     (``ToolManager._register_browser_tools``).
 
     :param spec: The parsed AgentSpec.
-    :returns: The applicable spec-level framework instructions, never empty.
+    :param labels: The session's labels, when known. Selects session-scoped
+        (not spec-scoped) instructions — currently: rollover's recall
+        instruction, appended only for a rollover session. ``None`` (the
+        default) appends nothing label-gated, matching upstream behavior
+        for every caller that doesn't pass labels.
+    :returns: The applicable framework instructions, never empty.
     """
     instructions: list[str] = []
     dispatches_web_researcher = any(entry.name == "web_fetch" for entry in spec.tools.builtins)
     if spec.tools.agents or spec.spawn or dispatches_web_researcher:
         instructions.append(SUBAGENT_WAKE_NOTICE_INSTRUCTION)
     instructions.append(EMBEDDED_BROWSER_PRIORITY_INSTRUCTION)
+    if is_rollover(labels):
+        instructions.append(ROLLOVER_CONTEXT_INSTRUCTION)
     return instructions
 
 
@@ -144,6 +168,7 @@ def build_instructions(
     tool_schemas: list[dict[str, Any]],
     *,
     framework_instructions: Sequence[str] = (),
+    labels: Mapping[str, str] | None = None,
 ) -> str:
     """
     Build the system instructions string from the agent's
@@ -163,6 +188,10 @@ def build_instructions(
         for this turn, appended after user-authored agent/request instructions
         and after the spec-level framework instructions (the sub-agent
         wake-notice announcement for agents that can dispatch sub-agents).
+    :param labels: The session's labels, when known. Selects session-scoped
+        framework instructions (currently: ``ROLLOVER_CONTEXT_INSTRUCTION``
+        for a rollover session). ``None`` (the default) matches upstream
+        behavior for every caller that doesn't pass labels.
     :returns: The assembled instructions string.
     """
     parts = _assemble_instruction_parts(spec, per_request_instructions, tool_schemas)
@@ -170,7 +199,7 @@ def build_instructions(
     return (
         append_framework_instructions(
             base_instructions,
-            [*_framework_instructions_for(spec), *framework_instructions],
+            [*_framework_instructions_for(spec, labels), *framework_instructions],
         )
         or base_instructions
     )
@@ -182,6 +211,7 @@ def build_instructions_nullable(
     tool_schemas: list[dict[str, Any]],
     *,
     framework_instructions: Sequence[str] = (),
+    labels: Mapping[str, str] | None = None,
 ) -> str | None:
     """Like :func:`build_instructions`, but returns ``None`` instead of seeding
     the fabricated ``"You are a helpful assistant."`` fallback when there is
@@ -198,13 +228,15 @@ def build_instructions_nullable(
     top of the same fallback seed, producing a mixed string that is neither
     the bare literal nor framework-text-alone.
 
+    :param labels: The session's labels, when known — see
+        :func:`build_instructions`.
     :returns: The composed text, or ``None`` when nothing applies.
     """
     parts = _assemble_instruction_parts(spec, per_request_instructions, tool_schemas)
     base_instructions = "\n\n".join(parts) if parts else None
     return append_framework_instructions(
         base_instructions,
-        [*_framework_instructions_for(spec), *framework_instructions],
+        [*_framework_instructions_for(spec, labels), *framework_instructions],
     )
 
 

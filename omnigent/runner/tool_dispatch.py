@@ -30,11 +30,12 @@ import re
 import tempfile
 import uuid
 import weakref
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 
+from omnigent.context.labels import is_rollover
 from omnigent.util.json_types import JsonObject as _JsonObject
 
 if TYPE_CHECKING:
@@ -66,6 +67,7 @@ from omnigent.runtime import pending_elicitations
 from omnigent.runtime.mcp_tool_result import encode_mcp_image_result, native_image_payload
 from omnigent.tools import ToolManager
 from omnigent.tools.base import Tool, ToolContext
+from omnigent.tools.builtins import session_history as _session_history
 from omnigent.tools.builtins._arguments import parse_json_object_arguments
 from omnigent.tools.builtins.async_inbox import (
     SysCallAsyncTool,
@@ -83,6 +85,7 @@ from omnigent.tools.builtins.os_env import (
     SysOsShellTool,
     SysOsWriteTool,
 )
+from omnigent.tools.builtins.session_history import SessionHistoryTool, status_from_labels
 from omnigent.tools.builtins.session_rename import SysSessionRenameTool
 from omnigent.tools.builtins.spawn import (
     # Shared contract values with the in-process sys_session_* tools. Imported
@@ -307,6 +310,11 @@ _SESSION_QUERY_TOOLS = frozenset(
 
 _SESSION_SELF_WRITE_TOOLS = frozenset({SysSessionRenameTool.name()})
 
+# Rollover recall — read/search/status over the CALLING session's own
+# record only. Runner has no in-process ConversationStore (same REST
+# posture as _SESSION_QUERY_TOOLS), so it dispatches over server_client.
+_SESSION_HISTORY_TOOLS = frozenset({SessionHistoryTool.name()})
+
 # The title bound the rename tool advertises to the LLM — read once from the
 # tool schema so the dispatcher can never drift from the published contract.
 _SESSION_RENAME_TITLE_MAX_CHARS: int = SysSessionRenameTool().get_schema()["function"][
@@ -483,6 +491,11 @@ _NATIVE_RELAY_BUILTIN_TOOLS = (
     # what discovers host-scope skills (``.agents/skills`` and friends), and a
     # native session's only tool surface is this relay.
     | _SKILL_TOOLS
+    # session_history: ToolManager registers it only for a rollover session
+    # (label-driven — see ToolManager._register_session_history_tool), so it
+    # rides the relay only when that gate passes, same as the spec-gated
+    # tools above.
+    | _SESSION_HISTORY_TOOLS
 )
 
 
@@ -512,7 +525,11 @@ def strip_browser_tool_schemas(schemas: list[_JsonObject]) -> list[_JsonObject]:
     return kept
 
 
-def build_native_relay_tool_schemas(spec: AgentSpec | None) -> list[_JsonObject]:
+def build_native_relay_tool_schemas(
+    spec: AgentSpec | None,
+    *,
+    labels: Mapping[str, str] | None = None,
+) -> list[_JsonObject]:
     """Build the flat Omnigent tool surface for native harness bridges.
 
     Returns the same tool set the claude-native / codex-native relay advertises
@@ -529,6 +546,11 @@ def build_native_relay_tool_schemas(spec: AgentSpec | None) -> list[_JsonObject]
     :param spec: The session's resolved agent spec. ``None`` falls back to the
         always-on read/discovery surface (never the opt-in spawn writes, whose
         gate can't be evaluated without the spec), mirroring the relay.
+    :param labels: The session's labels, when known. Decides label-gated
+        registrations (currently: ``session_history`` for a rollover
+        session — ``omnigent.context.labels.is_rollover``). ``None`` (the
+        default) registers nothing label-gated, matching upstream behavior
+        for every caller that doesn't pass labels.
     :returns: Flat tool schemas for native bridges.
     """
     from omnigent.tools.builtins.agents import (
@@ -566,14 +588,15 @@ def build_native_relay_tool_schemas(spec: AgentSpec | None) -> list[_JsonObject]
     if spec is not None:
         from omnigent.tools.manager import ToolManager
 
-        for schema in ToolManager(spec, os_env_schema_only=True).get_tool_schemas():
+        manager = ToolManager(spec, os_env_schema_only=True, labels=labels)
+        for schema in manager.get_tool_schemas():
             function = _string_object_dict(schema.get("function"))
             if function is not None and function.get("name") in _NATIVE_RELAY_BUILTIN_TOOLS:
                 _append(function)
     else:
         from omnigent.tools.builtins.policy import SysAddPolicyTool, SysPolicyRegistryTool
 
-        for _cls in (
+        fallback_classes: tuple[type[Tool], ...] = (
             ListCommentsTool,
             UpdateCommentTool,
             SysSessionListTool,
@@ -585,7 +608,12 @@ def build_native_relay_tool_schemas(spec: AgentSpec | None) -> list[_JsonObject]
             SysAgentDownloadTool,
             SysAddPolicyTool,
             SysPolicyRegistryTool,
-        ):
+        )
+        # No spec means no ToolManager, so the label gate is applied directly
+        # here — session_history's schema is spec-independent (static).
+        if is_rollover(labels):
+            fallback_classes = (*fallback_classes, SessionHistoryTool)
+        for _cls in fallback_classes:
             fallback_schema = _string_object_dict(_cls().get_schema())
             if fallback_schema is None:
                 continue
@@ -857,6 +885,7 @@ _ALL_LOCAL_TOOLS = (
     | _SESSION_CREATE_TOOLS
     | _SESSION_QUERY_TOOLS
     | _SESSION_SELF_WRITE_TOOLS
+    | _SESSION_HISTORY_TOOLS
     | _WEB_FETCH_TOOLS
     | _WEB_SEARCH_TOOLS
     | _NIMBLE_RESEARCH_TOOLS
@@ -944,7 +973,12 @@ def _effective_harness_name(agent_spec: AgentSpec, effective_harness: str | None
     return canonicalize_harness(raw) or raw
 
 
-def _granted_tool_names(agent_spec: AgentSpec, harness: str | None = None) -> frozenset[str]:
+def _granted_tool_names(
+    agent_spec: AgentSpec,
+    harness: str | None = None,
+    *,
+    labels: Mapping[str, str] | None = None,
+) -> frozenset[str]:
     """Return the non-MCP tool surface advertised for *agent_spec* on *harness*.
 
     Mirrors advertisement: the names ``ToolManager`` registers, spec-local
@@ -957,14 +991,19 @@ def _granted_tool_names(agent_spec: AgentSpec, harness: str | None = None) -> fr
     :param harness: Canonical harness the session runs, from
         :func:`_effective_harness_name`. Only the native/non-native split
         matters here.
+    :param labels: The session's labels, when known — decides label-gated
+        registrations (currently: ``session_history`` for a rollover
+        session). The cache key includes its rollover-ness so a spec object
+        reused across a rollover and a non-rollover session never shares a
+        cached grant.
     :raises Exception: Propagates ``ToolManager`` construction failures so
         callers can fail closed instead of guessing at the surface.
     """
-    cache_key = (id(agent_spec), harness)
+    cache_key = (id(agent_spec), harness, is_rollover(labels))
     cached = _granted_tool_names_cache.get(cache_key)
     if cached is not None and cached[0]() is agent_spec:
         return cached[1]
-    manager = ToolManager(agent_spec, os_env_schema_only=True)
+    manager = ToolManager(agent_spec, os_env_schema_only=True, labels=labels)
     try:
         names = set(manager.get_tool_names())
     finally:
@@ -983,6 +1022,8 @@ def _ungranted_tool_reason(
     tool_name: str,
     agent_spec: AgentSpec | None,
     effective_harness: str | None = None,
+    *,
+    labels: Mapping[str, str] | None = None,
 ) -> str | None:
     """Return why *tool_name* is refused for *agent_spec*, or ``None`` if allowed.
 
@@ -996,6 +1037,8 @@ def _ungranted_tool_reason(
     :param effective_harness: The session's harness override, so a session
         running a harness its spec never declared is judged on the surface it
         was actually advertised. ``None`` falls back to the spec.
+    :param labels: The session's labels, when known — see
+        :func:`_granted_tool_names`.
     """
     from omnigent.spec.types import AgentSpec as _AgentSpec
 
@@ -1003,7 +1046,7 @@ def _ungranted_tool_reason(
         return None
     try:
         granted = _granted_tool_names(
-            agent_spec, _effective_harness_name(agent_spec, effective_harness)
+            agent_spec, _effective_harness_name(agent_spec, effective_harness), labels=labels
         )
     except Exception as exc:
         _logger.exception("granted tool surface unavailable for %s", tool_name)
@@ -6207,6 +6250,226 @@ async def _fetch_close_target(
     return body
 
 
+def _project_history_item(item: _JsonObject) -> _JsonObject:
+    """REST-shape counterpart of ``session_history._project_item``.
+
+    Reads the flat ``ConversationItem.to_api_dict()`` shape returned by
+    ``GET /v1/sessions/{id}/items`` — same fields ``_project_api_item``
+    (the ``sys_session_get_history`` REST projector) reads.
+    """
+    itype = _optional_string(item.get("type"))
+    item_id = _optional_string(item.get("id"))
+    created_at = item.get("created_at")
+    if itype == "function_call":
+        return {
+            "id": item_id,
+            "created_at": created_at,
+            "role": "assistant",
+            "type": "tool_call",
+            "name": _optional_string(item.get("name")),
+            "args": _truncate_activity(_optional_string(item.get("arguments")) or ""),
+        }
+    if itype == "function_call_output":
+        output = item.get("output")
+        rendered = output if isinstance(output, str) else json.dumps(output)
+        return {
+            "id": item_id,
+            "created_at": created_at,
+            "role": "tool",
+            "type": "tool_result",
+            "name": _optional_string(item.get("name")),
+            "content": _truncate_activity(rendered),
+        }
+    return {
+        "id": item_id,
+        "created_at": created_at,
+        "role": _optional_string(item.get("role")) or "unknown",
+        "type": "text",
+        "content": _truncate_activity(_text_from_api_content(item.get("content"))),
+    }
+
+
+async def _execute_session_history_tool(
+    args: _JsonObject,
+    *,
+    conversation_id: str | None,
+    server_client: httpx.AsyncClient | None,
+) -> str:
+    """
+    Runner-local handler for ``session_history`` (native-relay dispatch).
+
+    The runner has no in-process ``ConversationStore`` (same constraint as
+    ``_execute_session_query_tool``), so every action dispatches to the
+    Omnigent server's REST endpoints over ``server_client``:
+    ``read``/``search`` → ``GET .../items`` / ``GET .../items/search``,
+    ``status`` → ``GET .../labels`` (fed through the same
+    :func:`~omnigent.tools.builtins.session_history.status_from_labels`
+    the in-process tool uses). ``conversation_id`` is the runner's own
+    dispatch context, never read from *args* — the same scoping guarantee
+    the in-process tool provides.
+
+    :param args: Parsed tool arguments (``action`` plus per-action fields).
+    :param conversation_id: The calling session id.
+    :param server_client: HTTP client pointed at the Omnigent server.
+    :returns: JSON output matching the in-process tool's shape.
+    """
+    if server_client is None:
+        return json.dumps({"error": "session_history requires server access"})
+    if conversation_id is None:
+        return json.dumps({"error": "session_history requires a session id"})
+
+    action = args.get("action")
+    if action == "read":
+        return await _session_history_read_via_rest(args, conversation_id, server_client)
+    if action == "search":
+        return await _session_history_search_via_rest(args, conversation_id, server_client)
+    if action == "status":
+        return await _session_history_status_via_rest(conversation_id, server_client)
+    return json.dumps({"error": "action must be one of ['read', 'search', 'status']"})
+
+
+def _session_history_read_response(turns: list[list[_JsonObject]], next_cursor: str | None) -> str:
+    """Build the ``read`` action's JSON response — shared by every return path."""
+    return json.dumps(
+        {
+            "turns": [{"messages": turn} for turn in turns],
+            "next_cursor": next_cursor,
+        }
+    )
+
+
+async def _session_history_read_via_rest(
+    args: _JsonObject,
+    conversation_id: str,
+    server_client: httpx.AsyncClient,
+) -> str:
+    """Read full turns via ``GET .../items``, mirroring ``session_history.group_into_turns``."""
+    cursor = args.get("cursor")
+    if cursor is not None and not isinstance(cursor, str):
+        return json.dumps({"error": "cursor must be a string"})
+    limit = _clamp_session_history_limit(
+        args.get("limit"),
+        default=_session_history._READ_DEFAULT_LIMIT,
+        maximum=_session_history._READ_MAX_LIMIT,
+    )
+    if isinstance(limit, str):
+        return limit
+
+    async def fetch_page(cursor_item_id: str | None) -> tuple[list[_JsonObject], bool]:
+        params: dict[str, str | int] = {
+            "limit": _session_history._READ_BATCH_SIZE,
+            "order": "desc",
+        }
+        if cursor_item_id is not None:
+            # ``after`` (not ``before``) is correct here: in desc order,
+            # "after" means "further in sort direction" — i.e. older,
+            # continuing the newest-first walk (see list_session_items /
+            # ConversationStore.list_items).
+            params["after"] = cursor_item_id
+        resp = await server_client.get(
+            f"/v1/sessions/{conversation_id}/items", params=params, timeout=30.0
+        )
+        resp.raise_for_status()
+        body = resp.json()
+        items = [_project_history_item(raw) for raw in body.get("data", [])]
+        return items, bool(body.get("has_more"))
+
+    turns: list[list[_JsonObject]] = []
+    current: list[_JsonObject] = []
+    next_fetch_cursor = cursor
+    scanned = 0
+    try:
+        while len(turns) < limit and scanned < _session_history._READ_MAX_ITEMS_SCANNED:
+            items, has_more = await fetch_page(next_fetch_cursor)
+            if not items:
+                break
+            hit_limit_at: int | None = None
+            for idx, item in enumerate(items):
+                current.append(item)
+                scanned += 1
+                if item.get("type") == "text" and item.get("role") == "user":
+                    turns.append(list(reversed(current)))
+                    current = []
+                    if len(turns) >= limit:
+                        hit_limit_at = idx
+                        break
+            if hit_limit_at is not None:
+                # A boundary mid-page always has more items behind it (at
+                # least the rest of this page); only a boundary on the
+                # page's LAST item needs has_more to know whether the
+                # record is exhausted.
+                if hit_limit_at == len(items) - 1 and not has_more:
+                    return _session_history_read_response(turns, None)
+                return _session_history_read_response(turns, items[hit_limit_at].get("id"))
+            next_fetch_cursor = items[-1].get("id")
+            if not has_more:
+                if current:
+                    turns.append(list(reversed(current)))
+                return _session_history_read_response(turns, None)
+    except Exception as exc:  # noqa: BLE001
+        return json.dumps({"error": f"session_history read failed: {exc}"})
+    # Scan cap reached mid-turn: flush what was fetched rather than drop it.
+    if current:
+        turns.append(list(reversed(current)))
+    return _session_history_read_response(turns, next_fetch_cursor)
+
+
+def _clamp_session_history_limit(raw: object, *, default: int, maximum: int) -> int | str:
+    """Coerce + clamp a ``session_history`` ``limit`` argument."""
+    if raw is None:
+        return default
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return json.dumps({"error": f"limit must be an integer, got {raw!r}"})
+    if raw < 1:
+        return json.dumps({"error": "limit must be >= 1"})
+    return min(raw, maximum)
+
+
+async def _session_history_search_via_rest(
+    args: _JsonObject,
+    conversation_id: str,
+    server_client: httpx.AsyncClient,
+) -> str:
+    """Full-text search via ``GET .../items/search``, scoped to *conversation_id*."""
+    query = args.get("query")
+    if not isinstance(query, str) or not query.strip():
+        return json.dumps({"error": "search requires a non-empty 'query' string"})
+    limit = _clamp_session_history_limit(
+        args.get("limit"),
+        default=_session_history._SEARCH_DEFAULT_LIMIT,
+        maximum=_session_history._SEARCH_MAX_LIMIT,
+    )
+    if isinstance(limit, str):
+        return limit
+    try:
+        resp = await server_client.get(
+            f"/v1/sessions/{conversation_id}/items/search",
+            params={"query": query.strip(), "limit": limit},
+            timeout=30.0,
+        )
+        resp.raise_for_status()
+    except Exception as exc:  # noqa: BLE001
+        return json.dumps({"error": f"session_history search failed: {exc}"})
+    data: list[_JsonObject] = resp.json().get("data", [])
+    return json.dumps({"results": [_project_history_item(it) for it in data]})
+
+
+async def _session_history_status_via_rest(
+    conversation_id: str,
+    server_client: httpx.AsyncClient,
+) -> str:
+    """Report token headroom via ``GET .../labels`` + ``status_from_labels``."""
+    try:
+        resp = await server_client.get(f"/v1/sessions/{conversation_id}/labels", timeout=30.0)
+        resp.raise_for_status()
+    except Exception as exc:  # noqa: BLE001
+        return json.dumps({"error": f"session_history status failed: {exc}"})
+    labels = resp.json().get("labels")
+    if not isinstance(labels, dict):
+        labels = {}
+    return json.dumps(status_from_labels({str(k): str(v) for k, v in labels.items()}))
+
+
 async def _close_tree_scope_error(
     target_snap: _JsonObject,
     caller_conversation_id: str,
@@ -6412,6 +6675,7 @@ async def execute_tool(
     publish_event: Callable[[str, _JsonObject], None] | None = None,
     filesystem_registry: FilesystemRegistry | None = None,
     effective_harness: str | None = None,
+    labels: Mapping[str, str] | None = None,
 ) -> str:
     """
     Execute a tool and return the output string.
@@ -6439,6 +6703,9 @@ async def execute_tool(
         caller knows it (the server's per-session override outranks the
         spec's declaration). Decides whether the native relay's
         unconditional ``sys_os_*`` counts toward the granted surface.
+    :param labels: The session's labels, when known. Decides label-gated
+        registrations in the granted-surface check (currently:
+        ``session_history`` for a rollover session).
     :returns: Tool output string.
     """
     if not arguments.strip():
@@ -6450,7 +6717,7 @@ async def execute_tool(
     # MCP dispatch resolves the target against the spec inside the MCP
     # manager; every other branch is gated on the spec's granted surface.
     if mcp_manager is None:
-        refusal = _ungranted_tool_reason(tool_name, agent_spec, effective_harness)
+        refusal = _ungranted_tool_reason(tool_name, agent_spec, effective_harness, labels=labels)
         if refusal is not None:
             return json.dumps({"error": refusal})
     from omnigent.sandbox.copy_on_write import has_copy_on_write
@@ -6575,6 +6842,12 @@ async def execute_tool(
                 conversation_id=conversation_id,
                 server_client=server_client,
                 agent_spec=agent_spec,
+            )
+        elif tool_name in _SESSION_HISTORY_TOOLS:
+            output = await _execute_session_history_tool(
+                args,
+                conversation_id=conversation_id,
+                server_client=server_client,
             )
         elif tool_name in _WEB_FETCH_TOOLS:
             output = await _execute_web_fetch_tool(
@@ -6801,6 +7074,7 @@ async def dispatch_tool_locally(
     publish_event: Callable[[str, _JsonObject], None] | None = None,
     filesystem_registry: FilesystemRegistry | None = None,
     effective_harness: str | None = None,
+    labels: Mapping[str, str] | None = None,
 ) -> str:
     """Execute a tool once and POST its result to the harness.
 
@@ -6851,6 +7125,7 @@ async def dispatch_tool_locally(
         filesystem_registry=filesystem_registry,
         publish_event=publish_event,
         effective_harness=effective_harness,
+        labels=labels,
     )
 
     # A file-mutating tool just ran — nudge the web to refetch the
