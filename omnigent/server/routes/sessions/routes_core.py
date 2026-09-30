@@ -30,6 +30,7 @@ from starlette.datastructures import UploadFile as StarletteUploadFile
 from omnigent.codex_approval_modes import (
     CODEX_NATIVE_PERMISSION_VALUES,
 )
+from omnigent.context.labels import is_rollover
 from omnigent.db.utils import generate_agent_id, generate_file_id
 from omnigent.debug_logging import add_audit_attrs, debug_event, set_current_runner_id
 from omnigent.entities import (
@@ -153,6 +154,7 @@ from omnigent.server.routes._sessions.helpers import (
     _require_cost_control_label_authority,
     _require_permission_mode_forward,
     _reset_runner_resources_after_switch,
+    _resolve_llm_model,
     _same_provider_family,
     _session_status_cache,
     _session_status_from_cache,
@@ -2954,6 +2956,65 @@ def register_core_routes(
             request=request,
         )
 
+    async def _seed_rollover_side_chat(new_conv_id: str, source_id: str) -> None:
+        """
+        Append the fork's seed checkpoint: parent summary + recent tail.
+
+        A rollover side chat must not inherit the parent's full transcript.
+        Reuses the parent's latest compaction summary when one exists
+        (folding in only what happened since); builds one now, over the
+        whole record, when the parent never rolled over yet.
+        """
+        from omnigent.context.rollover import (
+            build_side_chat_seed,
+            resolve_keep_messages,
+            resolve_keep_tokens,
+        )
+        from omnigent.entities import NewConversationItem
+
+        items: list[dict[str, Any]] = []
+        after: str | None = None
+        while True:
+            page = await asyncio.to_thread(
+                conversation_store.list_items,
+                source_id,
+                limit=500,
+                after=after,
+                order="asc",
+            )
+            items.extend(m.to_api_dict() for m in page.data)
+            if not page.has_more:
+                break
+            after = page.last_id
+        if not items:
+            return
+
+        source_conv = await asyncio.to_thread(conversation_store.get_conversation, source_id)
+        model = _resolve_llm_model(source_conv, agent_store=agent_store) or "gpt-4o"
+        runner_client = await _get_runner_client(
+            source_id, runner_router, conversation=source_conv
+        )
+        seed_labels = source_conv.labels if source_conv else None
+        seed = await build_side_chat_seed(
+            items,
+            keep_messages=resolve_keep_messages(seed_labels),
+            keep_tokens=resolve_keep_tokens(seed_labels),
+            model=model,
+            runner_client=runner_client,
+            conversation_id=source_id,
+        )
+        await asyncio.to_thread(
+            conversation_store.append,
+            new_conv_id,
+            [
+                NewConversationItem(
+                    type="compaction",
+                    response_id=f"rollover_seed_{new_conv_id}",
+                    data=seed,
+                )
+            ],
+        )
+
     # ── POST /sessions/{source_id}/fork ─────────────────────────
 
     @router.post(
@@ -3248,6 +3309,10 @@ def register_core_routes(
         if switching_agent:
             dropped_label_keys_set.add(_CLAUDE_NATIVE_PERMISSION_MODE_LABEL_KEY)
         dropped_label_keys: frozenset[str] = frozenset(dropped_label_keys_set)
+        # A side chat forked from a rollover super chat stays a rollover
+        # session (labels carry over untouched) — seeded from the parent's
+        # checkpoint below, not its full transcript.
+        source_is_rollover = is_rollover(source.labels)
 
         # DANGEROUS codex full-bypass. The source's bypass label is always
         # dropped above (instance-scoped), so a bypass-armed source never
@@ -3301,10 +3366,14 @@ def register_core_routes(
         # OWN fresh sandbox, whose filesystem has no copy of the source's local
         # native rollout, so the clone is likewise doomed — skip the directive
         # so the runner rebuilds from the copied Omnigent items instead.
+        # A rollover side chat is the same case for a different reason:
+        # cloning the source's rollout verbatim would hand the CLI the
+        # parent's full transcript, defeating the seed appended below.
         resume_source_native_session = (
             (not switching_agent or copy_model_settings)
             and not target_is_cursor
             and body.host_type != "managed"
+            and not (body.side_chat and source_is_rollover)
         )
 
         # On an agent switch, recompute the Web UI presentation labels for
@@ -3459,6 +3528,21 @@ def register_core_routes(
                 str(exc),
                 code=ErrorCode.INVALID_INPUT,
             ) from exc
+
+        if body.side_chat and source_is_rollover:
+            # Appended AFTER the deep copy so it is the fork's LATEST item —
+            # resume rebuilders restart there. Best-effort: a failure here
+            # just leaves the full copy in place, never breaks the fork.
+            try:
+                await _seed_rollover_side_chat(new_conv.id, source_id)
+            except Exception:
+                _logger.warning(
+                    "rollover side-chat seed failed for fork %s of %s; "
+                    "leaving the full copied history in place",
+                    new_conv.id,
+                    source_id,
+                    exc_info=True,
+                )
 
         # Create the fork-owned rows the rewritten items now reference —
         # before the fork is announced or returned, so no reader sees the ids

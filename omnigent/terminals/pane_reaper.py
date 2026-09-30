@@ -258,3 +258,21 @@ class NativePaneReaper:
                 _logger.exception(
                     "native pane reaper: reap failed for conversation %s", pane.conversation_id
                 )
+
+    async def reap_now(self, conversation_id: str) -> bool:
+        """Reap *conversation_id*'s native pane immediately, bypassing the idle clock.
+
+        Used by rollover to recycle a resident pane on purpose between turns,
+        through the exact same pane-scoped close path the idle loop uses — the
+        next turn's ensure-terminal path relaunches it from the fresh history.
+
+        :param conversation_id: Conversation whose pane should be closed now.
+        :returns: ``True`` if a live pane was found and reaped, else ``False``.
+        """
+        panes = self._list_native_panes()
+        pane = next((p for p in panes if p.conversation_id == conversation_id), None)
+        if pane is None:
+            return False
+        self._last_busy_at.pop(conversation_id, None)
+        await self._reap(pane)
+        return True
