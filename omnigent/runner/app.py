@@ -8000,18 +8000,17 @@ def create_runner_app(
 
     async def _maybe_apply_rollover(conv_id: str) -> None:
         """Cheap no-op for every non-rollover turn; the label gates all I/O below."""
-        if not _is_native_harness(conv_id):
+        if not _is_native_harness(conv_id) or conv_id in _rollover_in_progress:
             return
-        # Durable per-session cache (see _rollover_labels_for_session) — no
-        # per-turn label round trip for the common case, unlike a TTL cache.
-        mode_labels = await _rollover_labels_for_session(conv_id)
-        if not is_rollover(mode_labels):
-            return
-        if conv_id in _rollover_in_progress:
-            return
+        # Opened before any await, so a turn arriving right now already waits.
         _rollover_in_progress.add(conv_id)
         gate = _rollover_gates[conv_id] = asyncio.Event()
         try:
+            # Durable per-session cache (see _rollover_labels_for_session) — no
+            # per-turn label round trip for the common case, unlike a TTL cache.
+            mode_labels = await _rollover_labels_for_session(conv_id)
+            if not is_rollover(mode_labels):
+                return
             full_labels = await _session_labels_for_runner_spawn(
                 server_client=server_client, session_id=conv_id
             )
@@ -8069,10 +8068,6 @@ def create_runner_app(
         collected.reverse()
         return collected, previous_summary
 
-    def _rollover_superseded(conv_id: str) -> bool:
-        """Whether a turn already reached the pane despite the rollover gate."""
-        return _native_turn_in_flight(conv_id)
-
     async def _apply_rollover_if_over_threshold(conv_id: str, labels: dict[str, str]) -> None:
         items, previous_summary = await _fetch_rollover_window(conv_id)
         if not items:
@@ -8093,15 +8088,6 @@ def create_runner_app(
             llm_client=_get_runner_llm_client(),
             connection=connection,
         )
-        # New turns wait on the rollover gate; one that slipped into the pane
-        # anyway must not be killed, so defer to the next clean turn end.
-        if _rollover_superseded(conv_id):
-            _logger.info(
-                "rollover deferred for %s: a new turn started during summarization",
-                conv_id,
-                extra={"session_id": conv_id},
-            )
-            return
         resp = await server_client.post(
             f"/v1/sessions/{conv_id}/events",
             json={"type": "compaction", "data": data.model_dump(exclude_none=True)},
