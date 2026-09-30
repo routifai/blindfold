@@ -1,4 +1,4 @@
-"""Session-label keys the rollover super chat reacts to.
+"""Session labels that switch context ownership between the CLI and Omnigent.
 
 ``omnigent.context.mode`` selects the lifecycle: unset means upstream
 behavior (the CLI owns its own context) untouched; ``"rollover"`` means
@@ -10,9 +10,12 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-# Selects the rollover lifecycle for a session. Unset (the default) leaves
-# the session on upstream behavior, byte-for-byte.
+#: Session label selecting how context is managed. Unset means the CLI
+#: owns its own context (upstream behaviour, unchanged).
 CONTEXT_MODE_LABEL = "omnigent.context.mode"
+
+#: ``CONTEXT_MODE_LABEL`` value for the rollover super chat: Omnigent, not
+#: the CLI, decides what the model carries forward.
 ROLLOVER_MODE_VALUE = "rollover"
 
 # Token count at which a rollover session rolls over. Unset falls back to
@@ -27,20 +30,20 @@ DEFAULT_KEEP_MESSAGES = 20
 
 
 def is_rollover(labels: Mapping[str, str] | None) -> bool:
-    """
-    Whether *labels* configure a session for the rollover super-chat mode.
+    """Whether a session's labels select rollover (Omnigent-owned) context.
 
-    :param labels: Session labels, or ``None``.
-    :returns: ``True`` only when :data:`CONTEXT_MODE_LABEL` is exactly
-        :data:`ROLLOVER_MODE_VALUE`.
+    :param labels: The session's labels, or ``None``.
+    :returns: ``True`` only when ``CONTEXT_MODE_LABEL`` is exactly
+        ``"rollover"``.
     """
     if not labels:
         return False
     return labels.get(CONTEXT_MODE_LABEL) == ROLLOVER_MODE_VALUE
 
 
-# Every label that configures rollover mode for a session; a side chat forked
-# from the super chat drops all of them (routes_core.py fork handling).
+# Every label that configures rollover mode for a session. A side chat forked
+# from the super chat KEEPS these — it stays a rollover session, seeded from
+# the parent's checkpoint rather than dropped back to upstream behavior.
 ROLLOVER_SESSION_LABELS: frozenset[str] = frozenset(
     {CONTEXT_MODE_LABEL, ROLLOVER_AT_TOKENS_LABEL, ROLLOVER_KEEP_MESSAGES_LABEL}
 )

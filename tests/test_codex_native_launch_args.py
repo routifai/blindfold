@@ -13,9 +13,19 @@ from omnigent.harnesses.codex_native.launch_args import (
     absolute_codex_path,
     canonical_codex_launch_args,
     codex_config_profile,
+    codex_rollover_config_overrides,
     materialize_codex_config_profile,
     redact_codex_launch_args,
 )
+
+
+def test_codex_rollover_config_overrides_disables_auto_compact() -> None:
+    """Rollover overrides raise Codex's own auto-compact threshold out of reach."""
+    overrides = codex_rollover_config_overrides()
+    assert len(overrides) == 1
+    key, _, value = overrides[0].partition("=")
+    assert key == "model_auto_compact_token_limit"
+    assert int(value) > 100_000_000  # far beyond any real model context window
 
 
 def test_codex_paths_expand_home_without_resolving_symlinks(

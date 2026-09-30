@@ -14,7 +14,7 @@ Every agent codes against these names. Nobody renames them.
 | Threshold label | `omnigent.context.rollover_at_tokens` (int). Default: 45% of the session's context window, or 90,000 when the window is unknown |
 | Keep label | `omnigent.context.rollover_keep_messages` (int, default 20) |
 | Module | `omnigent/context/` (new package) |
-| Label helpers | `omnigent/context/labels.py`: `CONTEXT_MODE_LABEL`, `is_rollover(labels) -> bool`, `ROLLOVER_SESSION_LABELS` (dropped by side-chat forks) |
+| Label helpers | `omnigent/context/labels.py`: `CONTEXT_MODE_LABEL`, `is_rollover(labels) -> bool`, `ROLLOVER_SESSION_LABELS` (kept by side-chat forks) |
 | Rollover item | A normal `compaction` item (`CompactionData`): `summary`, `last_item_id`, `compacted_messages` = [summary exchange] + the last N messages with their tool items |
 | Tool name | `session_history`, actions `read` / `search` / `status` |
 | Prompt text | `ROLLOVER_CONTEXT_INSTRUCTION` in `omnigent/runtime/prompt.py`, added only for rollover sessions |
@@ -37,9 +37,12 @@ Worktree `omnigent-ro-core`, branch `ro-core`.
   if over the threshold, write the compaction item, then recycle the native
   pane through the reaper's close path. The next turn's ensure path relaunches
   the CLI from the rebuilt history. Never trigger mid-turn.
-- A side-chat fork drops `ROLLOVER_SESSION_LABELS` (in `routes_core.py`).
+- A side chat forked from a rollover session **stays in rollover mode** and is
+  seeded Muse-style: its CLI opens from one compaction item holding the
+  parent's latest summary plus the kept tail, never the full transcript.
+  Non-rollover forks behave exactly as upstream.
 - Tests: the selection and counting rules, the trigger threshold, "no
-  rollover mid-turn", "OFF is unchanged", and the side-chat drop.
+  rollover mid-turn", "OFF is unchanged", and side-chat seeding.
 
 ### B: Recall tool and system-prompt instructions
 
@@ -103,7 +106,10 @@ Worktree `omnigent-ro-harness`, branch `ro-harness`.
      `session_history` tool call must be in the record.
 - A baseline session (mode unset) behaves as upstream.
 
-Later: Pi (compaction in `resume.py`, a token estimate), memory, and the time tag.
+Later: Pi (compaction in `resume.py`, a token estimate); a permission-gated
+`session_history` read of the same user's other chats (the main chat pulls from
+side chats, nothing is pushed, as in Muse); memory with an hourly consolidation
+job that runs only when there are new turns; and the time tag.
 
 ## Rules for every agent
 

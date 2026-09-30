@@ -14,6 +14,20 @@ from urllib.parse import urlsplit, urlunsplit
 import tomlkit
 from tomlkit.exceptions import TOMLKitError
 
+#: A token count no conversation reaches: keeps Codex's own auto-compact from
+#: ever firing without relying on an undocumented "disabled" sentinel.
+_CODEX_AUTO_COMPACT_DISABLE_TOKEN_LIMIT = 999_999_999_999
+
+
+def codex_rollover_config_overrides() -> list[str]:
+    """``-c`` overrides that turn off Codex's own auto-compaction.
+
+    For rollover sessions only: Omnigent recycles the pane and rebuilds
+    the transcript itself, so Codex must never compact on its own.
+    """
+    return [f"model_auto_compact_token_limit={_CODEX_AUTO_COMPACT_DISABLE_TOKEN_LIMIT}"]
+
+
 _CODEX_CONFIG_PATHS = (
     "agents.*.config_file",
     "experimental_compact_prompt_file",
