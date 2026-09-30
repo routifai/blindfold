@@ -28,6 +28,7 @@ from typing import Any
 
 import httpx
 from playwright.async_api import Page, async_playwright, expect
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 BASE_URL = os.environ.get("ROLLOVER_BASE_URL", "http://127.0.0.1:8795")
 OUT_DIR = Path(os.environ.get("ROLLOVER_OUT_DIR", "rollover-e2e-out"))
@@ -199,7 +200,11 @@ async def send_message_and_wait(
         '[data-testid="message-bubble"][data-role="assistant"]:not([data-e2e-seen])'
     )
     t0 = time.monotonic()
-    await page.get_by_role("button", name="Send", exact=True).click()
+    try:
+        await page.get_by_role("button", name="Send", exact=True).click(timeout=10_000)
+    except PlaywrightTimeoutError:
+        # The button is sometimes covered briefly on a freshly opened page.
+        await composer.press("Enter")
 
     first_output_s: float | None = None
     deadline = time.monotonic() + TURN_TIMEOUT_S
