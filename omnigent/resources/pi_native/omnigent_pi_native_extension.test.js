@@ -688,6 +688,30 @@ async function testMessageIsNotHeldOutsideCompaction() {
   assert("a message is delivered normally when no compaction is running", sent.length === 1);
 }
 
+function testSessionHistoryToolCarriesPromptGuidelines() {
+  const h = makeHarness({
+    configOverrides: {
+      tools: [
+        { name: "session_history", description: "Recall the exact record of THIS session", parameters: {} },
+        { name: "sys_other", description: "Other tool", parameters: {} },
+      ],
+    },
+  });
+  const tool = h.registeredTools.session_history;
+  assert(
+    "session_history registers a prompt snippet and guideline naming the tool",
+    tool &&
+      /session_history/.test(tool.promptGuidelines?.[0] ?? "") &&
+      tool.promptSnippet.startsWith("Recall exact earlier messages"),
+    JSON.stringify(tool && { s: tool.promptSnippet, g: tool.promptGuidelines }),
+  );
+  assert(
+    "other bridged tools keep the default snippet and no guidelines",
+    h.registeredTools.sys_other.promptGuidelines === undefined &&
+      h.registeredTools.sys_other.promptSnippet === "Other tool",
+  );
+}
+
 function testRolloverHandlerNotRegisteredOutsideRolloverMode() {
   const h = makeHarness({ captureEvents: true });
   assert(
@@ -819,6 +843,7 @@ async function testRolloverCompactionFailsOpenOnSummarizerError() {
     await testAgentLoopInterruptFallbackNoIsIdleBeforeTurnStart();
     await testMidTurnInterruptFallbackNoIsIdle();
     await testAgentStartClearsStaleWindow();
+    testSessionHistoryToolCarriesPromptGuidelines();
     testRolloverHandlerNotRegisteredOutsideRolloverMode();
     testRolloverHandlerRegisteredForRolloverSessions();
     await testRolloverCompactsOnceASettledTurnPassesTheThreshold();

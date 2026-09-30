@@ -69,10 +69,11 @@ ROLLOVER_CONTEXT_INSTRUCTION = (
     "not part of the compacted summary. When earlier context matters — the "
     'original request, exact wording, a prior decision, "what did I '
     'say/decide" — recover it with the session_history tool (search, or '
-    "read paging backward) before answering; in a CLI it may be listed as "
-    "mcp__omnigent__session_history and need loading through tool search. "
-    "State plainly what you couldn't recover. Never present an inference as "
-    "what happened."
+    "read paging backward) before answering; it may be namespaced, e.g. "
+    "mcp__omnigent__session_history. Messages visible to you may start after "
+    "a compaction, so the oldest one you can see is not the first. State "
+    "plainly what you couldn't recover. Never present an inference as what "
+    "happened."
 )
 
 

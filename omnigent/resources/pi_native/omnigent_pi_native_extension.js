@@ -1117,6 +1117,17 @@ async function postModelOptions(config, ctx) {
   });
 }
 
+// Pi lists extension tools in its system prompt only with these; session_history
+// needs them so the model recalls instead of trusting its post-compaction view.
+const TOOL_PROMPT_HINTS = {
+  session_history: {
+    snippet: "Recall exact earlier messages of this session (read or search)",
+    guidelines: [
+      "Before answering about earlier messages (first message, exact wording, a prior decision), call session_history: the messages you can see may start after a compaction.",
+    ],
+  },
+};
+
 // Longest a message waits for a rollover compaction before it is delivered anyway.
 const ROLLOVER_HOLD_MAX_MS = 120000;
 
@@ -1563,7 +1574,9 @@ module.exports = function (pi) {
           name,
           label: name,
           description,
-          promptSnippet: description ? description.slice(0, 120) : name,
+          promptSnippet:
+            TOOL_PROMPT_HINTS[name]?.snippet ?? (description ? description.slice(0, 120) : name),
+          ...(TOOL_PROMPT_HINTS[name] ? { promptGuidelines: TOOL_PROMPT_HINTS[name].guidelines } : {}),
           parameters,
           async execute(_toolCallId, params) {
             return callOmnigentTool(config, name, params || {});
