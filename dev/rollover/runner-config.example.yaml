@@ -1,0 +1,17 @@
+providers:
+  anthropic:
+    anthropic:
+      api_key_ref: env:ANTHROPIC_API_KEY
+      base_url: https://api.anthropic.com
+      models:
+        default: claude-haiku-4-5-20251001
+    default: anthropic
+    kind: key
+  openai:
+    openai:
+      api_key_ref: env:OPENAI_API_KEY
+      base_url: https://api.openai.com/v1
+      models:
+        default: gpt-5-nano
+    default: openai
+    kind: key
