@@ -570,6 +570,7 @@ async def run_warm_or_cold(
                     response_text=None, error=spawn_error, warm_reused=False, reason=reason
                 )
             _WARM_SESSIONS[session_id] = state
+        assert state is not None  # either just reused (warm_reused) or just spawned above
         setup_ms = (time.monotonic() - setup_started) * 1000
 
         started = time.monotonic()
