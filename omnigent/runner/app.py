@@ -184,6 +184,7 @@ from omnigent.runner.subagent_routing import (
     routing_class_from_snapshot,
     session_routing_class,
 )
+from omnigent.runtime.compaction import count_tokens
 from omnigent.runtime.harnesses.process_manager import HarnessProcessManager, NoLiveHarnessError
 from omnigent.runtime.prompt import (
     build_instructions,
@@ -8070,11 +8071,21 @@ def create_runner_app(
         resp.raise_for_status()
         reaper = getattr(app.state, "native_pane_reaper", None)
         reaped = await reaper.reap_now(conv_id) if reaper is not None else False
+        checkpoint_id = None
+        with contextlib.suppress(Exception):  # audit field only, never fail the rollover
+            checkpoint_id = resp.json().get("id")
+        compacted = data.compacted_messages or []
+        first_kept_item_id = compacted[2].get("id") if len(compacted) > 2 else None
+        tokens_after = count_tokens(compacted, model) if compacted else data.token_count
         _logger.info(
-            "rollover applied for %s: tokens_before=%s threshold=%s pane_reaped=%s",
+            "rollover applied for %s: trigger=threshold tokens_before=%s threshold=%s "
+            "tokens_after=%s checkpoint_item_id=%s first_kept_item_id=%s pane_reaped=%s",
             conv_id,
             tokens_before,
             threshold,
+            tokens_after,
+            checkpoint_id,
+            first_kept_item_id,
             reaped,
             extra={"session_id": conv_id},
         )
