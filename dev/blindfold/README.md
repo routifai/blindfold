@@ -14,6 +14,7 @@ The Omnigent record still keeps every message, so the UI shows the full chat.
 | `omnigent.blindfold=true` | Turn blindfold mode on for the session. Set it when creating the session. |
 | `omnigent.context.max_messages=<N>` | History window: the last N messages (user + assistant), the last one always being the new message. Tool calls stay with their message. Server default: 20. |
 | `omnigent.context.memory_fixture=<text>` | Test hook: one synthetic long-term memory item. |
+| `omnigent.context.lifecycle=warm_if_valid` | pi-native only so far. Reuse a long-lived `pi --mode rpc` process across turns instead of a fresh one-shot every turn, whenever it's still valid (module docstring: `omnigent/harnesses/pi_native/blindfold_warm.py`). Unset (default) is `fresh` — today's behavior, unchanged. |
 
 ## How it works
 
@@ -79,6 +80,25 @@ calls until the whole turn completes.
 Not yet mapped: Codex's `mcp_tool_call`, `image_view`, and
 `image_generation` item types (mirroring the app-server forwarder's own gap
 — `mcpToolCall`'s shape hasn't been verified against the real CLI either).
+
+## Warm lifecycle (pi-native)
+
+`omnigent.context.lifecycle=warm_if_valid` opts a pi-native session into
+reusing one long-lived `pi --mode rpc` process across turns (started with the
+same settings as the one-shot path: fresh `PI_CODING_AGENT_DIR`,
+`--no-context-files`, `--append-system-prompt`, `--model`, `--session` of the
+assembler-written history) instead of a fresh `pi --print` process every
+turn. Every turn re-checks validity before reusing: process alive, not idle
+past 10 minutes, system+memory prompt unchanged, model unchanged, and the
+assembler's selected prior-history ids for this turn exactly match what the
+process has already seen — a sliding `max_messages` window dropping an old
+message fails this check rather than silently under-forgetting. Any failure
+discards the process and starts a fresh one with the current turn's own
+context; a crash mid-turn fails just that turn, exactly like a one-shot
+process exiting non-zero. See `omnigent/harnesses/pi_native/blindfold_warm.py`
+for the full design and `tests/test_blindfold_warm_pi.py` for the scenarios.
+Unset (default), a pi-native session runs exactly as described above (one
+fresh process per turn) — this label is off by default.
 
 ## Known limits
 
