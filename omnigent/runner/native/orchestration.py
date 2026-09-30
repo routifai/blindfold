@@ -2508,7 +2508,7 @@ async def _auto_create_pi_terminal(
         from omnigent.runner.tool_dispatch import build_native_relay_tool_schemas
 
         spec_for_tools = _unwrap_resolved_spec(agent_spec)
-        pi_tools = build_native_relay_tool_schemas(spec_for_tools)
+        pi_tools = build_native_relay_tool_schemas(spec_for_tools, labels=launch_config.labels)
     except Exception:  # noqa: BLE001 — tool registration is additive
         _logger.warning(
             "Failed to build pi-native tool schemas for session %s; "
@@ -2546,6 +2546,11 @@ async def _auto_create_pi_terminal(
         external_session_id=resume_session_id,
         approve=await asyncio.to_thread(pi_supports_approve, pi_command),
     )
+    from omnigent.context.labels import is_rollover
+    from omnigent.runtime.prompt import ROLLOVER_CONTEXT_INSTRUCTION
+
+    if is_rollover(launch_config.labels):
+        pi_args.extend(["--append-system-prompt", ROLLOVER_CONTEXT_INSTRUCTION])
     pi_env = {
         PI_NATIVE_CONFIG_ENV_VAR: str(config),
         "OMNIGENT_PI_NATIVE_BRIDGE_DIR": str(bridge_dir),

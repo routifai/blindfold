@@ -251,9 +251,8 @@ async def test_triggers_and_recycles_pane_when_over_threshold(
     # Summary pair first, then the last turn (m8, m9).
     assert [m.get("id") for m in compacted if "id" in m] == ["m8", "m9"]
     assert fake_reaper.reaped_ids == [conv_id]
-    # Bug fix (PLAN.md "A, revision 2" point 5): the reported-usage label is
-    # refreshed to the real post-rollover figure so a stale pre-rollover
-    # number can't immediately re-trigger on the next turn.
+    # The reported-usage label is refreshed to the post-rollover figure, so a
+    # stale pre-rollover number can't re-trigger on the next turn.
     assert len(fake_client.posted_usage_events) == 1
     assert fake_client.posted_usage_events[0]["data"]["context_tokens"] == data["token_count"]
 

@@ -457,3 +457,41 @@ async def test_summarizer_gets_one_transcript_message_not_live_turns() -> None:
     assert "<conversation>" in transcript
     assert not any(m.get("role") == "assistant" for m in client.seen_messages)
     assert "automatically generated summary" in client.seen_instructions + transcript
+
+
+@pytest.mark.asyncio
+async def test_kept_tool_output_is_capped_so_one_turn_cannot_loop_rollovers() -> None:
+    """A huge tool result in the always-kept last turn is cut, so the relaunched
+    context can drop under the threshold instead of rolling over every turn."""
+    from omnigent.context.rollover import _KEPT_OUTPUT_MAX_CHARS
+
+    items = _turn(1) + _turn(2, with_tool=True)
+    output_item = next(i for i in items if i["type"] == "function_call_output")
+    output_item["output"] = "x" * (_KEPT_OUTPUT_MAX_CHARS * 5)
+    data = await build_rollover_item(
+        items,
+        previous_summary=None,
+        keep_tokens=1,
+        model="gpt-4o",
+        llm_client=_ReturnsTextClient("S"),
+    )
+    kept = next(m for m in data.compacted_messages if m.get("type") == "function_call_output")
+    assert len(kept["output"]) < _KEPT_OUTPUT_MAX_CHARS + 200
+    assert "session_history" in kept["output"]
+    assert len(output_item["output"]) == _KEPT_OUTPUT_MAX_CHARS * 5  # record untouched
+
+
+@pytest.mark.asyncio
+async def test_previous_header_is_not_fed_back_so_it_never_nests() -> None:
+    client = _ReturnsTextClient("NEW SUMMARY")
+    data = await build_rollover_item(
+        _turn(1),
+        previous_summary=f"{CHECKPOINT_HEADER}\n\nOLD SUMMARY",
+        keep_tokens=1,
+        model="gpt-4o",
+        llm_client=client,
+    )
+    transcript = client.seen_messages[0]["content"][0]["text"]
+    assert "OLD SUMMARY" in transcript
+    assert CHECKPOINT_HEADER not in transcript
+    assert data.summary.count(CHECKPOINT_HEADER) == 1

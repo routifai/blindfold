@@ -170,6 +170,27 @@ def resolve_keep_tokens(labels: Mapping[str, str] | None) -> int:
     return value if value is not None else DEFAULT_KEEP_TOKENS
 
 
+# A kept turn's tool output above this is cut, so one huge result can't keep the
+# relaunched context over the threshold and trigger a rollover every turn.
+_KEPT_OUTPUT_MAX_CHARS = 8_000
+_TRUNCATED_OUTPUT_NOTE = "\n[output truncated at rollover; the full result is in session_history]"
+
+
+def _cap_tool_outputs(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Truncate oversized ``function_call_output`` text in a kept tail."""
+    capped: list[dict[str, Any]] = []
+    for item in items:
+        output = item.get("output")
+        if (
+            item.get("type") == "function_call_output"
+            and isinstance(output, str)
+            and len(output) > _KEPT_OUTPUT_MAX_CHARS
+        ):
+            item = {**item, "output": output[:_KEPT_OUTPUT_MAX_CHARS] + _TRUNCATED_OUTPUT_NOTE}
+        capped.append(item)
+    return capped
+
+
 def select_recent(
     items: list[dict[str, Any]],
     *,
@@ -182,11 +203,11 @@ def select_recent(
     A turn is a user message plus everything after it up to (not including)
     the next user message; turns are never split, so a kept ``function_call``
     keeps its output. The most recent turn is always kept (rollover runs right
-    after it finishes); earlier turns are added while the tail stays within
-    *keep_tokens*.
+    after it finishes); earlier turns are added while the whole tail, last turn
+    included, stays within *keep_tokens*.
 
     :param items: Chronological (oldest first) flat item dicts.
-    :param keep_tokens: Token budget for the tail beyond the last turn.
+    :param keep_tokens: Token budget for the whole tail, last turn included.
     :param model: LLM model string, used to pick a tokenizer for the budget.
     :returns: The selected trailing whole turns, chronological, or ``[]`` when
         *items* has no user message.
@@ -271,7 +292,9 @@ def _transcript_message(
     """
     lines: list[str] = []
     if previous_summary:
-        lines += [_SUMMARY_REQUEST_TEXT, "", previous_summary, ""]
+        # Stored summaries carry the header; feed back only the summary itself.
+        body = previous_summary.removeprefix(CHECKPOINT_HEADER).lstrip()
+        lines += [_SUMMARY_REQUEST_TEXT, "", body, ""]
     lines.append("<conversation>")
     for item in items:
         kind = item.get("type")
@@ -380,10 +403,8 @@ async def build_rollover_item(
         extra_instructions=state_file_summarizer_instruction(),
     )
     summary_text = f"{CHECKPOINT_HEADER}\n\n{summary['text']}"
-    recent = select_recent(
-        items_since_previous_compaction,
-        keep_tokens=keep_tokens,
-        model=model,
+    recent = _cap_tool_outputs(
+        select_recent(items_since_previous_compaction, keep_tokens=keep_tokens, model=model)
     )
     last_item_id = items_since_previous_compaction[-1]["id"]
     # The relaunched CLI sees the header where the summarizer saw its request.

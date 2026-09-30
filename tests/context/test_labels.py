@@ -13,7 +13,7 @@ from omnigent.context.labels import (
 
 
 def test_context_mode_label_shared_contract_value() -> None:
-    """Fixed name from rollover/PLAN.md's shared contract — nobody renames it."""
+    """Fixed label name; other components key off it."""
     assert CONTEXT_MODE_LABEL == "omnigent.context.mode"
     assert ROLLOVER_MODE_VALUE == "rollover"
 

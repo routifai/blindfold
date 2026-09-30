@@ -404,3 +404,86 @@ async def test_auto_create_pi_terminal_bakes_tunnel_token_into_config(
         )
     )
     assert config["authHeaders"][RUNNER_TUNNEL_TOKEN_HEADER] == "tok-abc"
+
+
+@pytest.mark.asyncio
+async def test_auto_create_pi_terminal_rollover_gets_recall_tool_and_instruction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rollover Pi session registers ``session_history`` and gets the recall instruction."""
+    import omnigent.harnesses.pi_native.bridge as pi_bridge
+    import omnigent.harnesses.pi_native.credentials as creds
+    from omnigent.context.labels import CONTEXT_MODE_LABEL, ROLLOVER_MODE_VALUE
+    from omnigent.runtime.prompt import ROLLOVER_CONTEXT_INSTRUCTION
+
+    session_id = "conv_pi_rollover_recall"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(pi_bridge, "_BRIDGE_ROOT", tmp_path / "pi-native")
+    monkeypatch.setenv("OMNIGENT_RUNNER_WORKSPACE", str(workspace))
+    monkeypatch.setenv("RUNNER_SERVER_URL", "http://ap.example")
+    monkeypatch.setattr("omnigent.runner._entry._make_auth_token_factory", lambda: None)
+    monkeypatch.setattr(
+        "omnigent.harnesses.pi_native.main.resolve_pi_executable", lambda: "/usr/bin/pi"
+    )
+    real_resolve = creds.resolve_pi_native_provider
+    monkeypatch.setattr(
+        creds,
+        "resolve_pi_native_provider",
+        lambda *, model=None, config_loader=None: real_resolve(
+            model=model, config_loader=_key_provider_config
+        ),
+    )
+
+    class _SnapshotClient:
+        async def get(
+            self, url: str, *, timeout: float, params: dict[str, str] | None = None
+        ) -> httpx.Response:
+            del url, timeout
+            return httpx.Response(
+                200,
+                json={
+                    "workspace": str(workspace),
+                    "terminal_launch_args": None,
+                    "external_session_id": None,
+                    "labels": {CONTEXT_MODE_LABEL: ROLLOVER_MODE_VALUE},
+                },
+                request=httpx.Request("GET", f"/v1/sessions/{session_id}"),
+            )
+
+    launched: list[Any] = []
+
+    class _FakeResourceRegistry:
+        terminal_registry = None
+
+        async def launch_required_terminal(
+            self, session_id: str, terminal_name: str, session_key: str, spec: Any, **_: Any
+        ) -> SessionResourceView:
+            del terminal_name, session_key
+            launched.append(spec)
+            return SessionResourceView(
+                id="terminal_pi_main", type="terminal", session_id=session_id, name="pi"
+            )
+
+    spec = AgentSpec(
+        spec_version=1,
+        name="pi-rollover-recall",
+        executor=ExecutorSpec(type="omnigent", config={"harness": "pi-native"}),
+    )
+    await _auto_create_pi_terminal(
+        session_id,
+        _FakeResourceRegistry(),  # type: ignore[arg-type]
+        lambda _sid, _event: None,
+        server_client=_SnapshotClient(),  # type: ignore[arg-type]
+        agent_spec=spec,
+    )
+
+    args = launched[0].args
+    assert args[args.index("--append-system-prompt") + 1] == ROLLOVER_CONTEXT_INSTRUCTION
+    config = json.loads(
+        pi_bridge.config_path(pi_bridge.bridge_dir_for_session_id(session_id)).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert "session_history" in {tool["name"] for tool in config["tools"]}

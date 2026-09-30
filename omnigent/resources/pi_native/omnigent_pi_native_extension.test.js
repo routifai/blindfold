@@ -592,6 +592,41 @@ async function testRolloverCompactsOnceASettledTurnPassesTheThreshold() {
   assert("unknown token count never compacts", compacts === 1);
 }
 
+async function testRolloverDoesNotRecompactWhileStillOverTheThreshold() {
+  const h = makeHarness({ captureEvents: true, configOverrides: makeRolloverConfig() });
+  let compacts = 0;
+  let onError = null;
+  const ctxAt = (tokens) => ({
+    getContextUsage: () => ({ tokens, contextWindow: 200000, percent: null }),
+    compact: (opts) => {
+      compacts += 1;
+      onError = opts && opts.onError;
+    },
+  });
+  await h.handlers.agent_settled({ type: "agent_settled" }, ctxAt(1500));
+  await h.handlers.agent_settled({ type: "agent_settled" }, ctxAt(1500));
+  assert("a tail still over the threshold does not compact every turn", compacts === 1);
+  await h.handlers.agent_settled({ type: "agent_settled" }, ctxAt(200));
+  await h.handlers.agent_settled({ type: "agent_settled" }, ctxAt(1500));
+  assert("compacts again once the context has dropped under the threshold", compacts === 2);
+  const origError = console.error;
+  console.error = () => {};
+  onError(new Error("boom"));
+  console.error = origError;
+  await h.handlers.agent_settled({ type: "agent_settled" }, ctxAt(1500));
+  assert("a failed compaction is retried on the next settled turn", compacts === 3);
+}
+
+function testStripCheckpointHeaderUnnestsARolledUpSummary() {
+  const strip = makeHarness({ captureEvents: true }).mod.testHooks.stripCheckpointHeader;
+  assert(
+    "the header is removed from a prior summary",
+    strip("HEADER-TEXT\n\nBODY", "HEADER-TEXT") === "BODY",
+  );
+  assert("a summary without the header is unchanged", strip("BODY", "HEADER-TEXT") === "BODY");
+  assert("undefined passes through", strip(undefined, "HEADER-TEXT") === undefined);
+}
+
 function testRolloverHandlerNotRegisteredOutsideRolloverMode() {
   const h = makeHarness({ captureEvents: true });
   assert(
@@ -611,6 +646,7 @@ function testRolloverHandlerRegisteredForRolloverSessions() {
 async function testRolloverCompactionReturnsHeaderSummaryAndFirstKeptEntryId() {
   const h = makeHarness({ captureEvents: true, configOverrides: makeRolloverConfig() });
   let capturedInstructions = null;
+  let capturedPrevious = null;
   h.mod.testHooks.loadPiCompactionApi = () => ({
     generateSummary: async (
       _messages,
@@ -620,8 +656,10 @@ async function testRolloverCompactionReturnsHeaderSummaryAndFirstKeptEntryId() {
       _headers,
       _signal,
       customInstructions,
+      previousSummary,
     ) => {
       capturedInstructions = customInstructions;
+      capturedPrevious = previousSummary;
       return "SUMMARY BODY";
     },
   });
@@ -634,7 +672,7 @@ async function testRolloverCompactionReturnsHeaderSummaryAndFirstKeptEntryId() {
   const event = {
     preparation: {
       messagesToSummarize: [],
-      previousSummary: undefined,
+      previousSummary: "HEADER-TEXT\n\nOLD BODY",
       tokensBefore: 12345,
       firstKeptEntryId: "entry_7",
       settings: { reserveTokens: 4096 },
@@ -648,6 +686,11 @@ async function testRolloverCompactionReturnsHeaderSummaryAndFirstKeptEntryId() {
     "the summarizer instruction's date placeholder is substituted before the call",
     capturedInstructions === `Write a state file for ${today}.`,
     String(capturedInstructions),
+  );
+  assert(
+    "the prior summary reaches the summarizer without its header",
+    capturedPrevious === "OLD BODY",
+    String(capturedPrevious),
   );
   assert(
     "the returned compaction carries the fixed checkpoint header + summary",
@@ -718,6 +761,8 @@ async function testRolloverCompactionFailsOpenOnSummarizerError() {
     testRolloverHandlerNotRegisteredOutsideRolloverMode();
     testRolloverHandlerRegisteredForRolloverSessions();
     await testRolloverCompactsOnceASettledTurnPassesTheThreshold();
+    await testRolloverDoesNotRecompactWhileStillOverTheThreshold();
+    testStripCheckpointHeaderUnnestsARolledUpSummary();
     await testRolloverCompactionReturnsHeaderSummaryAndFirstKeptEntryId();
     await testRolloverCompactionFailsOpenOnSummarizerError();
   } finally {

@@ -23,7 +23,7 @@ ROLLOVER_MODE_VALUE = "rollover"
 # (see rollover.resolve_rollover_threshold).
 ROLLOVER_AT_TOKENS_LABEL = "omnigent.context.rollover_at_tokens"
 
-# Token budget for the kept tail beyond the last turn (whole turns only; see
+# Token budget for the kept tail (whole turns only; the last turn is always kept; see
 # rollover.select_recent). Unset -> DEFAULT_KEEP_TOKENS.
 ROLLOVER_KEEP_TOKENS_LABEL = "omnigent.context.rollover_keep_tokens"
 DEFAULT_KEEP_TOKENS = 16_000

@@ -1117,6 +1117,13 @@ async function postModelOptions(config, ctx) {
   });
 }
 
+/** Whether a settled turn left the context at or over the rollover threshold. */
+function shouldRolloverAfterTurn(usage, rollover) {
+  const threshold = rollover && rollover.thresholdTokens;
+  if (!usage || typeof usage.tokens !== "number" || typeof threshold !== "number") return false;
+  return usage.tokens >= threshold;
+}
+
 /**
  * Whether this session should own Pi's auto-compaction (rollover mode).
  *
@@ -1126,15 +1133,14 @@ async function postModelOptions(config, ctx) {
  * non-rollover session's config carries no ``rollover`` key, so this stays
  * false and the caller never registers the ``session_before_compact`` hook.
  */
-/** Whether a settled turn left the context at or over the rollover threshold. */
-function shouldRolloverAfterTurn(usage, rollover) {
-  const threshold = rollover && rollover.thresholdTokens;
-  if (!usage || typeof usage.tokens !== "number" || typeof threshold !== "number") return false;
-  return usage.tokens >= threshold;
-}
-
 function shouldHandleRolloverCompact(config) {
   return Boolean(config && config.rollover && config.rollover.checkpointHeader);
+}
+
+/** Drop the fixed checkpoint header so a rolled-up summary never nests it. */
+function stripCheckpointHeader(summaryText, header) {
+  if (typeof summaryText !== "string" || typeof header !== "string" || !header) return summaryText;
+  return summaryText.startsWith(header) ? summaryText.slice(header.length).trimStart() : summaryText;
 }
 
 /** Replace the summarizer instruction's date placeholder with today's date. */
@@ -1228,8 +1234,8 @@ async function reportRolloverCompaction(config, { summary, model, tokensBefore }
  * Handle Pi's ``session_before_compact`` for a rollover session: build
  * Omnigent's state-file summary with Pi's own ``generateSummary`` and hand
  * it back so Pi records ITS OWN ``CompactionEntry`` (no pane recycle).
- * Fails open on any error so
- * Pi's default compaction still runs rather than stalling the session.
+ * Fails open on any error so Pi's default compaction still runs rather than
+ * stalling the session.
  */
 async function handleRolloverBeforeCompact(config, event, ctx) {
   const preparation = event && event.preparation;
@@ -1257,7 +1263,7 @@ async function handleRolloverBeforeCompact(config, event, ctx) {
       auth.headers,
       event.signal,
       customInstructions,
-      preparation.previousSummary,
+      stripCheckpointHeader(preparation.previousSummary, config.rollover.checkpointHeader),
     );
     if (typeof summaryText !== "string" || !summaryText.trim()) return undefined;
     const built = buildRolloverCompactionResult({
@@ -2087,10 +2093,22 @@ module.exports = function (pi) {
   if (shouldHandleRolloverCompact(config)) {
     // Omnigent's threshold, not Pi's window-relative one: compact once a
     // settled turn leaves the context over it; the hook below writes the summary.
+    // Disarmed after a trigger until a settled turn reads under the threshold,
+    // so a kept tail that alone exceeds it can't compact on every turn.
+    let rolloverArmed = true;
     pi.on("agent_settled", async (_event, ctx) => {
-      if (!shouldRolloverAfterTurn(ctx.getContextUsage?.(), config.rollover)) return;
+      const usage = ctx.getContextUsage?.();
+      if (!shouldRolloverAfterTurn(usage, config.rollover)) {
+        if (usage && typeof usage.tokens === "number") rolloverArmed = true;
+        return;
+      }
+      if (!rolloverArmed) return;
+      rolloverArmed = false;
       ctx.compact({
-        onError: (err) => console.error(`[omnigent] rollover compaction failed: ${err?.message ?? err}`),
+        onError: (err) => {
+          rolloverArmed = true;
+          console.error(`[omnigent] rollover compaction failed: ${err?.message ?? err}`);
+        },
       });
     });
     pi.on("session_before_compact", async (event, ctx) => {
@@ -2391,6 +2409,7 @@ module.exports = function (pi) {
 module.exports.testHooks = {
   shouldHandleRolloverCompact,
   shouldRolloverAfterTurn,
+  stripCheckpointHeader,
   buildRolloverCompactionResult,
   applyTodayPlaceholder,
   loadPiCompactionApi: _loadPiCompactionApi,
