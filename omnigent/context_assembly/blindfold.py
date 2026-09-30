@@ -13,7 +13,8 @@ from __future__ import annotations
 import logging
 import urllib.parse
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 import httpx
 
@@ -28,6 +29,13 @@ _logger = logging.getLogger(__name__)
 _DEFAULT_MAX_INPUT_TOKENS = 24_000
 
 _REQUEST_TIMEOUT_SECONDS = 10.0
+
+# How many of the session's most recent items to fetch locally before asking
+# the assembler which of them to keep. The assembler's own default window
+# (DEFAULT_MAX_MESSAGES=20 messages, each with at most a handful of attached
+# tool items) fits comfortably inside this; a test that asks for a bigger
+# omnigent.context.max_messages than this can support will see it clamped.
+_RECENT_ITEMS_FETCH_LIMIT = 300
 
 
 def is_blindfolded(labels: dict[str, str] | None) -> bool:
@@ -46,12 +54,13 @@ class BlindfoldTurnContext:
     :param system_prompt: The rendered system text (agent instructions +
         the ``<long_term_memory>`` block, when present) for the harness's
         system-prompt channel (e.g. ``--append-system-prompt``).
-    :param prior_history_item_ids: Record item ids to replay in the CLI's
-        native history format, in order — **excluding** the new message
-        itself. The new message is still delivered through the harness's
-        normal live-input channel (typing into the pane / the turn's
-        prompt), exactly as an unblindfolded turn would; only what came
-        *before* it is injected as synthesized history. Baking the new
+    :param prior_history_items: Flat record item dicts (the same shape
+        ``GET /sessions/{id}/items`` returns) to feed a harness's own
+        transcript/session-file rebuilder, in order — **excluding** the new
+        message itself. The new message is still delivered through the
+        harness's normal live-input channel (typing into the pane / the
+        turn's prompt), exactly as an unblindfolded turn would; only what
+        came *before* it is injected as synthesized history. Baking the new
         message into both the resume file and the live input would show it
         to the model twice.
     :param fallback: ``True`` when this is the fail-closed shape (contract
@@ -60,8 +69,8 @@ class BlindfoldTurnContext:
     """
 
     system_prompt: str
-    prior_history_item_ids: list[str]
-    fallback: bool
+    prior_history_items: list[dict[str, Any]] = field(default_factory=list)
+    fallback: bool = False
 
 
 async def fetch_blindfold_turn_context(
@@ -100,17 +109,26 @@ async def fetch_blindfold_turn_context(
     """
     try:
         quoted_id = urllib.parse.quote(session_id, safe="")
-        last_item_resp = await server_client.get(
+        # Fetch the recent window ourselves (desc, newest first) — one round
+        # trip covers both finding the new message (items[0]) and resolving
+        # the assembler's refs back to full item dicts below, with no need
+        # for a second items call.
+        recent_resp = await server_client.get(
             f"/v1/sessions/{quoted_id}/items",
-            params={"limit": 1, "order": "desc"},
+            params={"limit": _RECENT_ITEMS_FETCH_LIMIT, "order": "desc"},
             timeout=_REQUEST_TIMEOUT_SECONDS,
         )
-        last_item_resp.raise_for_status()
-        last_page = last_item_resp.json()
-        last_items = last_page.get("data") if isinstance(last_page, dict) else None
-        if not isinstance(last_items, list) or not last_items:
+        recent_resp.raise_for_status()
+        recent_page = recent_resp.json()
+        recent_items_desc = recent_page.get("data") if isinstance(recent_page, dict) else None
+        if not isinstance(recent_items_desc, list) or not recent_items_desc:
             raise RuntimeError(f"session {session_id!r} has no items yet")
-        new_item_id = last_items[0].get("id")
+        items_by_id = {
+            item["id"]: item
+            for item in recent_items_desc
+            if isinstance(item, dict) and isinstance(item.get("id"), str)
+        }
+        new_item_id = recent_items_desc[0].get("id")
         if not isinstance(new_item_id, str) or not new_item_id:
             raise RuntimeError(f"session {session_id!r}'s last item has no id")
 
@@ -145,7 +163,7 @@ async def fetch_blindfold_turn_context(
         )
         return BlindfoldTurnContext(
             system_prompt=fallback_instructions or "",
-            prior_history_item_ids=[],
+            prior_history_items=[],
             fallback=True,
         )
 
@@ -158,9 +176,15 @@ async def fetch_blindfold_turn_context(
     # The last ref is always the new message (contract §3) — drop it here;
     # see the field docstring on BlindfoldTurnContext for why.
     prior_refs = refs[:-1] if refs and refs[-1] == new_item_id else refs
+    # Resolve refs back to full item dicts using the window already fetched
+    # above. A ref the window doesn't cover (the assembler's own record read
+    # saw further back than our _RECENT_ITEMS_FETCH_LIMIT window) is dropped
+    # rather than fetched again — contract §7's "Invalid ref -> drop; flag"
+    # extends naturally to "unreachable from here".
+    prior_items = [items_by_id[ref] for ref in prior_refs if ref in items_by_id]
 
     return BlindfoldTurnContext(
         system_prompt=render_system_text(response),
-        prior_history_item_ids=prior_refs,
+        prior_history_items=prior_items,
         fallback=response.audit.fallback,
     )

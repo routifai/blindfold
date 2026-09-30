@@ -18,7 +18,14 @@ from omnigent.context_assembly.blindfold import (
     is_blindfolded,
 )
 
-_LAST_ITEM = {"id": "item_new", "type": "message", "role": "user", "content": []}
+def _item(item_id: str, *, role: str = "user") -> dict[str, Any]:
+    return {"id": item_id, "type": "message", "role": role, "content": []}
+
+
+# Desc order (newest first), matching what `order=desc` returns — item_new is
+# the just-persisted message, item_a/item_b are its two most recent
+# predecessors.
+_RECENT_ITEMS_DESC = [_item("item_new"), _item("item_b", role="assistant"), _item("item_a")]
 
 
 def _handler(
@@ -30,9 +37,10 @@ def _handler(
 ) -> httpx.MockTransport:
     def _route(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/items"):
+            assert request.url.params.get("order") == "desc"
             return httpx.Response(
                 items_status,
-                json=items_body if items_body is not None else {"data": [_LAST_ITEM]},
+                json=items_body if items_body is not None else {"data": _RECENT_ITEMS_DESC},
             )
         if request.url.path.endswith("/context"):
             body = json.loads(request.content)
@@ -93,7 +101,7 @@ class TestFetchBlindfoldTurnContext:
     @pytest.mark.asyncio
     async def test_happy_path_drops_the_new_message_from_prior_history(self) -> None:
         ctx = await self._call(_handler())
-        assert ctx.prior_history_item_ids == ["item_a", "item_b"]
+        assert [i["id"] for i in ctx.prior_history_items] == ["item_a", "item_b"]
         assert ctx.system_prompt == "Rules."
         assert ctx.fallback is False
 
@@ -119,7 +127,7 @@ class TestFetchBlindfoldTurnContext:
         ctx = await self._call(_handler(context_body=body))
         assert "<long_term_memory>" in ctx.system_prompt
         assert "MANGO-7" in ctx.system_prompt
-        assert ctx.prior_history_item_ids == []
+        assert ctx.prior_history_items == []
 
     @pytest.mark.asyncio
     async def test_server_side_fallback_flag_is_propagated(self) -> None:
@@ -159,7 +167,7 @@ class TestFetchBlindfoldTurnContext:
                 fallback_instructions="fallback text",
             )
         assert ctx.system_prompt == "fallback text"
-        assert ctx.prior_history_item_ids == []
+        assert ctx.prior_history_items == []
         assert ctx.fallback is True
 
     @pytest.mark.asyncio
@@ -172,7 +180,7 @@ class TestFetchBlindfoldTurnContext:
     async def test_empty_record_fails_closed_locally(self) -> None:
         ctx = await self._call(_handler(items_body={"data": []}))
         assert ctx.fallback is True
-        assert ctx.prior_history_item_ids == []
+        assert ctx.prior_history_items == []
 
     @pytest.mark.asyncio
     async def test_missing_fallback_instructions_yields_empty_system_prompt(self) -> None:

@@ -11443,7 +11443,14 @@ def create_runner_app(
         poll. Every native short-name this can target has a matching
         ``ensure_native_terminal`` branch in ``create_session_terminal``
         (kept in lockstep with ``harness_aliases.NATIVE_HARNESSES``).
+
+        A session labelled ``omnigent.blindfold=true`` additionally treats a
+        live, healthy pane as needing recreation — that label means "no
+        reattach, ever" (context-assembly-contract.md §5.2), not just
+        "recover from a crash".
         """
+        from omnigent.context_assembly.blindfold import is_blindfolded
+
         terminal_name = native_terminal_name(harness_name)
         if terminal_name is None:
             return
@@ -11452,14 +11459,30 @@ def create_runner_app(
             return
         instance = terminal_registry.get(conv_id, terminal_name, "main")
         if instance is not None:
-            if await instance.is_alive():
+            is_alive = await instance.is_alive()
+            # Blindfold mode forces a brand-new CLI session every turn — no
+            # reattach, even to a live pane (context-assembly-contract.md
+            # §5.2/§8). This is the only difference from the plain self-heal
+            # below: an unblindfolded live pane still returns early untouched.
+            envelope = _fresh_session_init_envelope(conv_id)
+            blindfolded = envelope is not None and is_blindfolded(envelope.snapshot.labels)
+            if is_alive and not blindfolded:
                 return  # pane is registered and alive — nothing to heal
-            _logger.info(
-                "native pane registered but dead for conv=%s harness=%s; closing stale entry",
-                conv_id,
-                harness_name,
-                extra={"session_id": conv_id},
-            )
+            if is_alive:
+                _logger.info(
+                    "blindfold: closing live native pane before turn (no reattach): "
+                    "conv=%s harness=%s",
+                    conv_id,
+                    harness_name,
+                    extra={"session_id": conv_id},
+                )
+            else:
+                _logger.info(
+                    "native pane registered but dead for conv=%s harness=%s; closing stale entry",
+                    conv_id,
+                    harness_name,
+                    extra={"session_id": conv_id},
+                )
             # Re-check the registry before closing: a concurrent ensure/recreate
             # path may have already replaced this entry with a live pane between
             # our get() and now.  Only close if the registry still points at the
