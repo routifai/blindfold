@@ -2054,7 +2054,7 @@ def pi_native_provider_launch(
         }
         context_window = _model_context_window(rendered, model_provider_id, selected_model)
         if context_window is not None:
-            threshold = resolve_rollover_threshold(labels)
+            threshold = resolve_rollover_threshold(labels, model_window=context_window)
             compaction["reserveTokens"] = max(context_window - threshold, 1)
         overlay["compaction"] = compaction
     prepare_managed_pi_agent_dir(agent_dir, overlay=overlay)

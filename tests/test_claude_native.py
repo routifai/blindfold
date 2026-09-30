@@ -3194,6 +3194,25 @@ def test_build_native_claude_terminal_env_default_omits_auto_compact_flag() -> N
     assert env == claude_native.build_native_claude_terminal_env(None, compact_at_tokens=None)
 
 
+def test_rollover_compact_at_sizes_from_the_launch_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The shared launch-model->threshold seam claude-native and codex-native
+    both call once their launch model is known: 60% of the model's window
+    (272,000 * 0.6 = 163,200). The suite disables the live catalog lookup for
+    hermeticity, so the window comes from ``AP_CONTEXT_WINDOW_OVERRIDE`` — the
+    seam ``find_model_context_window`` documents for e2e compaction tests."""
+    from omnigent.runner.native.orchestration import _rollover_compact_at
+
+    monkeypatch.setenv("AP_CONTEXT_WINDOW_OVERRIDE", "272000")
+    labels = {"omnigent.context.mode": "rollover"}
+    assert _rollover_compact_at(labels, model="claude-opus-5") == 163_200
+    # Outside rollover mode, no model lookup is even attempted.
+    assert _rollover_compact_at({}, model="claude-opus-5") is None
+    # An unresolvable model is "unknown", not a launch error: falls back to
+    # the fixed default rather than raising.
+    monkeypatch.delenv("AP_CONTEXT_WINDOW_OVERRIDE")
+    assert _rollover_compact_at(labels, model="not-a-real-model") == 100_000
+
+
 @pytest.mark.asyncio
 async def test_fetch_resume_items_retries_smaller_pages_on_5xx() -> None:
     """

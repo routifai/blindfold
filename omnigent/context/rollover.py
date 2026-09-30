@@ -36,7 +36,13 @@ _MIN_THRESHOLD_WINDOW_FRACTION = 0.8
 
 # Fraction of the session's context window used as the default threshold,
 # leaving headroom for a heavy tool turn before the CLI hits its own limit.
-_DEFAULT_THRESHOLD_WINDOW_FRACTION = 0.45
+_DEFAULT_THRESHOLD_WINDOW_FRACTION = 0.6
+
+# Ceiling on the *default* (window-derived) threshold only — an explicit
+# ROLLOVER_AT_TOKENS_LABEL is never capped. Keeps a huge-window model (e.g.
+# claude-sonnet-5's 1M) from deferring compaction so long the summary itself
+# gets unwieldy.
+MAX_DEFAULT_ROLLOVER_THRESHOLD_TOKENS = 200_000
 
 # Marks the synthetic request/summary exchange prepended to a rollover's
 # ``compacted_messages`` (and detected by build_summarization_prompt's
@@ -115,24 +121,38 @@ def reported_context_window(labels: Mapping[str, str] | None) -> int | None:
     return _parse_positive_int((labels or {}).get(_LAST_CONTEXT_WINDOW_LABEL_KEY))
 
 
-def resolve_rollover_threshold(labels: Mapping[str, str] | None) -> int:
+def resolve_rollover_threshold(
+    labels: Mapping[str, str] | None, *, model_window: int | None = None
+) -> int:
     """
     Resolve the token count at which a rollover session rolls over.
 
     Priority: the :data:`~omnigent.context.labels.ROLLOVER_AT_TOKENS_LABEL`
-    label (an explicit positive int) > 45% of the session's last-reported
-    context window > :data:`DEFAULT_ROLLOVER_THRESHOLD_TOKENS`, never below
-    :data:`MIN_ROLLOVER_THRESHOLD_TOKENS` (capped at 80% of a known window).
+    label (an explicit positive int) > 60% of the session's context window
+    (the last-reported window label, else *model_window*) >
+    :data:`DEFAULT_ROLLOVER_THRESHOLD_TOKENS`. The window-derived default is
+    capped at :data:`MAX_DEFAULT_ROLLOVER_THRESHOLD_TOKENS`; an explicit label
+    is not. Never below :data:`MIN_ROLLOVER_THRESHOLD_TOKENS` (that floor
+    itself capped at 80% of a known window).
 
     :param labels: The session's labels, or ``None``.
+    :param model_window: The session's model's context window, used when no
+        :data:`~omnigent.server.routes._sessions.common._LAST_CONTEXT_WINDOW_LABEL_KEY`
+        label has been reported yet (e.g. at native launch, before the CLI's
+        first turn). Ignored once that label is present.
     :returns: The threshold, in tokens.
     """
     labels = labels or {}
     window = _parse_positive_int(labels.get(_LAST_CONTEXT_WINDOW_LABEL_KEY))
+    if window is None:
+        window = model_window if model_window and model_window > 0 else None
     threshold = _parse_positive_int(labels.get(ROLLOVER_AT_TOKENS_LABEL))
     if threshold is None:
         threshold = (
-            int(window * _DEFAULT_THRESHOLD_WINDOW_FRACTION)
+            min(
+                int(window * _DEFAULT_THRESHOLD_WINDOW_FRACTION),
+                MAX_DEFAULT_ROLLOVER_THRESHOLD_TOKENS,
+            )
             if window is not None
             else DEFAULT_ROLLOVER_THRESHOLD_TOKENS
         )

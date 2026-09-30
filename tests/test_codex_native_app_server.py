@@ -3830,6 +3830,42 @@ async def test_codex_native_launch_config_reads_rollover_label(
     assert config.compact_at_tokens == expected
 
 
+async def test_codex_native_launch_config_sizes_threshold_from_model_launch_arg(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit ``--model`` launch arg sizes the default threshold to 60%
+    of that model's own context window (272,000 * 0.6 = 163,200 for
+    gpt-5-mini). The suite disables the live catalog lookup for hermeticity
+    (``OMNIGENT_DISABLE_CATALOG_LOOKUP``), so the window itself comes from
+    ``AP_CONTEXT_WINDOW_OVERRIDE`` — the same seam ``find_model_context_window``
+    documents for e2e compaction tests — while this test's own assertion is
+    about the launch-arg-to-threshold wiring, not the catalog lookup itself."""
+    import httpx
+
+    from omnigent.runner.native.orchestration import _codex_native_launch_config
+
+    monkeypatch.setenv("RUNNER_SERVER_URL", "http://127.0.0.1:9999")
+    monkeypatch.setenv("AP_CONTEXT_WINDOW_OVERRIDE", "272000")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "workspace": str(tmp_path),
+                "labels": {"omnigent.context.mode": "rollover"},
+                "terminal_launch_args": ["--model", "gpt-5-mini"],
+            },
+        )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://runner"
+    ) as client:
+        config = await _codex_native_launch_config(session_id="conv_abc", server_client=client)
+
+    assert config.compact_at_tokens == 163_200
+
+
 @pytest.mark.parametrize(
     ("persisted", "expected"),
     [("ultra", "ultra"), ("bogus", None), (None, None)],

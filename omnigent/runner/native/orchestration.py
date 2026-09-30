@@ -620,12 +620,61 @@ class _CodexNativeLaunchConfig:
     compact_at_tokens: int | None = None
 
 
-def _rollover_compact_at(labels: Mapping[str, str] | None) -> int | None:
-    """A rollover session's compaction threshold, or ``None`` outside rollover."""
+def _rollover_compact_at(
+    labels: Mapping[str, str] | None, *, model: str | None = None
+) -> int | None:
+    """A rollover session's compaction threshold, or ``None`` outside rollover.
+
+    :param model: The session's launch model, used to look up its context
+        window when no window has been reported yet. A lookup failure (e.g.
+        an unrecognized id) is treated as "unknown", not a launch error.
+    """
     from omnigent.context.labels import is_rollover
     from omnigent.context.rollover import resolve_rollover_threshold
 
-    return resolve_rollover_threshold(labels) if is_rollover(labels) else None
+    if not is_rollover(labels):
+        return None
+    window: int | None = None
+    if model:
+        from omnigent.llms.context_window import find_model_context_window
+
+        try:
+            window = find_model_context_window(model)
+        except Exception:  # noqa: BLE001 — an unresolvable model just means no window
+            window = None
+    return resolve_rollover_threshold(labels, model_window=window)
+
+
+def _codex_launch_model_hint(
+    model_override: str | None, terminal_launch_args: list[str] | None
+) -> str | None:
+    """Best-effort model id for a Codex launch, read from launch args.
+
+    Only for sizing the rollover threshold before the real provider/catalog
+    resolution runs (see :func:`_auto_create_codex_terminal`): an explicit
+    ``--model``/``-m`` or ``-c model=...``/``--config model=...`` override in
+    the user's pass-through args wins, else the persisted per-session
+    ``model_override``, else ``None``.
+    """
+    args = terminal_launch_args or []
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg in ("--model", "-m") and index + 1 < len(args):
+            return args[index + 1]
+        if arg.startswith("--model="):
+            return arg.split("=", 1)[1]
+        if arg in ("-c", "--config") and index + 1 < len(args):
+            index += 1
+            key, _, value = args[index].partition("=")
+            if key.strip() == "model":
+                return value.strip().strip("\"'")
+        elif arg.startswith(("-c=", "--config=")):
+            key, _, value = arg.split("=", 1)[1].partition("=")
+            if key.strip() == "model":
+                return value.strip().strip("\"'")
+        index += 1
+    return model_override
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1346,7 +1395,12 @@ async def _codex_native_launch_config(
             fork_source_external_id = _fse
         fork_carry_history = labels.get(FORK_CARRY_HISTORY_LABEL_KEY) == "1"
         bypass_sandbox = labels.get(CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY) == "1"
-    compact_at_tokens = _rollover_compact_at(labels if isinstance(labels, dict) else None)
+    # Best-effort model for sizing the rollover ceiling; the full provider
+    # resolution runs later, in _auto_create_codex_terminal.
+    model_hint = _codex_launch_model_hint(model_override, terminal_launch_args)
+    compact_at_tokens = _rollover_compact_at(
+        labels if isinstance(labels, dict) else None, model=model_hint
+    )
     # One derivation of the session's Smart Routing class, shared with the SDK
     # codex path, so "pinned" and "auto-harness" mean the same on both.
     routing_class = routing_class_from_snapshot(
@@ -8145,11 +8199,12 @@ async def _auto_create_claude_terminal(
         if session_init is not None and session_init.snapshot.workspace
         else _runner_workspace_dir()
     )
-    # A rollover session sets Claude Code's own auto-compaction ceiling.
-    compact_at_tokens = _rollover_compact_at(
-        session_init.snapshot.labels if session_init is not None else None
-    )
-    rollover = compact_at_tokens is not None
+    # A rollover session sets Claude Code's own auto-compaction ceiling, sized
+    # below once the launch model is known.
+    from omnigent.context.labels import is_rollover
+
+    session_labels = session_init.snapshot.labels if session_init is not None else None
+    rollover = is_rollover(session_labels)
     from omnigent.runtime.prompt import ROLLOVER_CONTEXT_INSTRUCTION
 
     started_at = time.monotonic()
@@ -8179,7 +8234,7 @@ async def _auto_create_claude_terminal(
     existing_bridge_id = await _claude_native_bridge_id_with_optional_labels(
         server_client=server_client,
         session_id=session_id,
-        session_labels=session_init.snapshot.labels if session_init is not None else None,
+        session_labels=session_labels,
     )
     bridge_id = cleared_bridge_id if existing_bridge_id == cleared_bridge_id else session_id
     if session_init is not None:
@@ -8682,6 +8737,8 @@ async def _auto_create_claude_terminal(
                         str(catalog_default.get("model") or catalog_default.get("id") or "")
                         or None
                     )
+    # Size the rollover ceiling from the settled launch model's window.
+    compact_at_tokens = _rollover_compact_at(session_labels, model=launch_model)
     # Give an exact launch model (a Smart Routing pick is resolved before the
     # terminal exists) a spelling of its own in the picker, so a later
     # ``/model`` can return to it instead of stepping onto whatever the family

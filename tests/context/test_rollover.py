@@ -10,6 +10,7 @@ import pytest
 from omnigent.context.rollover import (
     CHECKPOINT_HEADER,
     DEFAULT_ROLLOVER_THRESHOLD_TOKENS,
+    MAX_DEFAULT_ROLLOVER_THRESHOLD_TOKENS,
     MIN_ROLLOVER_THRESHOLD_TOKENS,
     SUMMARIZER_DATE_PLACEHOLDER,
     build_rollover_item,
@@ -155,9 +156,39 @@ def test_threshold_default_when_no_label_or_window() -> None:
     assert resolve_rollover_threshold({}) == DEFAULT_ROLLOVER_THRESHOLD_TOKENS
 
 
-def test_threshold_falls_back_to_45pct_of_context_window() -> None:
-    labels = {_LAST_CONTEXT_WINDOW_LABEL_KEY: "400000"}
+def test_threshold_falls_back_to_60pct_of_context_window() -> None:
+    labels = {_LAST_CONTEXT_WINDOW_LABEL_KEY: "300000"}
     assert resolve_rollover_threshold(labels) == 180_000
+
+
+def test_threshold_default_caps_at_max_for_a_huge_window() -> None:
+    # 60% of 1M would be 600,000; the default is capped at 200,000.
+    labels = {_LAST_CONTEXT_WINDOW_LABEL_KEY: "1000000"}
+    assert resolve_rollover_threshold(labels) == MAX_DEFAULT_ROLLOVER_THRESHOLD_TOKENS
+
+
+def test_threshold_explicit_label_is_not_capped() -> None:
+    # The cap applies only to the derived default, never to an explicit label.
+    labels = {
+        "omnigent.context.rollover_at_tokens": "250000",
+        _LAST_CONTEXT_WINDOW_LABEL_KEY: "1000000",
+    }
+    assert resolve_rollover_threshold(labels) == 250_000
+
+
+def test_threshold_uses_model_window_when_no_window_label() -> None:
+    assert resolve_rollover_threshold(None, model_window=300_000) == 180_000
+
+
+def test_threshold_window_label_wins_over_model_window() -> None:
+    # 60% of the labeled 100,000 window is below the floor, so the 80%-of-window
+    # floor applies (80,000) — proof the much larger model_window is ignored.
+    labels = {_LAST_CONTEXT_WINDOW_LABEL_KEY: "100000"}
+    assert resolve_rollover_threshold(labels, model_window=1_000_000) == 80_000
+
+
+def test_threshold_ignores_non_positive_model_window() -> None:
+    assert resolve_rollover_threshold(None, model_window=0) == DEFAULT_ROLLOVER_THRESHOLD_TOKENS
 
 
 def test_threshold_explicit_label_wins_over_window() -> None:

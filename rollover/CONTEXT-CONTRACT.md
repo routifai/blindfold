@@ -23,7 +23,7 @@ labels **when the session is created**:
 | Label | Value | Default |
 |---|---|---|
 | `omnigent.context.mode` | `rollover` enables it | unset = upstream behaviour, unchanged |
-| `omnigent.context.rollover_at_tokens` | Token threshold that triggers a rollover. Never below 100,000 (or 80% of a smaller window): Claude Code starts at ~60k and Codex keeps ~20k of user messages, so a lower value makes the CLI compact in a loop. | 45% of the model's context window; 100,000 when the window is unknown |
+| `omnigent.context.rollover_at_tokens` | Token threshold that triggers a rollover. Never below 100,000 (or 80% of a smaller window): Claude Code starts at ~60k and Codex keeps ~20k of user messages, so a lower value makes the CLI compact in a loop. | 60% of the model's context window (looked up from the model resolved at launch), capped at 200,000; 100,000 when the window is unknown |
 | `omnigent.context.rollover_keep_tokens` | Budget for the kept tail where Omnigent chooses it (pi-native, side-chat seeds) | 16,000 |
 
 Constants and helpers: `omnigent/context/labels.py`, `omnigent/context/rollover.py`.
