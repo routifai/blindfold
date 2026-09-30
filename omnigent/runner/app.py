@@ -3157,6 +3157,10 @@ def create_runner_app(
     # writing a compaction item / recycling its pane, so a second convergence
     # (e.g. an overlapping continuation) never rolls it over twice at once.
     _rollover_in_progress: set[str] = set()
+    # Set while a rollover is being written; a turn arriving meanwhile waits on
+    # it so it lands in the relaunched pane instead of the one being reaped.
+    _rollover_gates: dict[str, asyncio.Event] = {}
+    _ROLLOVER_GATE_TIMEOUT_S = 120.0
     _ROLLOVER_FETCH_MAX_PAGES = 25
     _DEFAULT_ROLLOVER_MODEL = ROLLOVER_SUMMARY_FALLBACK_MODEL
     # Conversations whose claude-sdk `/compact` published an up-front
@@ -8006,6 +8010,7 @@ def create_runner_app(
         if conv_id in _rollover_in_progress:
             return
         _rollover_in_progress.add(conv_id)
+        gate = _rollover_gates[conv_id] = asyncio.Event()
         try:
             full_labels = await _session_labels_for_runner_spawn(
                 server_client=server_client, session_id=conv_id
@@ -8019,6 +8024,8 @@ def create_runner_app(
                 extra={"session_id": conv_id},
             )
         finally:
+            gate.set()
+            _rollover_gates.pop(conv_id, None)
             _rollover_in_progress.discard(conv_id)
 
     async def _fetch_rollover_window(
@@ -8062,19 +8069,9 @@ def create_runner_app(
         collected.reverse()
         return collected, previous_summary
 
-    async def _rollover_superseded(conv_id: str, last_window_item_id: str) -> bool:
-        """Whether a turn started, or a content item landed, after the rollover window."""
-        if _native_turn_in_flight(conv_id):
-            return True
-        resp = await server_client.get(
-            f"/v1/sessions/{conv_id}/items", params={"limit": 20, "order": "desc"}
-        )
-        resp.raise_for_status()
-        for item in resp.json().get("data") or []:
-            if item.get("type") in NON_CONTENT_ITEM_TYPES:
-                continue
-            return item.get("id") != last_window_item_id
-        return False
+    def _rollover_superseded(conv_id: str) -> bool:
+        """Whether a turn already reached the pane despite the rollover gate."""
+        return _native_turn_in_flight(conv_id)
 
     async def _apply_rollover_if_over_threshold(conv_id: str, labels: dict[str, str]) -> None:
         items, previous_summary = await _fetch_rollover_window(conv_id)
@@ -8096,10 +8093,9 @@ def create_runner_app(
             llm_client=_get_runner_llm_client(),
             connection=connection,
         )
-        # Summarizing takes seconds; a message sent meanwhile is already typed
-        # into the pane. Back off rather than kill that turn: the next clean
-        # turn end re-checks, since the context is still over the threshold.
-        if await _rollover_superseded(conv_id, str(items[-1].get("id"))):
+        # New turns wait on the rollover gate; one that slipped into the pane
+        # anyway must not be killed, so defer to the next clean turn end.
+        if _rollover_superseded(conv_id):
             _logger.info(
                 "rollover deferred for %s: a new turn started during summarization",
                 conv_id,
@@ -8146,6 +8142,7 @@ def create_runner_app(
 
     app.state.finish_turn_and_maybe_roll_over = _finish_turn_and_maybe_roll_over
     app.state.maybe_apply_rollover = _maybe_apply_rollover
+    app.state.rollover_gates = _rollover_gates
     app.state.session_init_envelopes = _session_init_envelopes
 
     async def _cancel_active_turn(
@@ -9058,6 +9055,10 @@ def create_runner_app(
         conv: str,
     ) -> None:
         _subagent_wake_pending.discard(conv)
+        rollover_gate = _rollover_gates.get(conv)
+        if rollover_gate is not None:
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(rollover_gate.wait(), timeout=_ROLLOVER_GATE_TIMEOUT_S)
         # Capture our own task so the finally floor can identity-compare before
         # clearing the slot (see below).
         _own_task = asyncio.current_task()

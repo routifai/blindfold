@@ -263,40 +263,47 @@ async def test_single_flight_guard_skips_concurrent_rollover(
 
 
 @pytest.mark.asyncio
-async def test_defers_when_a_new_message_arrives_during_summarization(
+async def test_gate_holds_new_turns_while_the_rollover_is_written(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A message sent while the summary is being written is already running in
-    the pane: rollover must neither post the checkpoint nor kill that pane."""
-    conv_id = "conv_rollover_race"
+    """While the summary is written, the session's gate is closed so a new turn
+    waits for the relaunched pane; the rollover still completes and reopens it."""
+    conv_id = "conv_rollover_gate"
     items = [_msg(f"m{i}", "user" if i % 2 == 0 else "assistant", f"msg {i}") for i in range(10)]
-    fake_client = _FakeServerClient(items)
-
-    class _SlowLLMResponses(_FakeLLMResponses):
-        async def create(self, **kwargs: Any) -> Any:
-            items.append(_msg("m10", "user", "sent during summarization"))
-            return await super().create(**kwargs)
-
-    class _SlowLLMClient:
-        responses = _SlowLLMResponses()
-
+    labels = {"omnigent.context.mode": "rollover", "omnigent.context.rollover_at_tokens": "1"}
+    fake_client = _FakeServerClient(items, labels=labels)
     pm = _FakeProcessManager(_ScriptedHarnessClient([]))
     app = create_runner_app(
         process_manager=pm,  # type: ignore[arg-type]
         spec_resolver=_resolver,
         server_client=fake_client,
     )
+    gate_states: list[bool] = []
+
+    class _GateCheckingResponses(_FakeLLMResponses):
+        async def create(self, **kwargs: Any) -> Any:
+            gate = app.state.rollover_gates.get(conv_id)
+            gate_states.append(gate is not None and not gate.is_set())
+            items.append(_msg("m10", "user", "sent during summarization"))
+            return await super().create(**kwargs)
+
+    class _GateCheckingClient:
+        responses = _GateCheckingResponses()
+
     await _create_native_session(app, conv_id)
-    labels = {"omnigent.context.mode": "rollover", "omnigent.context.rollover_at_tokens": "1"}
     app.state.session_init_envelopes[conv_id] = (
         time.monotonic(),
         type("Envelope", (), {"snapshot": type("Snapshot", (), {"labels": labels})()})(),
     )
-    monkeypatch.setattr("omnigent.runner.app._get_runner_llm_client", lambda: _SlowLLMClient())
+    monkeypatch.setattr(
+        "omnigent.runner.app._get_runner_llm_client", lambda: _GateCheckingClient()
+    )
     fake_reaper = _FakeReaper()
     app.state.native_pane_reaper = fake_reaper
 
     await app.state.maybe_apply_rollover(conv_id)
 
-    assert fake_client.posted_events == []
-    assert fake_reaper.reaped_ids == []
+    assert gate_states == [True]
+    assert conv_id not in app.state.rollover_gates
+    assert len(fake_client.posted_events) == 1
+    assert fake_reaper.reaped_ids == [conv_id]
