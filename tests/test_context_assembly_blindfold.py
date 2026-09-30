@@ -221,16 +221,42 @@ class TestServerConnectionFile:
         assert conn is not None
         assert conn.blindfolded is True
 
-    def test_persists_false_for_an_unlabelled_session(self, tmp_path: Path) -> None:
+    def test_unlabelled_session_leaves_no_file(self, tmp_path: Path) -> None:
         from omnigent.context_assembly.blindfold import (
             read_server_connection,
             write_server_connection,
         )
 
-        write_server_connection(tmp_path, base_url="http://host:8780", headers={}, labels={})
+        write_server_connection(
+            tmp_path, base_url="http://host:8780", headers={"Authorization": "Bearer x"}, labels={}
+        )
+        # OFF path: no auth headers on disk and nothing for a turn to read.
+        assert read_server_connection(tmp_path) is None
+        assert not any(tmp_path.iterdir())
+
+    def test_labelless_write_never_overwrites_a_known_state(self, tmp_path: Path) -> None:
+        from omnigent.context_assembly.blindfold import (
+            read_server_connection,
+            write_server_connection,
+        )
+
+        write_server_connection(
+            tmp_path, base_url="http://a:1", headers={}, labels={"omnigent.blindfold": "true"}
+        )
+        write_server_connection(tmp_path, base_url="http://b:2", headers={})
         conn = read_server_connection(tmp_path)
         assert conn is not None
-        assert conn.blindfolded is False
+        assert conn.blindfolded is True
+        assert conn.base_url == "http://a:1"
+
+    def test_blindfolded_file_is_owner_only(self, tmp_path: Path) -> None:
+        from omnigent.context_assembly.blindfold import write_server_connection
+
+        write_server_connection(
+            tmp_path, base_url="http://a:1", headers={}, labels={"omnigent.blindfold": "true"}
+        )
+        (path,) = list(tmp_path.iterdir())
+        assert path.stat().st_mode & 0o777 == 0o600
 
     def test_missing_file_returns_none(self, tmp_path: Path) -> None:
         from omnigent.context_assembly.blindfold import read_server_connection

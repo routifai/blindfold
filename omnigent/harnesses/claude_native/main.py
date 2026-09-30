@@ -5134,14 +5134,6 @@ async def _prepare_claude_terminal(
             "bridge dir prepared",
             startup_progress=startup_progress,
         )
-        # Blindfold-mode turns run from inside the executor process (see
-        # omnigent.harnesses.claude_native.blindfold), which doesn't share
-        # this CLI invocation's server client — persist how to reach it now.
-        from omnigent.context_assembly.blindfold import write_server_connection
-
-        write_server_connection(
-            bridge_dir, base_url=str(client.base_url), headers=dict(client.headers)
-        )
         reset_transcript_forward_state(bridge_dir)
         _mark_startup_step(
             startup_profiler,

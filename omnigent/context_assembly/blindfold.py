@@ -91,9 +91,20 @@ def write_server_connection(
         the caller falls back to checking over the network once.
     """
     path = bridge_dir / _CONNECTION_FILE
+    if labels is None:
+        # A caller without the session's labels must never overwrite a state
+        # already recorded by one that had them (the runner writes first).
+        if path.exists():
+            return
+    elif not is_blindfolded(labels):
+        # Not blindfolded: leave nothing behind (no auth headers on disk), so
+        # every turn short-circuits on a missing file with zero network calls.
+        with contextlib.suppress(FileNotFoundError):
+            path.unlink()
+        return
     payload: dict[str, Any] = {"base_url": base_url, "headers": dict(headers)}
     if labels is not None:
-        payload["blindfolded"] = is_blindfolded(labels)
+        payload["blindfolded"] = True
     tmp = path.with_suffix(".json.tmp")
     try:
         tmp.write_text(json.dumps(payload), encoding="utf-8")
