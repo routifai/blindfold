@@ -11462,6 +11462,88 @@ async def test_ensure_local_codex_resume_rollout_restores_a_zip_outside_the_work
 
 
 @pytest.mark.asyncio
+async def test_ensure_local_codex_resume_rollout_rollover_rebuild(tmp_path: Path) -> None:
+    """A rollover compaction item rebuilds resume history to summary+kept+later only.
+
+    Mirrors the rollover pane-recycle relaunch: a synthetic ``compaction``
+    item (rolling summary + the kept recent messages) sits between an old
+    turn and a later one. The rebuilt rollout must carry the kept and later
+    content and none of the pre-compaction text.
+    """
+    thread_id = "019e96aa-0be2-7343-8d3b-6f914d60936b"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    codex_home = tmp_path / "codex-home"
+    items = [
+        {
+            "id": "old_1",
+            "response_id": "codex_turn_old",
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "OLDEST MESSAGE EVER"}],
+        },
+        {
+            "id": "old_2",
+            "response_id": "codex_turn_old",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "OLDEST REPLY EVER"}],
+        },
+        {
+            "id": "cmp_1",
+            "response_id": "compact_1",
+            "type": "compaction",
+            "summary": "rollover summary of the earlier turns",
+            "compacted_messages": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "KEPT RECENT MESSAGE"}],
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "KEPT RECENT REPLY"}],
+                },
+            ],
+        },
+        {
+            "id": "new_1",
+            "response_id": "codex_turn_new",
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "LATER MESSAGE AFTER ROLLOVER"}],
+        },
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(200, json={"data": items, "has_more": False})
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        rollout = await codex_native._ensure_local_codex_resume_rollout(
+            client,
+            session_id="conv_rollover",
+            external_session_id=thread_id,
+            codex_home=codex_home,
+            workspace=workspace.resolve(),
+            model_provider="omnigent_databricks",
+            codex_path=None,
+        )
+
+    text = rollout.read_text(encoding="utf-8")
+    assert "OLDEST MESSAGE EVER" not in text
+    assert "OLDEST REPLY EVER" not in text
+    assert "KEPT RECENT MESSAGE" in text
+    assert "KEPT RECENT REPLY" in text
+    assert "LATER MESSAGE AFTER ROLLOVER" in text
+    records = [json.loads(line) for line in text.splitlines() if line.strip()]
+    types = [r["type"] for r in records]
+    assert "compacted" in types
+
+
+@pytest.mark.asyncio
 async def test_ensure_local_codex_resume_rollout_synthesizes_omnigent_history(
     tmp_path: Path,
 ) -> None:

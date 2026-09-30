@@ -3798,6 +3798,39 @@ async def test_codex_native_launch_config_reads_the_auto_harness_flag(
 
 
 @pytest.mark.parametrize(
+    ("labels", "expected"),
+    [
+        ({"omnigent.context.mode": "rollover"}, True),
+        ({"omnigent.context.mode": "blindfold"}, False),
+        ({}, False),
+    ],
+    ids=["rollover", "other-mode", "unset"],
+)
+async def test_codex_native_launch_config_reads_rollover_label(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    labels: dict[str, str],
+    expected: bool,
+) -> None:
+    """Only ``omnigent.context.mode=rollover`` turns off Codex's own auto-compact."""
+    import httpx
+
+    from omnigent.runner.native.orchestration import _codex_native_launch_config
+
+    monkeypatch.setenv("RUNNER_SERVER_URL", "http://127.0.0.1:9999")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"workspace": str(tmp_path), "labels": labels})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://runner"
+    ) as client:
+        config = await _codex_native_launch_config(session_id="conv_abc", server_client=client)
+
+    assert config.rollover is expected
+
+
+@pytest.mark.parametrize(
     ("persisted", "expected"),
     [("ultra", "ultra"), ("bogus", None), (None, None)],
     ids=["ultra", "unsupported", "unset"],
