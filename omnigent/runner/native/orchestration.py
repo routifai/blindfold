@@ -652,6 +652,10 @@ class _PiNativeLaunchConfig:
     :param reasoning_effort: Persisted per-session effort, e.g. ``"high"``.
         Consumed by the pi-native launch as ``--thinking``; ``None`` leaves
         Pi's model default in place.
+    :param labels: The session's labels. Consumed by the pi-native launch to
+        gate rollover mode (``omnigent.context.labels.is_rollover``): the
+        resident extension's ``session_before_compact`` handler and Pi's own
+        ``compaction`` settings overlay.
     """
 
     workspace: Path
@@ -663,6 +667,7 @@ class _PiNativeLaunchConfig:
     fork_carry_history: bool = False
     model_override: str | None = None
     reasoning_effort: str | None = None
+    labels: dict[str, str] | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1230,6 +1235,7 @@ async def _pi_native_launch_config(
         reasoning_effort=reasoning_effort
         if isinstance(reasoning_effort, str) and reasoning_effort
         else None,
+        labels=labels if isinstance(labels, dict) else None,
     )
 
 
@@ -2517,6 +2523,7 @@ async def _auto_create_pi_terminal(
         conversation_url=conversation_url(launch_config.server_url, session_id),
         auth_headers=auth_headers,
         tools=pi_tools,
+        labels=launch_config.labels,
     )
     pi_command = resolve_pi_executable()
     # Rebuild the local Pi session JSONL from committed Omnigent items so a
@@ -2586,6 +2593,7 @@ async def _auto_create_pi_terminal(
                 provider,
                 launch_config.reasoning_effort,
                 selection=spec_model,
+                labels=launch_config.labels,
             )
             pi_env.update(launch.env)
             pi_args.extend(launch.args)
