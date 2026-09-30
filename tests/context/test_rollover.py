@@ -411,3 +411,27 @@ async def test_rollover_item_accepted_by_codex_native_resume_rebuild(tmp_path: P
     assert records[1]["payload"]["message"] == f"{CHECKPOINT_HEADER}\n\nROLLING SUMMARY"
     kept_ids = [m.get("id") for m in replacement_history if "id" in m]
     assert kept_ids == ["u4", "a4"]
+
+
+def test_items_for_summarizer_keeps_only_provider_schema_fields() -> None:
+    from omnigent.context.rollover import _items_for_summarizer
+
+    items = [
+        {
+            "id": "m1",
+            "type": "message",
+            "role": "user",
+            "status": "completed",
+            "stream_message_id": "s1",
+            "content": [{"type": "input_text", "text": "hi", "extra": 1}],
+        },
+        {"id": "r1", "type": "reasoning", "summary": []},
+        {"id": "e1", "type": "native_tool", "name": "shell"},
+        {"id": "f1", "type": "function_call", "call_id": "c1", "name": "t", "arguments": "{}"},
+        {"id": "o1", "type": "function_call_output", "call_id": "c1", "output": "ok", "x": 2},
+    ]
+    assert _items_for_summarizer(items) == [
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+        {"type": "function_call", "call_id": "c1", "name": "t", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "c1", "output": "ok"},
+    ]
