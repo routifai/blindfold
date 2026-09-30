@@ -173,6 +173,21 @@ async def maybe_run_blindfold_turn(
                     usage=UsageInfo(),
                 ).model_dump(),
             )
+
+        # The one-shot process is not a real native forwarder, so nothing
+        # else ever posts the turn-end edge (external_session_status) the
+        # runner's native-turn tracking waits on — without this, the next
+        # turn for this session sits buffered behind a slot that looks
+        # permanently occupied (observed: ~60s delay, sometimes longer).
+        with contextlib.suppress(httpx.HTTPError, ValueError):
+            from omnigent.native._native_post_delivery import post_external_session_status
+
+            await post_external_session_status(
+                client,
+                session_id=session_id,
+                status="failed" if result.error is not None else "idle",
+                turn_completed=True,
+            )
         return result
 
 
@@ -266,6 +281,14 @@ async def _run_one_shot(
     # not necessarily a trusted git repo from Codex's point of view; skip
     # that check rather than force every blindfolded workspace to be one.
     args.append("--skip-git-repo-check")
+    # Vendor memory off (contract §5.2): a fresh CODEX_HOME has no
+    # $CODEX_HOME/AGENTS.md to link away, but Codex separately auto-discovers
+    # a workspace-level AGENTS.md/PROJECT.md by walking up from cwd — verified
+    # leaking a planted /root/AGENTS.md into a blindfolded turn's answer
+    # without this override. project_doc_max_bytes=0 disables that discovery
+    # (distinct from developer_instructions above, which is this turn's own
+    # assembled system text, not vendor project-doc auto-loading).
+    args += ["-c", "project_doc_max_bytes=0"]
     if model:
         args += ["--model", model]
 

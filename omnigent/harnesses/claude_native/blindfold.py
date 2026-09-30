@@ -220,6 +220,21 @@ async def maybe_run_blindfold_turn(
                     usage=UsageInfo(),
                 ).model_dump(),
             )
+
+        # The one-shot process is not a real native forwarder, so nothing
+        # else ever posts the turn-end edge (external_session_status) the
+        # runner's native-turn tracking waits on — without this, the next
+        # turn for this session sits buffered behind a slot that looks
+        # permanently occupied (observed: ~60s delay, sometimes longer).
+        with contextlib.suppress(httpx.HTTPError, ValueError):
+            from omnigent.native._native_post_delivery import post_external_session_status
+
+            await post_external_session_status(
+                client,
+                session_id=session_id,
+                status="failed" if result.error is not None else "idle",
+                turn_completed=True,
+            )
         return result
 
 

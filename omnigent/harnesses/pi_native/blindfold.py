@@ -167,6 +167,21 @@ async def maybe_run_blindfold_turn(
                     usage=UsageInfo(),
                 ).model_dump(),
             )
+
+        # The one-shot process is not a real native forwarder, so nothing
+        # else ever posts the turn-end edge (external_session_status) the
+        # runner's native-turn tracking waits on — without this, the next
+        # turn for this session sits buffered behind a slot that looks
+        # permanently occupied (observed: ~60s delay, sometimes longer).
+        with contextlib.suppress(httpx.HTTPError, ValueError):
+            from omnigent.native._native_post_delivery import post_external_session_status
+
+            await post_external_session_status(
+                client,
+                session_id=session_id,
+                status="failed" if result.error is not None else "idle",
+                turn_completed=True,
+            )
         return result
 
 
@@ -208,7 +223,12 @@ async def _run_one_shot(
             model=model,
         )
         if len(records) > 1:
-            session_path = fresh_config_dir / f"{fresh_external_id}.jsonl"
+            # Verified against the real CLI: a session file written directly
+            # under PI_CODING_AGENT_DIR's own root gets silently clobbered by
+            # a brand-new session on startup (pi appears to treat that root
+            # as its own session-index scope). A subdirectory avoids the
+            # collision and the pre-written history loads correctly.
+            session_path = fresh_config_dir / "sessions" / f"{fresh_external_id}.jsonl"
             write_pi_session_records(session_path, records)
             args += ["--session", str(session_path)]
 
