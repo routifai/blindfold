@@ -272,10 +272,14 @@ async def _run_one_shot(
     # isolates exactly that, the same clean signal claude's `--output-format
     # text` and pi's `--print` give directly on stdout.
     last_message_path = fresh_codex_home / "last-message.txt"
-    args = ["exec", "resume", fresh_external_id, new_message_text] if resumed else [
-        "exec",
-        new_message_text,
-    ]
+    args = (
+        ["exec", "resume", fresh_external_id, new_message_text]
+        if resumed
+        else [
+            "exec",
+            new_message_text,
+        ]
+    )
     args += ["--output-last-message", str(last_message_path)]
     # The one-shot workspace is whatever the executor's own cwd is, which is
     # not necessarily a trusted git repo from Codex's point of view; skip

@@ -200,7 +200,11 @@ def register_context_routes(
                     digest=_digest([body.new_item_id]),
                 ),
                 audit=AssembleAudit(
-                    memory_items=0, history_items=1, summary=False, estimated_tokens=0, fallback=True
+                    memory_items=0,
+                    history_items=1,
+                    summary=False,
+                    estimated_tokens=0,
+                    fallback=True,
                 ),
             )
 

@@ -19,6 +19,7 @@ from omnigent.context_assembly.blindfold import (
     is_blindfolded,
 )
 
+
 def _item(item_id: str, *, role: str = "user") -> dict[str, Any]:
     return {"id": item_id, "type": "message", "role": role, "content": []}
 
@@ -85,7 +86,9 @@ class TestIsBlindfolded:
 
 
 class TestFetchBlindfoldTurnContext:
-    async def _call(self, transport: httpx.MockTransport, **overrides: Any) -> BlindfoldTurnContext:
+    async def _call(
+        self, transport: httpx.MockTransport, **overrides: Any
+    ) -> BlindfoldTurnContext:
         async with httpx.AsyncClient(base_url="http://server", transport=transport) as client:
             kwargs: dict[str, Any] = {
                 "session_id": "conv_1",

@@ -310,7 +310,7 @@ async def fetch_blindfold_turn_context(
         )
         resp.raise_for_status()
         response = AssembleResponse.model_validate(resp.json())
-    except Exception:
+    except Exception:  # noqa: BLE001 — any failure must fail closed, never break the turn
         _logger.warning(
             "blindfold context fetch failed for session=%s harness=%s; "
             "failing closed to new message only",

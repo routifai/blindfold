@@ -616,7 +616,7 @@ class _CodexNativeLaunchConfig:
     routing_enabled: bool = False
     turn_routing: bool = False
     reasoning_effort: str | None = None
-    labels: dict[str, str] = dataclasses.field(default_factory=dict)
+    labels: dict[str, str] | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -668,7 +668,7 @@ class _PiNativeLaunchConfig:
     fork_carry_history: bool = False
     model_override: str | None = None
     reasoning_effort: str | None = None
-    labels: dict[str, str] = dataclasses.field(default_factory=dict)
+    labels: dict[str, str] | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1236,7 +1236,7 @@ async def _pi_native_launch_config(
         reasoning_effort=reasoning_effort
         if isinstance(reasoning_effort, str) and reasoning_effort
         else None,
-        labels=labels if isinstance(labels, dict) else {},
+        labels=labels if isinstance(labels, dict) else None,
     )
 
 
@@ -1360,7 +1360,7 @@ async def _codex_native_launch_config(
         routing_enabled=routing_class.routing_enabled,
         turn_routing=routing_class.turn_routing,
         reasoning_effort=reasoning_effort,
-        labels=labels if isinstance(labels, dict) else {},
+        labels=labels if isinstance(labels, dict) else None,
     )
 
 
@@ -4804,15 +4804,13 @@ async def _auto_create_codex_terminal(
         # over a side channel only blindfold-mode turns ever read.
         from omnigent.context_assembly.blindfold import write_server_connection
 
-        try:
+        with contextlib.suppress(AttributeError):
             write_server_connection(
                 bridge_dir,
                 base_url=str(server_client.base_url),
                 headers=dict(server_client.headers),
                 labels=launch_config.labels,
             )
-        except AttributeError:
-            pass
     socket_path = socket_path_for_bridge_dir(bridge_dir)
     codex_home = codex_home_for_bridge_dir(bridge_dir)
     app_server = _AUTO_CODEX_APP_SERVERS.get(session_id)
@@ -8241,7 +8239,7 @@ async def _auto_create_claude_terminal(
         bridge_dir,
         base_url=server_url,
         headers=_runner_headers,
-        labels=session_init.snapshot.labels if session_init is not None else {},
+        labels=session_init.snapshot.labels if session_init is not None else None,
     )
 
     from omnigent.harnesses.claude_native.main import (

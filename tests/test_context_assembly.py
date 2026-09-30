@@ -119,7 +119,11 @@ class TestSelectHistoryRefs:
     def test_max_messages_one_returns_only_new_item(self) -> None:
         items = _history(10)
         refs, over = select_history_refs(
-            items, new_item_id="item_9", max_messages=1, max_input_tokens=24_000, model="claude-haiku-4-5"
+            items,
+            new_item_id="item_9",
+            max_messages=1,
+            max_input_tokens=24_000,
+            model="claude-haiku-4-5",
         )
         assert refs == ["item_9"]
         assert over is False
@@ -127,7 +131,11 @@ class TestSelectHistoryRefs:
     def test_max_messages_covers_everything_when_the_window_is_bigger_than_history(self) -> None:
         items = _history(10)
         refs, over = select_history_refs(
-            items, new_item_id="item_9", max_messages=20, max_input_tokens=24_000, model="claude-haiku-4-5"
+            items,
+            new_item_id="item_9",
+            max_messages=20,
+            max_input_tokens=24_000,
+            model="claude-haiku-4-5",
         )
         assert refs == [f"item_{i}" for i in range(10)]
         assert over is False
@@ -135,7 +143,11 @@ class TestSelectHistoryRefs:
     def test_max_messages_keeps_the_last_n_messages_ending_with_the_anchor(self) -> None:
         items = _history(10)
         refs, _ = select_history_refs(
-            items, new_item_id="item_9", max_messages=3, max_input_tokens=24_000, model="claude-haiku-4-5"
+            items,
+            new_item_id="item_9",
+            max_messages=3,
+            max_input_tokens=24_000,
+            model="claude-haiku-4-5",
         )
         assert refs == ["item_7", "item_8", "item_9"]
 
@@ -149,7 +161,11 @@ class TestSelectHistoryRefs:
             _message_item("u1", role="user", text="new message", created_at=10),
         ]
         refs, _ = select_history_refs(
-            items, new_item_id="u1", max_messages=2, max_input_tokens=24_000, model="claude-haiku-4-5"
+            items,
+            new_item_id="u1",
+            max_messages=2,
+            max_input_tokens=24_000,
+            model="claude-haiku-4-5",
         )
         assert refs == ["t0_call", "t0_output", "t0_msg", "u1"]
 
@@ -162,7 +178,11 @@ class TestSelectHistoryRefs:
         # Window of 1 -> only the new message; the whole earlier tool group
         # (call + output + its message) is dropped together, never split.
         refs, _ = select_history_refs(
-            items, new_item_id="u1", max_messages=1, max_input_tokens=24_000, model="claude-haiku-4-5"
+            items,
+            new_item_id="u1",
+            max_messages=1,
+            max_input_tokens=24_000,
+            model="claude-haiku-4-5",
         )
         assert refs == ["u1"]
 
@@ -171,7 +191,11 @@ class TestSelectHistoryRefs:
         # anchor alone but not all 20 keeps only a recent handful.
         items = _history(20, word_count=50)
         refs, over = select_history_refs(
-            items, new_item_id="item_19", max_messages=20, max_input_tokens=200, model="claude-haiku-4-5"
+            items,
+            new_item_id="item_19",
+            max_messages=20,
+            max_input_tokens=200,
+            model="claude-haiku-4-5",
         )
         assert refs[-1] == "item_19"
         assert len(refs) < 20
@@ -182,7 +206,11 @@ class TestSelectHistoryRefs:
     def test_new_message_group_always_included_even_alone_over_budget(self) -> None:
         items = _history(5, word_count=5000)
         refs, over = select_history_refs(
-            items, new_item_id="item_4", max_messages=5, max_input_tokens=1, model="claude-haiku-4-5"
+            items,
+            new_item_id="item_4",
+            max_messages=5,
+            max_input_tokens=1,
+            model="claude-haiku-4-5",
         )
         assert refs == ["item_4"]
         assert over is True
@@ -190,14 +218,22 @@ class TestSelectHistoryRefs:
     def test_non_positive_max_messages_is_clamped_to_one(self) -> None:
         items = _history(4)
         refs, _ = select_history_refs(
-            items, new_item_id="item_3", max_messages=0, max_input_tokens=24_000, model="claude-haiku-4-5"
+            items,
+            new_item_id="item_3",
+            max_messages=0,
+            max_input_tokens=24_000,
+            model="claude-haiku-4-5",
         )
         assert refs == ["item_3"]
 
     def test_missing_anchor_selects_nothing(self) -> None:
         items = _history(3)
         refs, over = select_history_refs(
-            items, new_item_id="item_does_not_exist", max_messages=20, max_input_tokens=24_000, model="x"
+            items,
+            new_item_id="item_does_not_exist",
+            max_messages=20,
+            max_input_tokens=24_000,
+            model="x",
         )
         assert refs == []
         assert over is False
@@ -266,7 +302,9 @@ class TestTestHookLabels:
         items = [
             _message_item("codeword", role="user", text="my codeword is PAPAYA-42", created_at=0),
             _message_item("reply", role="assistant", text="Got it.", created_at=1),
-            _message_item("ask", role="user", text="what was the last message I sent?", created_at=2),
+            _message_item(
+                "ask", role="user", text="what was the last message I sent?", created_at=2
+            ),
         ]
         request = _request(new_item_id="ask", labels={MAX_MESSAGES_LABEL: "3"})
         response = assemble(request, items_provider=lambda: items, agent_instructions="x")
@@ -286,7 +324,7 @@ class TestTestHookLabels:
                 MEMORY_FIXTURE_LABEL: "The user's codeword is MANGO-7",
             },
         )
-        response = assemble(request, items_provider=lambda: [], agent_instructions="x")
+        response = assemble(request, items_provider=list, agent_instructions="x")
         assert len(response.memory.items) == 1
         item = response.memory.items[0]
         assert item.kind == "fact"
@@ -306,7 +344,9 @@ class TestTestHookLabels:
 class TestRenderSystemText:
     def test_no_memory_returns_bare_system_text(self) -> None:
         request = _request(new_item_id="item_0")
-        response = assemble(request, items_provider=lambda: _history(1), agent_instructions="Rules.")
+        response = assemble(
+            request, items_provider=lambda: _history(1), agent_instructions="Rules."
+        )
         assert render_system_text(response) == "Rules."
 
     def test_memory_is_appended_as_a_tagged_block(self) -> None:
@@ -314,7 +354,7 @@ class TestRenderSystemText:
             new_item_id="item_0",
             labels={MAX_MESSAGES_LABEL: "1", MEMORY_FIXTURE_LABEL: "Prefers short answers."},
         )
-        response = assemble(request, items_provider=lambda: [], agent_instructions="Rules.")
+        response = assemble(request, items_provider=list, agent_instructions="Rules.")
         rendered = render_system_text(response)
         assert rendered.startswith("Rules.\n\n<long_term_memory>")
         assert "- (fact) Prefers short answers." in rendered
@@ -325,7 +365,7 @@ class TestRenderSystemText:
             new_item_id="item_0",
             labels={MAX_MESSAGES_LABEL: "1", MEMORY_FIXTURE_LABEL: "fact"},
         )
-        response = assemble(request, items_provider=lambda: [], agent_instructions=None)
+        response = assemble(request, items_provider=list, agent_instructions=None)
         rendered = render_system_text(response)
         assert rendered.startswith("<long_term_memory>")
 
@@ -337,7 +377,9 @@ class TestFailClosed:
         def _boom() -> list[dict[str, Any]]:
             raise RuntimeError("record store is down")
 
-        response = assemble_or_fail_closed(request, items_provider=_boom, agent_instructions="Rules.")
+        response = assemble_or_fail_closed(
+            request, items_provider=_boom, agent_instructions="Rules."
+        )
         assert [ref.ref for ref in response.history.items] == ["item_5"]
         assert response.memory.items == []
         assert response.system.text == "Rules."

@@ -218,7 +218,9 @@ def assemble(
     memory_items: list[MemoryItem] = []
     if memory_fixture:
         memory_items = [
-            MemoryItem(id="mem_fixture", kind="fact", text=memory_fixture, updated_at=int(time.time()))
+            MemoryItem(
+                id="mem_fixture", kind="fact", text=memory_fixture, updated_at=int(time.time())
+            )
         ]
     memory = MemoryBlock(
         items=memory_items,
@@ -241,7 +243,9 @@ def assemble(
             model=request.harness.model,
         )
         selected_items = [i for i in (_item_by_id(items, r) for r in refs) if i is not None]
-        estimated_tokens = count_tokens(selected_items, request.harness.model) if selected_items else 0
+        estimated_tokens = (
+            count_tokens(selected_items, request.harness.model) if selected_items else 0
+        )
 
     history = HistoryBlock(
         summary=None,
@@ -255,7 +259,9 @@ def assemble(
         summary=False,
         estimated_tokens=estimated_tokens,
     )
-    return AssembleResponse(turn_id=request.turn_id, system=system, memory=memory, history=history, audit=audit)
+    return AssembleResponse(
+        turn_id=request.turn_id, system=system, memory=memory, history=history, audit=audit
+    )
 
 
 def assemble_or_fail_closed(
@@ -277,7 +283,9 @@ def assemble_or_fail_closed(
         ``audit.fallback = True``.
     """
     try:
-        return assemble(request, items_provider=items_provider, agent_instructions=agent_instructions)
+        return assemble(
+            request, items_provider=items_provider, agent_instructions=agent_instructions
+        )
     except Exception:
         _logger.exception(
             "context assembly failed for turn=%s session=%s; failing closed",
@@ -294,7 +302,9 @@ def assemble_or_fail_closed(
                 items=[HistoryItemRef(ref=request.new_item_id)],
                 digest=_digest([request.new_item_id]),
             ),
-            audit=AssembleAudit(memory_items=0, history_items=1, summary=False, estimated_tokens=0, fallback=True),
+            audit=AssembleAudit(
+                memory_items=0, history_items=1, summary=False, estimated_tokens=0, fallback=True
+            ),
         )
 
 
