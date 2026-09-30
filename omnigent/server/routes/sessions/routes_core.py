@@ -3304,9 +3304,8 @@ def register_core_routes(
             dropped_label_keys_set.add(_CLAUDE_NATIVE_PERMISSION_MODE_LABEL_KEY)
         dropped_label_keys: frozenset[str] = frozenset(dropped_label_keys_set)
         # A side chat forked from a rollover super chat stays a rollover
-        # session (the labels carry over untouched, like any other fork) —
-        # it is seeded from the parent's checkpoint below, not its full
-        # transcript.
+        # session (labels carry over untouched) — seeded from the parent's
+        # checkpoint below, not its full transcript.
         source_is_rollover = is_rollover(source.labels)
 
         # DANGEROUS codex full-bypass. The source's bypass label is always
@@ -3362,11 +3361,8 @@ def register_core_routes(
         # native rollout, so the clone is likewise doomed — skip the directive
         # so the runner rebuilds from the copied Omnigent items instead.
         # A rollover side chat is the same case for a different reason:
-        # cloning the source's native rollout file verbatim would hand the
-        # CLI the parent's FULL transcript, defeating the seed compaction
-        # item appended below — force the rebuild path so resume starts from
-        # that seed instead (the same "restart at the latest compaction
-        # item" rebuilders already use for an in-place rollover).
+        # cloning the source's rollout verbatim would hand the CLI the
+        # parent's full transcript, defeating the seed appended below.
         resume_source_native_session = (
             (not switching_agent or copy_model_settings)
             and not target_is_cursor
@@ -3528,12 +3524,9 @@ def register_core_routes(
             ) from exc
 
         if body.side_chat and source_is_rollover:
-            # Append the seed checkpoint AFTER the deep copy above, so it is
-            # the fork's LATEST item — the same "restart at the latest
-            # compaction item" rule the native resume rebuilders already
-            # apply makes the relaunched CLI open from summary + tail only,
-            # never the copied full transcript. Best-effort: a failure here
-            # never breaks the fork itself, it just leaves the full copy.
+            # Appended AFTER the deep copy so it is the fork's LATEST item —
+            # resume rebuilders restart there. Best-effort: a failure here
+            # just leaves the full copy in place, never breaks the fork.
             try:
                 await _seed_rollover_side_chat(new_conv.id, source_id)
             except Exception:

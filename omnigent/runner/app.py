@@ -7968,10 +7968,9 @@ def create_runner_app(
             )
         try:
             loop = asyncio.get_running_loop()
-            # A clean completion is the only "between turns" point rollover may
-            # act on — never on an error/interrupt exit. Rollover runs (and
-            # fully lands its compaction item + pane recycle) before any queued
-            # message is allowed to start its own turn, so the two never race.
+            # Rollover only acts on a clean completion, and always finishes
+            # (compaction item + pane recycle) before any queued message can
+            # start its own turn — so the two never race.
             _cont = loop.create_task(
                 _finish_turn_and_maybe_roll_over(
                     conv_id, clean=error is None and not was_interrupted
