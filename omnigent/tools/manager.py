@@ -199,7 +199,7 @@ class ToolManager:
         # list and update review comments without the spec opting in.
         self._register_comment_tools()
         # session_history is auto-registered only for a rollover session
-        # (label-driven, not a per-agent spec opt-in — see DESIGN.md §6).
+        # (label-driven, not a per-agent spec opt-in).
         self._register_session_history_tool()
         # Policy tool is always auto-registered so agents can add
         # inline CEL policies at runtime without spec changes.

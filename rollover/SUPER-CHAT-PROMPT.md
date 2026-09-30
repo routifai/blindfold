@@ -9,7 +9,7 @@ Ownership:
   ship as framework instructions in `omnigent/runtime/prompt.py`
   (`ROLLOVER_CONTEXT_INSTRUCTION`) and apply to every rollover session.
 - The **long-term memory** section is filled in when the memory tool lands (see
-  CONTEXT-CONTRACT.md).
+  README.md).
 - The rest belongs to the coordinator's agent instructions.
 
 Placeholders are in `<angle brackets>`.

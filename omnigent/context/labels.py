@@ -3,7 +3,7 @@
 ``omnigent.context.mode`` selects the lifecycle: unset means upstream
 behavior, untouched; ``"rollover"`` means each native CLI compacts its own
 context at Omnigent's threshold, and the session gets the recall tool and
-instruction. See ``rollover/CONTEXT-CONTRACT.md``.
+instruction. See ``rollover/README.md``.
 """
 
 from __future__ import annotations

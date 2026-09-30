@@ -7961,13 +7961,13 @@ def create_runner_app(
             )
         try:
             loop = asyncio.get_running_loop()
-            _cont = loop.create_task(_check_and_start_next_turn(conv_id))
+            _cont = loop.create_task(
+                _check_and_start_next_turn(conv_id),
+            )
             _cont.add_done_callback(_background_tasks.discard)
             _background_tasks.add(_cont)
         except RuntimeError:
             pass
-
-    app.state.session_init_envelopes = _session_init_envelopes
 
     async def _cancel_active_turn(
         conv_id: str, expected_task: asyncio.Task[None] | None = None

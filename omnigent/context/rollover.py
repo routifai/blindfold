@@ -2,7 +2,7 @@
 and the Omnigent-written checkpoint used to seed side chats.
 
 In a rollover session each native CLI compacts its own context at
-:func:`resolve_rollover_threshold` (see ``rollover/CONTEXT-CONTRACT.md``).
+:func:`resolve_rollover_threshold` (see ``rollover/README.md``).
 :func:`build_side_chat_seed` is the one place Omnigent writes a checkpoint
 itself: a side chat starts from the parent's summary plus recent turns.
 """
