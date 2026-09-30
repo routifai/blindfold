@@ -7804,6 +7804,9 @@ _ROUTED_SPAWN_ALLOWED_TOOLS: tuple[str, ...] = (
     "mcp__omnigent__sys_read_inbox",
 )
 
+#: Recall must run without a permission prompt, or the model stalls on it.
+_ROLLOVER_ALLOWED_TOOLS: tuple[str, ...] = ("mcp__omnigent__session_history",)
+
 _CLAUDE_LAUNCH_PERMISSION_MODES = frozenset(
     {"default", "auto", "acceptEdits", "plan", "dontAsk", "bypassPermissions"}
 )
@@ -8142,9 +8145,7 @@ async def _auto_create_claude_terminal(
         if session_init is not None and session_init.snapshot.workspace
         else _runner_workspace_dir()
     )
-    # Omnigent, not Claude Code, owns compaction in a rollover session (the
-    # label reaches every relaunch through the session snapshot, including
-    # the post-rollover pane recycle).
+    # A rollover session sets Claude Code's own auto-compaction ceiling.
     compact_at_tokens = _rollover_compact_at(
         session_init.snapshot.labels if session_init is not None else None
     )
@@ -8796,7 +8797,7 @@ async def _auto_create_claude_terminal(
             if x
         )
         or None,
-        allowed_tools=routed_spawn_tools,
+        allowed_tools=routed_spawn_tools + (_ROLLOVER_ALLOWED_TOOLS if rollover else ()),
         # The route-turn hook is registered only when this session can
         # actually route; otherwise every submit would pay its round trip.
         turn_routing=_claude_turn_router is not None,

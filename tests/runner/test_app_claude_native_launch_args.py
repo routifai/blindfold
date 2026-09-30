@@ -22,6 +22,7 @@ from omnigent.harnesses.claude_native.main import (
 )
 from omnigent.runner.app import _build_claude_native_base_args, _claude_terminal_env_unset
 from omnigent.runner.native.orchestration import (
+    _ROLLOVER_ALLOWED_TOOLS,
     _ROUTED_SPAWN_ALLOWED_TOOLS,
     _claude_launch_metadata_from_envelope,
     _claude_launch_permission_mode,
@@ -423,6 +424,21 @@ def test_auto_harness_launch_names_the_routed_spawn_tool_and_preapproves_it(
     assert "mcp__omnigent__sys_agent_list" in allowed
     assert "mcp__omnigent__sys_session_send" in allowed
     assert set(_ROUTED_SPAWN_ALLOWED_TOOLS) <= set(allowed)
+
+
+def test_rollover_launch_preapproves_the_recall_tool(bridge_dir: Path) -> None:
+    """Without the allowlist, don't-ask mode denies ``session_history`` outright."""
+    from omnigent.harnesses.claude_native.bridge import augment_claude_args
+
+    args = augment_claude_args(
+        ("--model", "databricks-claude-sonnet-5"),
+        bridge_dir=bridge_dir,
+        python_executable="/venv/bin/python",
+        allowed_tools=_ROLLOVER_ALLOWED_TOOLS,
+    )
+
+    allowed = args[args.index("--allowedTools") + 1].split(",")
+    assert "mcp__omnigent__session_history" in allowed
 
 
 def test_pinned_harness_launch_argv_is_unchanged(bridge_dir: Path) -> None:
