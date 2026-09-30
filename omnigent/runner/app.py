@@ -7988,11 +7988,8 @@ def create_runner_app(
 
     async def _maybe_apply_rollover(conv_id: str) -> None:
         """Cheap no-op for every non-rollover turn; the label gates all I/O below."""
-        # pi-native rolls over through Pi's own compaction (the resident
-        # extension's session_before_compact hook), never the pane-recycle
-        # path below — recycling the pane too would double-compact, and it
-        # must not open the gate a pi-native turn would then wait on for
-        # nothing.
+        # pi-native rolls over through Pi's own compaction hook; recycling its
+        # pane too would double-compact.
         if (
             not _is_native_harness(conv_id)
             or _session_harness_name(conv_id) == "pi-native"
