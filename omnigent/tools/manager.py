@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import logging
 import shutil
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from omnigent.context.labels import is_rollover
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.inner.os_env import OSEnvironment
 from omnigent.runtime import get_caps
@@ -22,6 +24,7 @@ from omnigent.tools.builtins import (
     ListCommentsTool,
     LoadSkillTool,
     ReadSkillFileTool,
+    SessionHistoryTool,
     SysAdviseModelsTool,
     SysAgentDownloadTool,
     SysAgentGetTool,
@@ -114,6 +117,7 @@ class ToolManager:
         os_env: OSEnvironment | None = None,
         *,
         os_env_schema_only: bool = False,
+        labels: Mapping[str, str] | None = None,
     ) -> None:
         """
         Initialize the tool manager and register built-in,
@@ -143,11 +147,17 @@ class ToolManager:
         :param os_env_schema_only: Register static OS tool schemas without
             creating an environment. For metadata callers only; OS tool
             execution remains runner-owned. Preserves the ``os_env`` gate.
+        :param labels: The session's labels, when known. Drives label-gated
+            auto-registration (currently: ``session_history`` for a rollover
+            session — ``omnigent.context.labels.is_rollover``). ``None``
+            (the default) registers nothing label-gated, matching upstream
+            behavior for every caller that doesn't pass labels.
         """
         self._spec = spec
         self._workdir = workdir
         self._sandbox_enabled = sandbox_enabled
         self._pre_resolved_os_env = os_env
+        self._labels = labels
         self._started = False
         self._tools: dict[str, Tool] = {}
         self._srt_available = is_srt_available()
@@ -188,6 +198,9 @@ class ToolManager:
         # Comment tools are always auto-registered so agents can
         # list and update review comments without the spec opting in.
         self._register_comment_tools()
+        # session_history is auto-registered only for a rollover session
+        # (label-driven, not a per-agent spec opt-in — see DESIGN.md §6).
+        self._register_session_history_tool()
         # Policy tool is always auto-registered so agents can add
         # inline CEL policies at runtime without spec changes.
         self._register_policy_tools()
@@ -556,6 +569,19 @@ class ToolManager:
         """
         self._tools[ListCommentsTool.name()] = ListCommentsTool()
         self._tools[UpdateCommentTool.name()] = UpdateCommentTool()
+
+    def _register_session_history_tool(self) -> None:
+        """
+        Auto-register ``session_history`` for a rollover session only.
+
+        Gated on ``is_rollover(self._labels)`` rather than a spec opt-in, so
+        every rollover session gets recall regardless of which agent spec is
+        bound to it. A session whose labels are unknown to this
+        :class:`ToolManager` call (``labels=None``) or that isn't in
+        rollover mode registers nothing here — byte-for-byte upstream.
+        """
+        if is_rollover(self._labels):
+            self._tools[SessionHistoryTool.name()] = SessionHistoryTool()
 
     def _register_browser_tools(self) -> None:
         """

@@ -1662,3 +1662,30 @@ def test_get_tool_names_returns_registered_names() -> None:
 
     assert "load_skill" in names
     assert "sys_timer_set" in names
+
+
+# ── session_history: label-gated, not spec-gated ──────────────
+
+
+def test_session_history_absent_without_labels() -> None:
+    """No ``labels=`` kwarg at all — the default — is byte-for-byte upstream."""
+    mgr = ToolManager(_make_spec())
+    assert "session_history" not in mgr.get_tool_names()
+
+
+def test_session_history_absent_for_non_rollover_labels() -> None:
+    mgr = ToolManager(_make_spec(), labels={"omnigent.context.mode": "blindfold"})
+    assert "session_history" not in mgr.get_tool_names()
+
+
+def test_session_history_present_for_rollover_session() -> None:
+    mgr = ToolManager(_make_spec(), labels={"omnigent.context.mode": "rollover"})
+    assert "session_history" in mgr.get_tool_names()
+
+
+def test_session_history_registration_is_not_a_spec_opt_in() -> None:
+    """Every agent spec gets it in a rollover session — no per-agent declaration."""
+    mgr = ToolManager(
+        _make_spec(local_tools=[]), labels={"omnigent.context.mode": "rollover"}
+    )
+    assert "session_history" in mgr.get_tool_names()

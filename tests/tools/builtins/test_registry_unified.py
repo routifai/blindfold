@@ -155,6 +155,10 @@ def test_builtin_names_size_matches_registry() -> None:
                 "browser_click",
                 "browser_type",
                 "browser_screenshot",
+                # session_history: auto-registered by ToolManager only for
+                # a rollover session (label-driven, not a spec opt-in —
+                # see ToolManager._register_session_history_tool).
+                "session_history",
             }
         )
         == BUILTIN_NAMES
