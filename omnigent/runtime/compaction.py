@@ -354,6 +354,7 @@ async def summarize_history(
     connection: dict[str, str] | None = None,
     runner_client: Any | None = None,  # httpx.AsyncClient | None
     conversation_id: str | None = None,
+    extra_instructions: str | None = None,
 ) -> dict[str, Any]:
     """
     Layer 2: call the LLM to summarise conversation messages.
@@ -380,6 +381,9 @@ async def summarize_history(
     :param conversation_id: Session/conversation identifier, e.g.
         ``"conv_abc123"``. Forwarded to the runner so it can look up
         the spec's auth credentials for the LLM call.
+    :param extra_instructions: Optional caller-supplied addition to the
+        summarization system prompt (e.g. rollover's state-file shape).
+        Forwarded to the runner delegation too.
     :returns: A dict with ``"text"`` (the summary) and
         ``"token_count"`` (approximate token count).
     """
@@ -390,12 +394,14 @@ async def summarize_history(
             model,
             connection,
             conversation_id=conversation_id,
+            extra_instructions=extra_instructions,
         )
     return await _summarize_history_uncached(
         messages_to_summarize,
         llm_client,
         model,
         connection,
+        extra_instructions=extra_instructions,
     )
 
 
@@ -404,6 +410,7 @@ async def _summarize_history_uncached(
     llm_client: Any,
     model: str,
     connection: dict[str, str] | None = None,
+    extra_instructions: str | None = None,
 ) -> dict[str, Any]:
     """
     Run the Layer 2 summarization LLM call.
@@ -413,9 +420,12 @@ async def _summarize_history_uncached(
     :param model: LLM model string, e.g. ``"openai/gpt-4o"``.
     :param connection: Per-provider connection overrides. ``None``
         uses environment variable defaults.
+    :param extra_instructions: Optional addition to the system prompt.
     :returns: Dict with ``"text"`` and ``"token_count"`` keys.
     """
-    system_prompt = build_summarization_prompt(messages_to_summarize)
+    system_prompt = build_summarization_prompt(
+        messages_to_summarize, extra_instructions=extra_instructions
+    )
     resp = await llm_client.responses.create(
         model=model,
         input=build_summarization_input(messages_to_summarize),
@@ -434,6 +444,7 @@ async def _summarize_via_runner_uncached(
     model: str,
     connection: dict[str, str] | None = None,
     conversation_id: str | None = None,
+    extra_instructions: str | None = None,
 ) -> dict[str, Any]:
     """
     POST to the runner's ``/v1/summarize`` endpoint and return the result.
@@ -449,6 +460,8 @@ async def _summarize_via_runner_uncached(
     :param conversation_id: Session/conversation identifier, e.g.
         ``"conv_abc123"``. Sent in the payload so the runner can
         look up the spec's auth credentials for the LLM call.
+    :param extra_instructions: Optional addition to the system prompt,
+        forwarded to the runner's endpoint verbatim.
     :returns: Dict with ``"text"`` (summary) and ``"token_count"``
         (approximate tiktoken estimate) keys.
     :raises httpx.HTTPStatusError: On non-2xx responses from the runner.
@@ -459,6 +472,8 @@ async def _summarize_via_runner_uncached(
         payload["connection"] = connection
     if conversation_id is not None:
         payload["session_id"] = conversation_id
+    if extra_instructions:
+        payload["extra_instructions"] = extra_instructions
     resp = await runner_client.post("/v1/summarize", json=payload, timeout=120.0)
     resp.raise_for_status()
     data = resp.json()

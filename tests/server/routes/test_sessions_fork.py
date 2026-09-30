@@ -1405,6 +1405,7 @@ async def test_fork_side_chat_of_rollover_without_checkpoint_summarizes_now(
 ) -> None:
     """A side chat forked before the parent ever rolled over builds one seed now."""
     from omnigent.context import rollover as rollover_module
+    from omnigent.context.rollover import CHECKPOINT_HEADER
 
     async def _fake_summarize_history(messages, *_args, **_kwargs):
         del messages
@@ -1431,7 +1432,7 @@ async def test_fork_side_chat_of_rollover_without_checkpoint_summarizes_now(
     assert resp.status_code == 201, f"got {resp.status_code}: {resp.text}"
     assert len(conv_store.appended) == 1
     _, new_items = conv_store.appended[0]
-    assert new_items[0].data.summary == "FRESH SUMMARY"
+    assert new_items[0].data.summary == f"{CHECKPOINT_HEADER}\n\nFRESH SUMMARY"
 
 
 @pytest.mark.asyncio

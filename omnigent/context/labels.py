@@ -28,6 +28,12 @@ ROLLOVER_AT_TOKENS_LABEL = "omnigent.context.rollover_at_tokens"
 ROLLOVER_KEEP_MESSAGES_LABEL = "omnigent.context.rollover_keep_messages"
 DEFAULT_KEEP_MESSAGES = 20
 
+# Token budget for the kept tail (whole turns only — see
+# rollover.select_recent). Unset -> DEFAULT_KEEP_TOKENS. Measured on real
+# Muse compactions (PLAN.md "A, revision 2").
+ROLLOVER_KEEP_TOKENS_LABEL = "omnigent.context.rollover_keep_tokens"
+DEFAULT_KEEP_TOKENS = 16_000
+
 
 def is_rollover(labels: Mapping[str, str] | None) -> bool:
     """Whether a session's labels select rollover (Omnigent-owned) context.
@@ -45,5 +51,10 @@ def is_rollover(labels: Mapping[str, str] | None) -> bool:
 # from the super chat KEEPS these — it stays a rollover session, seeded from
 # the parent's checkpoint rather than dropped back to upstream behavior.
 ROLLOVER_SESSION_LABELS: frozenset[str] = frozenset(
-    {CONTEXT_MODE_LABEL, ROLLOVER_AT_TOKENS_LABEL, ROLLOVER_KEEP_MESSAGES_LABEL}
+    {
+        CONTEXT_MODE_LABEL,
+        ROLLOVER_AT_TOKENS_LABEL,
+        ROLLOVER_KEEP_MESSAGES_LABEL,
+        ROLLOVER_KEEP_TOKENS_LABEL,
+    }
 )

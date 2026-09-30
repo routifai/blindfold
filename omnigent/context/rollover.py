@@ -12,12 +12,15 @@ checkpoint (``rollover/DESIGN.md``).
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from typing import Any
 
 from omnigent.context.labels import (
     DEFAULT_KEEP_MESSAGES,
+    DEFAULT_KEEP_TOKENS,
     ROLLOVER_AT_TOKENS_LABEL,
     ROLLOVER_KEEP_MESSAGES_LABEL,
+    ROLLOVER_KEEP_TOKENS_LABEL,
 )
 from omnigent.entities import CompactionData
 from omnigent.runtime.compaction import count_tokens, summarize_history
@@ -42,6 +45,40 @@ _SUMMARY_REQUEST_TEXT = (
     "context. The original messages are available but not included in this "
     "prompt for brevity.]\n\nPlease provide a summary of our conversation so far."
 )
+
+# Fixed, code-authored preface for every rollover summary (PLAN.md "A,
+# revision 2" point 3) — never written by the LLM, so its wording can't drift
+# or be talked around by the summarization prompt.
+CHECKPOINT_HEADER = (
+    "This conversation grew past its context limit and earlier turns were "
+    "compacted into the summary below. The work in it is your own; build on "
+    "it instead of redoing it. Files, processes and jobs your tools created "
+    "still exist. Standing instructions and memory are live every turn and "
+    "are not part of this summary. When facts conflict, the latest evidence "
+    "and user corrections win. The summary may omit details: recover exact "
+    "earlier messages with the session_history tool before relying on them."
+)
+
+
+def _state_file_summarizer_instruction() -> str:
+    """Build the "state file, not a narrative" summarizer instruction
+    (PLAN.md "A, revision 2" point 4), with today's date filled in by code.
+    """
+    today = datetime.now(UTC).date().isoformat()
+    return (
+        f"Write the summary as a state file, not a narrative. Start with "
+        f"'## Context checkpoint — {today}'. Organize by topic: the user's "
+        "identity, preferences and constraints (including corrections and "
+        '"do not" rules) first; each active task with its exact identifiers '
+        "(ids, paths, URLs, numbers), a time-zoned timestamp, its status, "
+        "and its next step; keep look-alike items in separate sections; "
+        'state negative facts explicitly (e.g. "no message was sent"); '
+        "record what the user was told about any failure; use only "
+        "absolute dates, never relative ones. End with 'Current position / "
+        "next step'. If the input already starts with a prior checkpoint, "
+        "rewrite it into the new one — update entries in place and drop "
+        "resolved noise — rather than appending to it."
+    )
 
 
 def _parse_positive_int(raw: str | None) -> int | None:
@@ -114,44 +151,65 @@ def resolve_keep_messages(labels: Mapping[str, str] | None) -> int:
     return value if value is not None else DEFAULT_KEEP_MESSAGES
 
 
+def resolve_keep_tokens(labels: Mapping[str, str] | None) -> int:
+    """Resolve ``omnigent.context.rollover_keep_tokens``, default 16,000."""
+    labels = labels or {}
+    value = _parse_positive_int(labels.get(ROLLOVER_KEEP_TOKENS_LABEL))
+    return value if value is not None else DEFAULT_KEEP_TOKENS
+
+
 def select_recent(
     items: list[dict[str, Any]],
+    *,
     keep_messages: int,
+    keep_tokens: int,
+    model: str,
 ) -> list[dict[str, Any]]:
     """
-    Select the last *keep_messages* messages, tool items riding along.
+    Select the trailing whole turns that fit both budgets.
 
-    Counts only ``type == "message"`` items (user/assistant turns); a
-    message's ``function_call`` / ``function_call_output`` / ``reasoning`` /
-    ``native_tool`` items are not counted but ride along with whichever
-    message they precede (tool calls/results always appear before the
-    assistant message they belong to), so a kept message brings its whole
-    tool round-trip with it. The window always ends at the last item in
-    *items* — there is no separate "new message" anchor here, unlike
-    turn-time context assembly.
+    A turn is a user message plus everything after it up to (not including)
+    the next user message. Turns are added whole, walking backward from the
+    end, while the running total stays within *keep_tokens*
+    (``count_tokens``) and *keep_messages* (user+assistant message count) —
+    a turn is never split, so a kept ``function_call`` always keeps its
+    output. The tail always starts at a user message; when even the single
+    most recent turn alone exceeds a budget, the tail is empty (measured on
+    real Muse compactions: this happened 2 of 5 times) and the summary must
+    cover it instead.
 
     :param items: Chronological (oldest first) flat item dicts.
-    :param keep_messages: How many trailing messages to keep. Clamped to
-        at least 1.
-    :returns: The selected trailing slice of *items*, chronological.
+    :param keep_messages: Message-count budget (user+assistant).
+    :param keep_tokens: Token budget for the kept tail.
+    :param model: LLM model string, used to pick a tokenizer for the budget.
+    :returns: The selected trailing whole turns, chronological, or ``[]``.
     """
     if not items:
         return []
-    message_indices = [i for i, item in enumerate(items) if item.get("type") == "message"]
-    if not message_indices:
-        # No messages at all is malformed input for a session record;
-        # nothing safe to trim, so keep everything.
-        return list(items)
-    kept_message_indices = message_indices[-max(keep_messages, 1) :]
-    start = min(kept_message_indices)
-    boundary_response_id = items[start].get("response_id")
-    while (
-        start > 0
-        and items[start - 1].get("type") != "message"
-        and items[start - 1].get("response_id") == boundary_response_id
-    ):
-        start -= 1
-    return items[start:]
+    turn_starts = [
+        i
+        for i, item in enumerate(items)
+        if item.get("type") == "message" and item.get("role") == "user"
+    ]
+    if not turn_starts:
+        return []
+    turn_bounds = [
+        (start, turn_starts[i + 1] if i + 1 < len(turn_starts) else len(items))
+        for i, start in enumerate(turn_starts)
+    ]
+
+    selected_start = len(items)
+    message_count = 0
+    for start, end in reversed(turn_bounds):
+        turn_message_count = sum(1 for it in items[start:end] if it.get("type") == "message")
+        candidate_message_count = message_count + turn_message_count
+        if candidate_message_count > keep_messages:
+            break
+        if count_tokens(items[start:], model) > keep_tokens:
+            break
+        selected_start = start
+        message_count = candidate_message_count
+    return items[selected_start:] if selected_start < len(items) else []
 
 
 def _summary_exchange(summary_text: str) -> list[dict[str, Any]]:
@@ -175,6 +233,7 @@ async def build_rollover_item(
     *,
     previous_summary: str | None,
     keep_messages: int,
+    keep_tokens: int = DEFAULT_KEEP_TOKENS,
     model: str,
     llm_client: Any = None,
     connection: dict[str, str] | None = None,
@@ -187,18 +246,25 @@ async def build_rollover_item(
     The summary covers everything in *items_since_previous_compaction*,
     merged with *previous_summary* (progressive summarization — see
     ``summarize_history``/``build_summarization_prompt``) so it stays
-    cumulative across rollovers rather than restarting each time.
-    ``compacted_messages`` is shaped exactly like other producers'
-    (``compaction_to_history_items``, the codex forwarder's
+    cumulative across rollovers rather than restarting each time. The LLM's
+    own text is asked for as a state file (``_state_file_summarizer_instruction``)
+    and then given the fixed, code-authored :data:`CHECKPOINT_HEADER` — never
+    written by the LLM itself. ``compacted_messages`` is shaped exactly like
+    other producers' (``compaction_to_history_items``, the codex forwarder's
     ``replacement_history``): flat item dicts, summary pair first, so both
     the claude-native and codex-native resume rebuilders accept it directly.
+    No memory/standing-instruction content goes in here — those are injected
+    live every turn (see the header) — and ``token_count`` is the estimated
+    size of summary + kept tail together (Claude's ``compact_boundary``
+    needs a real post-compaction figure, not just the summary's own size).
 
     :param items_since_previous_compaction: This session's items after the
         latest compaction item (or the whole record when there is none),
         chronological, as flat item dicts. Must be non-empty.
     :param previous_summary: The prior rollover's summary text, or ``None``
         for the session's first rollover.
-    :param keep_messages: How many trailing messages to keep verbatim.
+    :param keep_messages: Message-count budget for the kept tail.
+    :param keep_tokens: Token budget for the kept tail.
     :param model: LLM model string for the summarization call and its
         token estimate.
     :param llm_client: LLM client for direct summarization. Ignored when
@@ -226,15 +292,22 @@ async def build_rollover_item(
         connection,
         runner_client,
         conversation_id,
+        extra_instructions=_state_file_summarizer_instruction(),
     )
-    recent = select_recent(items_since_previous_compaction, keep_messages)
+    summary_text = f"{CHECKPOINT_HEADER}\n\n{summary['text']}"
+    recent = select_recent(
+        items_since_previous_compaction,
+        keep_messages=keep_messages,
+        keep_tokens=keep_tokens,
+        model=model,
+    )
     last_item_id = items_since_previous_compaction[-1]["id"]
-    compacted_messages = _summary_exchange(summary["text"]) + recent
+    compacted_messages = _summary_exchange(summary_text) + recent
     return CompactionData(
-        summary=summary["text"],
+        summary=summary_text,
         last_item_id=last_item_id,
         model=model,
-        token_count=summary["token_count"],
+        token_count=count_tokens(compacted_messages, model),
         compacted_messages=compacted_messages,
     )
 
@@ -243,6 +316,7 @@ async def build_side_chat_seed(
     items: list[dict[str, Any]],
     *,
     keep_messages: int,
+    keep_tokens: int = DEFAULT_KEEP_TOKENS,
     model: str,
     llm_client: Any = None,
     connection: dict[str, str] | None = None,
@@ -259,7 +333,8 @@ async def build_side_chat_seed(
 
     :param items: The parent's full chronological record, as flat item
         dicts. Must be non-empty.
-    :param keep_messages: How many trailing messages to keep verbatim.
+    :param keep_messages: Message-count budget for the kept tail.
+    :param keep_tokens: Token budget for the kept tail.
     :param model: LLM model string for the summarization call, when one is
         needed.
     :param llm_client: LLM client for direct summarization. Ignored when
@@ -286,6 +361,7 @@ async def build_side_chat_seed(
             items,
             previous_summary=None,
             keep_messages=keep_messages,
+            keep_tokens=keep_tokens,
             model=model,
             llm_client=llm_client,
             connection=connection,
@@ -309,6 +385,7 @@ async def build_side_chat_seed(
         items_since,
         previous_summary=checkpoint.get("summary"),
         keep_messages=keep_messages,
+        keep_tokens=keep_tokens,
         model=model,
         llm_client=llm_client,
         connection=connection,

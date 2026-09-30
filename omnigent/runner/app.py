@@ -52,6 +52,7 @@ from omnigent.context.rollover import (
     build_rollover_item,
     estimate_context_tokens,
     resolve_keep_messages,
+    resolve_keep_tokens,
     resolve_rollover_threshold,
 )
 from omnigent.debug_logging import (
@@ -184,7 +185,6 @@ from omnigent.runner.subagent_routing import (
     routing_class_from_snapshot,
     session_routing_class,
 )
-from omnigent.runtime.compaction import count_tokens
 from omnigent.runtime.harnesses.process_manager import HarnessProcessManager, NoLiveHarnessError
 from omnigent.runtime.prompt import (
     build_instructions,
@@ -8059,6 +8059,7 @@ def create_runner_app(
             items,
             previous_summary=previous_summary,
             keep_messages=resolve_keep_messages(labels),
+            keep_tokens=resolve_keep_tokens(labels),
             model=model,
             llm_client=_get_runner_llm_client(),
             connection=connection,
@@ -8073,16 +8074,28 @@ def create_runner_app(
         checkpoint_id = None
         with contextlib.suppress(Exception):  # audit field only, never fail the rollover
             checkpoint_id = resp.json().get("id")
+        # Refresh the reported-usage label to the real post-rollover figure
+        # right now, rather than leaving the pre-rollover number in place
+        # until the relaunched pane's forwarder posts its own first report —
+        # an unrefreshed label reads as still-over-threshold and would
+        # trigger a second rollover immediately after this one.
+        with contextlib.suppress(Exception):
+            await server_client.post(
+                f"/v1/sessions/{conv_id}/events",
+                json={
+                    "type": "external_session_usage",
+                    "data": {"context_tokens": data.token_count},
+                },
+            )
         compacted = data.compacted_messages or []
         first_kept_item_id = compacted[2].get("id") if len(compacted) > 2 else None
-        tokens_after = count_tokens(compacted, model) if compacted else data.token_count
         _logger.info(
             "rollover applied for %s: trigger=threshold tokens_before=%s threshold=%s "
             "tokens_after=%s checkpoint_item_id=%s first_kept_item_id=%s pane_reaped=%s",
             conv_id,
             tokens_before,
             threshold,
-            tokens_after,
+            data.token_count,
             checkpoint_id,
             first_kept_item_id,
             reaped,
@@ -13709,11 +13722,14 @@ def create_runner_app(
                     session_id,
                     model,
                 )
+        extra_instructions = body.get("extra_instructions") or None
         llm_client = _get_runner_llm_client()
         resp = await llm_client.responses.create(
             model=model,
             input=build_summarization_input(messages),
-            instructions=build_summarization_prompt(messages),
+            instructions=build_summarization_prompt(
+                messages, extra_instructions=extra_instructions
+            ),
             tools=[],
             connection_params=connection,
         )

@@ -54,7 +54,11 @@ def _extract_first_text(messages: list[dict[str, Any]]) -> str:
     return content if isinstance(content, str) else ""
 
 
-def build_summarization_prompt(messages: list[dict[str, Any]]) -> str:
+def build_summarization_prompt(
+    messages: list[dict[str, Any]],
+    *,
+    extra_instructions: str | None = None,
+) -> str:
     """
     Build the Layer 2 summarization system prompt.
 
@@ -64,15 +68,21 @@ def build_summarization_prompt(messages: list[dict[str, Any]]) -> str:
 
     :param messages: The messages that will be summarized, in
         Responses API input format.
+    :param extra_instructions: Optional caller-supplied instructions appended
+        after the base prompt (e.g. rollover's state-file shape). Lets one
+        caller customize the summary's form without forking this function.
     :returns: The assembled system prompt string.
     """
     first = _extract_first_text(messages)
+    prompt = _SUMMARIZATION_BASE_PROMPT
     if "[This is an automatically generated summary" in first:
-        return (
+        prompt = (
             "The conversation starts with a summary of earlier context. "
             "Incorporate it into your new summary — do not discard it.\n\n"
-        ) + _SUMMARIZATION_BASE_PROMPT
-    return _SUMMARIZATION_BASE_PROMPT
+        ) + prompt
+    if extra_instructions:
+        prompt = prompt + "\n\n" + extra_instructions
+    return prompt
 
 
 def build_summarization_input(

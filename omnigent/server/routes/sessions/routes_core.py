@@ -2965,7 +2965,11 @@ def register_core_routes(
         (folding in only what happened since); builds one now, over the
         whole record, when the parent never rolled over yet.
         """
-        from omnigent.context.rollover import build_side_chat_seed, resolve_keep_messages
+        from omnigent.context.rollover import (
+            build_side_chat_seed,
+            resolve_keep_messages,
+            resolve_keep_tokens,
+        )
         from omnigent.entities import NewConversationItem
 
         items: list[dict[str, Any]] = []
@@ -2990,9 +2994,11 @@ def register_core_routes(
         runner_client = await _get_runner_client(
             source_id, runner_router, conversation=source_conv
         )
+        seed_labels = source_conv.labels if source_conv else None
         seed = await build_side_chat_seed(
             items,
-            keep_messages=resolve_keep_messages(source_conv.labels if source_conv else None),
+            keep_messages=resolve_keep_messages(seed_labels),
+            keep_tokens=resolve_keep_tokens(seed_labels),
             model=model,
             runner_client=runner_client,
             conversation_id=source_id,

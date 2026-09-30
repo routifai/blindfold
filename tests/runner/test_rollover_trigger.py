@@ -16,6 +16,7 @@ from typing import Any
 
 import pytest
 
+from omnigent.context.rollover import CHECKPOINT_HEADER
 from omnigent.runner.app import create_runner_app
 from omnigent.spec.types import AgentSpec, ExecutorSpec
 from tests.runner.conftest import _FakeProcessManager, _runner_client, _ScriptedHarnessClient
@@ -43,6 +44,7 @@ class _FakeServerClient(NullServerClient):
     def __init__(self, items: list[dict[str, Any]]) -> None:
         self._items = items
         self.posted_events: list[dict[str, Any]] = []
+        self.posted_usage_events: list[dict[str, Any]] = []
 
     async def get(self, url: str, **kwargs: Any) -> _FakeResponse:
         # A real yield point: without it, this fake never suspends and two
@@ -72,9 +74,13 @@ class _FakeServerClient(NullServerClient):
         )
 
     async def post(self, url: str, **kwargs: Any) -> _FakeResponse:
-        if url.endswith("/events") and (kwargs.get("json") or {}).get("type") == "compaction":
-            self.posted_events.append(kwargs["json"])
+        body = kwargs.get("json") or {}
+        if url.endswith("/events") and body.get("type") == "compaction":
+            self.posted_events.append(body)
             return _FakeResponse({"id": "comp_new"}, status_code=201)
+        if url.endswith("/events") and body.get("type") == "external_session_usage":
+            self.posted_usage_events.append(body)
+            return _FakeResponse({}, status_code=200)
         return await super().post(url, **kwargs)
 
 
@@ -222,12 +228,17 @@ async def test_triggers_and_recycles_pane_when_over_threshold(
 
     assert len(fake_client.posted_events) == 1
     data = fake_client.posted_events[0]["data"]
-    assert data["summary"] == "ROLLING SUMMARY"
+    assert data["summary"] == f"{CHECKPOINT_HEADER}\n\nROLLING SUMMARY"
     assert data["last_item_id"] == "m9"
     compacted = data["compacted_messages"]
     # Summary pair first, then the last 2 kept messages (m8, m9).
     assert [m.get("id") for m in compacted if "id" in m] == ["m8", "m9"]
     assert fake_reaper.reaped_ids == [conv_id]
+    # Bug fix (PLAN.md "A, revision 2" point 5): the reported-usage label is
+    # refreshed to the real post-rollover figure so a stale pre-rollover
+    # number can't immediately re-trigger on the next turn.
+    assert len(fake_client.posted_usage_events) == 1
+    assert fake_client.posted_usage_events[0]["data"]["context_tokens"] == data["token_count"]
 
 
 @pytest.mark.asyncio
