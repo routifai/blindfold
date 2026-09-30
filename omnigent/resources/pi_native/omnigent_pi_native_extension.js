@@ -1163,15 +1163,17 @@ function buildRolloverCompactionResult({
 /**
  * Load Pi's own compaction API (``generateSummary``) lazily and defensively.
  *
+ * ``@earendil-works/pi-coding-agent`` is ESM-only (no ``require`` export
+ * condition), so this uses dynamic ``import()`` — the only form that resolves
+ * it from this CommonJS file, with or without Pi's jiti loader's aliasing.
  * Required at call time, not module load, so a Pi build/runtime that can't
- * resolve the package (e.g. this file loaded outside Pi's jiti extension
- * loader) degrades to Pi's own default compaction instead of crashing the
- * session. Overridable via ``module.exports.testHooks`` for unit tests.
+ * resolve the package degrades to Pi's own default compaction instead of
+ * crashing the session. Overridable via ``module.exports.testHooks`` for
+ * unit tests.
  */
-function _loadPiCompactionApi() {
+async function _loadPiCompactionApi() {
   try {
-    // eslint-disable-next-line global-require
-    return require("@earendil-works/pi-coding-agent");
+    return await import("@earendil-works/pi-coding-agent");
   } catch (_err) {
     return null;
   }
@@ -1230,7 +1232,7 @@ async function handleRolloverBeforeCompact(config, event, ctx) {
     return undefined;
   }
   if (!model) return undefined;
-  const api = module.exports.testHooks.loadPiCompactionApi();
+  const api = await module.exports.testHooks.loadPiCompactionApi();
   if (!api || typeof api.generateSummary !== "function") return undefined;
   try {
     const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
