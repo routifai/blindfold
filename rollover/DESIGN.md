@@ -1,6 +1,6 @@
 # Rollover: the super chat, Muse-style
 
-Status: design, no code yet. Branch `rollover-muse`.
+Status: implemented on branch `rollover`. The contract other components rely on is in [CONTEXT-CONTRACT.md](CONTEXT-CONTRACT.md).
 
 ## Goal
 
