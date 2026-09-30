@@ -105,7 +105,7 @@ Code: `omnigent/context/labels.py`, `omnigent/context/rollover.py`.
 What to do:
 
 - Create the main chat with `omnigent.context.mode=rollover`.
-- Side chats need nothing extra: fork with `side_chat: true`.
+- Side chats: fork with `POST /v1/sessions/{id}/fork` and `side_chat: true`. The fork has no host yet; bind it with `POST /v1/hosts/{host_id}/runners` (`session_id`, `workspace`), which is what the web UI's "Start session" does. The rollover labels and the seeded checkpoint come with the fork.
 - For a long-running sub-agent that should be managed too, add
   `omnigent.context.mode=rollover` to its labels when creating it.
 - A new `compaction` item in a session's event stream means a rollover

@@ -19,7 +19,6 @@ rollover threshold (~100k tokens of filler). See the README's cost note.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import os
 import secrets
@@ -422,11 +421,13 @@ async def run_rollover_suite(context, client: httpx.AsyncClient, harness: str) -
         side_id = fork["id"]
         side_labels = await session_labels(client, side_id)
         side_page = await context.new_page()
+        # A fork has no host yet; bind it the way the UI's "Start session" does.
+        bind = await client.post(
+            f"{BASE_URL}/v1/hosts/{HOST_ID}/runners",
+            json={"session_id": side_id, "workspace": "/root/ws"},
+        )
+        bind.raise_for_status()
         await side_page.goto(f"{BASE_URL}/c/{side_id}")
-        # A fork has no host yet: the UI asks for one (prefilled), like a user would.
-        start = side_page.get_by_role("button", name="Start session")
-        with contextlib.suppress(PlaywrightTimeoutError):
-            await start.click(timeout=15_000)
         side_turn = await send_message_and_wait(
             side_page, client, side_id, "What's my codeword?", label=f"{harness}_side_chat"
         )
