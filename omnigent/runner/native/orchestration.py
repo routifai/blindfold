@@ -599,6 +599,9 @@ class _CodexNativeLaunchConfig:
         pinned into the private ``config.toml`` at launch so the thread (and
         the TUI footer) start at it instead of the shared config's default.
         ``None`` leaves Codex's configured effort in place.
+    :param rollover: ``True`` when the session's labels select rollover
+        (``omnigent.context.mode=rollover``): Codex's own auto-compaction
+        is overridden off at launch so Omnigent owns compaction.
     """
 
     workspace: Path
@@ -614,6 +617,7 @@ class _CodexNativeLaunchConfig:
     routing_enabled: bool = False
     turn_routing: bool = False
     reasoning_effort: str | None = None
+    rollover: bool = False
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1328,6 +1332,9 @@ async def _codex_native_launch_config(
             fork_source_external_id = _fse
         fork_carry_history = labels.get(FORK_CARRY_HISTORY_LABEL_KEY) == "1"
         bypass_sandbox = labels.get(CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY) == "1"
+    from omnigent.context.labels import is_rollover
+
+    rollover = is_rollover(labels if isinstance(labels, dict) else None)
     # One derivation of the session's Smart Routing class, shared with the SDK
     # codex path, so "pinned" and "auto-harness" mean the same on both.
     routing_class = routing_class_from_snapshot(
@@ -1349,6 +1356,7 @@ async def _codex_native_launch_config(
         routing_enabled=routing_class.routing_enabled,
         turn_routing=routing_class.turn_routing,
         reasoning_effort=reasoning_effort,
+        rollover=rollover,
     )
 
 
@@ -5172,9 +5180,11 @@ async def _auto_create_codex_terminal(
         codex_mcp_config_overrides,
         write_mcp_bridge_config,
     )
+    from omnigent.harnesses.codex_native.launch_args import codex_rollover_config_overrides
 
     write_mcp_bridge_config(bridge_dir)
     mcp_overrides = codex_mcp_config_overrides(bridge_dir)
+    rollover_overrides = codex_rollover_config_overrides() if launch_config.rollover else []
 
     # Omnigent coordinates for the codex-native policy hook. The hook runs as a
     # separate subprocess that POSTs tool calls to /policies/evaluate, so
@@ -5226,7 +5236,11 @@ async def _auto_create_codex_terminal(
         cwd=Path(workspace),
         model=_codex_launch.model,
         profile=_codex_launch.profile,
-        extra_config_overrides=[*_codex_launch.config_overrides, *mcp_overrides],
+        extra_config_overrides=[
+            *_codex_launch.config_overrides,
+            *mcp_overrides,
+            *rollover_overrides,
+        ],
         bridge_dir=bridge_dir,
         ap_server_url=launch_config.policy_server_url,
         ap_auth_headers=policy_headers,
@@ -8087,6 +8101,7 @@ async def _auto_create_claude_terminal(
     """
     from pathlib import Path
 
+    from omnigent.context.labels import is_rollover
     from omnigent.harnesses.claude_native.bridge import (
         BRIDGE_ID_LABEL_KEY,
         augment_claude_args,
@@ -8102,6 +8117,10 @@ async def _auto_create_claude_terminal(
         if session_init is not None and session_init.snapshot.workspace
         else _runner_workspace_dir()
     )
+    # Omnigent, not Claude Code, owns compaction in a rollover session (the
+    # label reaches every relaunch through the session snapshot, including
+    # the post-rollover pane recycle).
+    rollover = is_rollover(session_init.snapshot.labels if session_init is not None else None)
     started_at = time.monotonic()
     _logger.info(
         "Claude terminal auto-create starting: session=%s workspace=%s bundle_dir=%s "
@@ -8794,7 +8813,7 @@ async def _auto_create_claude_terminal(
         # Tool Search env plus ucode gateway env (ANTHROPIC_BASE_URL
         # etc.) when derived. Empty provider config still forces
         # ENABLE_TOOL_SEARCH=true so MCP schemas are loaded on demand.
-        env=build_native_claude_terminal_env(claude_config),
+        env=build_native_claude_terminal_env(claude_config, rollover=rollover),
         # Names to strip (see ``_claude_terminal_env_unset``). Dropping
         # ``DATABRICKS_CONFIG_PROFILE`` matters because Claude's MCP servers
         # inherit this env and several build ``WorkspaceClient`` without pinning

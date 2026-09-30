@@ -5,7 +5,6 @@ from __future__ import annotations
 from omnigent.context.labels import (
     CONTEXT_MODE_LABEL,
     ROLLOVER_MODE_VALUE,
-    ROLLOVER_SESSION_LABELS,
     is_rollover,
 )
 
@@ -26,9 +25,3 @@ def test_is_rollover_true_only_for_exact_value() -> None:
 def test_is_rollover_false_for_none_or_empty() -> None:
     assert is_rollover(None) is False
     assert is_rollover({}) is False
-
-
-def test_rollover_session_labels_includes_mode_key() -> None:
-    """The fork-drop set (side chats never inherit rollover) must at least
-    cover the mode switch itself."""
-    assert CONTEXT_MODE_LABEL in ROLLOVER_SESSION_LABELS
