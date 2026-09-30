@@ -200,7 +200,7 @@ marker.
 | Claude Code | Tool search hides MCP tools until searched | Model didn't know recall existed | `_meta anthropic/alwaysLoad` on the relay schema |
 | Claude Code | Starts at ~60k tokens (system prompt + tools) | A 40k threshold compacted every turn; 100k left ~40k of room and a tool result compacted it mid-answer | Floor at 100k; threshold from the window (Haiku 120k) |
 | Claude Code | Auto-compaction window only accepts 100k–1M | Can't express a small threshold directly | Window clamped to that range, percentage absorbs the rest |
-| Claude Code | Its compaction hook and its summary line race | Many records got a placeholder summary instead of the real one | Forwarder fix (in review); resume was never affected |
+| Claude Code | Its compaction hook and its summary line race | Many records got a placeholder summary instead of the real one | The forwarder waits for the summary line (up to 30 s) and saves one record with the real text; resume was never affected |
 | Claude Code | Compaction in the middle of an answer | Haiku printed its compaction analysis instead of answering once | More room above the starting size (threshold from the window) |
 | Codex | Keeps up to ~20k tokens of user messages after compacting | Low thresholds looped (12 compactions, never reached the tool) | Floor at 100k |
 | Codex | Remote compaction with the built-in `openai` provider fails ("expected exactly one compaction output item, got 2") | No compaction | Omnigent launches Codex with its own provider, where it works |

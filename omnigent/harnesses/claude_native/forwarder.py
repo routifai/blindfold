@@ -88,6 +88,12 @@ _TRUNCATABLE_SUBAGENT_FIELDS = frozenset(
 # surviving a cursor rewind that re-reads an already-persisted summary.
 _MAX_PERSISTED_COMPACTION_SEQS = 16
 
+# How long the hook-completion path waits for the transcript's
+# ``isCompactSummary`` record (which carries the real text) before giving up
+# and persisting the boundary with the generic placeholder. Generous: the
+# transcript usually catches up within a poll or two.
+_COMPACTION_SUMMARY_WAIT_TIMEOUT_S = 30.0
+
 # Cap on the in-memory ``(message_id, index)`` dedupe ring for streamed
 # deltas. The byte offset already prevents re-reading on the normal
 # path; this guards the rare truncation/rewind case where the deltas
@@ -491,12 +497,18 @@ class _PendingCompaction:
         correlation with wildcard semantics.
     :param seen_at: Unix timestamp the ``PreCompact`` was observed, e.g.
         ``1779922393.2``. Diagnostic only.
+    :param is_standalone: ``True`` when minted by
+        :func:`_claim_standalone_completion` for a hook with no correlated
+        ``PreCompact`` (dropped hook, or the forwarder attached late). No
+        transcript summary will ever correlate to it, so the completion
+        hook persists it immediately on retry instead of waiting.
     """
 
     seq: int
     claude_session_id: str | None = None
     transcript_path: str | None = None
     seen_at: float | None = None
+    is_standalone: bool = False
 
 
 @dataclass(frozen=True)
@@ -528,6 +540,14 @@ class CompactionForwardState:
         this seq is in :attr:`persisted_seqs`, otherwise the path biases to
         persisting a fresh boundary. Zero means no ack armed (or a legacy state
         file).
+    :param hook_completion_seen_at: When the ``SessionStart source=compact``
+        hook first observed this compaction's still-pending token complete
+        (epoch seconds), or ``None``. Set instead of persisting immediately,
+        so the transcript's ``isCompactSummary`` record — carrying the real
+        summary — gets first refusal on the boundary; a stale mark past
+        :data:`_COMPACTION_SUMMARY_WAIT_TIMEOUT_S` (or a shutdown flush)
+        falls back to persisting the placeholder. Cleared whenever
+        :attr:`pending` is cleared or a new ``PreCompact`` cycle opens.
     """
 
     pending: _PendingCompaction | None = None
@@ -536,6 +556,7 @@ class CompactionForwardState:
     last_precompact_cursor: int = 0
     expect_completion_ack: bool = False
     expect_completion_ack_seq: int = 0
+    hook_completion_seen_at: float | None = None
 
 
 @dataclass(frozen=True)
@@ -1458,6 +1479,15 @@ async def forward_claude_transcript_to_session(
                                 bridge_dir=bridge_dir,
                                 seq=dismiss_seq,
                             )
+                        # Falls back to the placeholder summary once the hook
+                        # sees a compaction complete but the transcript's real
+                        # summary hasn't shown up within the wait timeout.
+                        await _maybe_finalize_stale_compaction_completion(
+                            client,
+                            session_id=current_session_id,
+                            bridge_dir=bridge_dir,
+                            retry_tracker=status_retries,
+                        )
                         # Child history is an independent lane: a large backlog
                         # must never delay the next parent delta/transcript poll.
                         if subagent_task is None:
@@ -1518,6 +1548,16 @@ async def forward_claude_transcript_to_session(
                             dedupe=dedupe,
                         )
             except asyncio.CancelledError:
+                # Best-effort: never leave a hook-confirmed compaction
+                # stranded on the wait clock when the session is ending.
+                with contextlib.suppress(Exception):
+                    await _maybe_finalize_stale_compaction_completion(
+                        client,
+                        session_id=session_id,
+                        bridge_dir=bridge_dir,
+                        retry_tracker=status_retries,
+                        force=True,
+                    )
                 await _cancel_subagent_forward_task(subagent_task)
                 raise
             except TimeoutError:
@@ -1540,6 +1580,16 @@ async def forward_claude_transcript_to_session(
             try:
                 await asyncio.sleep(poll_interval_s)
             except asyncio.CancelledError:
+                # Cancellation lands here far more often than inside the poll
+                # body above (most of the loop's time is spent asleep here).
+                with contextlib.suppress(Exception):
+                    await _maybe_finalize_stale_compaction_completion(
+                        client,
+                        session_id=session_id,
+                        bridge_dir=bridge_dir,
+                        retry_tracker=status_retries,
+                        force=True,
+                    )
                 await _cancel_subagent_forward_task(subagent_task)
                 raise
 
@@ -3859,13 +3909,10 @@ async def _forward_available_status_events(
                         event_cursor=record.event_cursor,
                     )
                 elif compaction_status == "completed":
-                    # Secondary, best-effort persist. The transcript's
-                    # ``isCompactSummary`` record is the primary, durable
-                    # persister (it carries the summary text and always
-                    # fires — this hook is flaky). Persist here if the
-                    # pending token is still unconsumed; on failure leave the
-                    # token set so the transcript path still completes it.
-                    seq = await _consume_pending_compaction(
+                    # Defer to the transcript's ``isCompactSummary`` record
+                    # (the real text) instead of persisting a placeholder;
+                    # the timeout check below falls back if it never arrives.
+                    pending_seq = await _consume_pending_compaction(
                         bridge_dir,
                         claude_session_id=record.claude_session_id,
                         transcript_path=(
@@ -3874,29 +3921,23 @@ async def _forward_available_status_events(
                             else None
                         ),
                     )
-                    if seq is None:
-                        # No pending token: either the transcript path already
-                        # persisted this boundary (a trailing ack to absorb),
-                        # or the ``PreCompact`` was dropped / the forwarder
-                        # attached after it fired. The legacy
-                        # standalone-completion safety must still persist
-                        # exactly one boundary in the latter case, or resume
-                        # reloads the full pre-compaction history.
+                    seq: int | None = None
+                    if pending_seq is not None:
+                        current_pending = (
+                            await asyncio.to_thread(_read_compaction_state, bridge_dir)
+                        ).pending
+                        if current_pending is not None and current_pending.is_standalone:
+                            # A standalone mint being retried after a failed
+                            # persist — no summary ever correlates to it.
+                            seq = pending_seq
+                        else:
+                            await _note_hook_completion_seen(bridge_dir, pending_seq)
+                    else:
+                        # No pending token: an already-absorbed trailing ack,
+                        # or a dropped ``PreCompact``. No summary will ever
+                        # correlate to the latter, so persist now.
                         seq = await _claim_standalone_completion(bridge_dir)
                     if seq is not None:
-                        # Persist the boundary with the SAME hold-cursor +
-                        # backoff discipline as the transcript path (P2-2). A
-                        # transient POST failure must not advance past this
-                        # completion hook and lose the boundary: for a genuine
-                        # hook-only standalone compaction no transcript summary
-                        # will ever arrive to retry it. Hold the hook cursor at
-                        # this record and retry next poll; the pending token
-                        # (minted here or by ``_claim_standalone_completion``)
-                        # makes the retry idempotent — the re-seen hook
-                        # re-consumes the same seq rather than minting a new
-                        # one. Exhausted permanent failures drop the boundary
-                        # and advance so a hard rejection can't wedge the hook
-                        # stream forever.
                         retry_key = f"compaction-hook:{record.event_cursor}"
                         if retry_tracker.retry_delay_s(retry_key) is not None:
                             return durable
@@ -3908,13 +3949,12 @@ async def _forward_available_status_events(
                             )
                         except httpx.HTTPError as exc:
                             if post_may_have_been_delivered(exc):
-                                # Ambiguous delivery: the boundary may already
-                                # be committed. Mark persisted and advance
-                                # rather than risk a duplicate on retry.
+                                # Ambiguous delivery: mark persisted rather
+                                # than risk a duplicate boundary on retry.
                                 _logger.warning(
-                                    "Ambiguous compaction boundary POST (hook path) for %s "
-                                    "(may be committed); marking persisted to avoid a "
-                                    "duplicate boundary; seq=%s",
+                                    "Ambiguous compaction boundary POST (hook path) "
+                                    "for %s (may be committed); marking persisted; "
+                                    "seq=%s",
                                     session_id,
                                     seq,
                                     exc_info=True,
@@ -3940,8 +3980,8 @@ async def _forward_available_status_events(
                                     # Fall through to advance the cursor.
                                 else:
                                     _logger.warning(
-                                        "Failed to persist compaction boundary (hook path); "
-                                        "session=%s seq=%s attempt=%s "
+                                        "Failed to persist compaction boundary (hook "
+                                        "path); session=%s seq=%s attempt=%s "
                                         "permanent=%s next_retry_s=%.3f http_status=%s",
                                         session_id,
                                         seq,
@@ -4342,6 +4382,7 @@ async def _handle_compact_summary_item(
         transcript_path=None,
     )
     if seq is None:
+        state = _read_compaction_state(bridge_dir)
         # No correlated pending compaction — a historical/replayed summary,
         # one the hook path already persisted, or a genuine ``PreCompact``
         # miss. Distinguish the benign cases from a true miss so the latter
@@ -4349,7 +4390,6 @@ async def _handle_compact_summary_item(
         # completion-ack window (this summary starts a new cycle for the
         # completion hook). Either way, report handled so the caller advances
         # past the record without forwarding it as a bubble.
-        state = _read_compaction_state(bridge_dir)
         if state.pending is None and not state.persisted_seqs:
             _compaction_skip_stats.precompact_miss += 1
             # NB: the *_process_total counters are module-global, accumulating
@@ -6263,6 +6303,9 @@ def _read_compaction_state(bridge_dir: Path) -> CompactionForwardState:
     expect_completion_ack_seq = raw.get("expect_completion_ack_seq")
     if not isinstance(expect_completion_ack_seq, int) or expect_completion_ack_seq < 0:
         expect_completion_ack_seq = 0
+    hook_completion_seen_at = raw.get("hook_completion_seen_at")
+    if not isinstance(hook_completion_seen_at, (int, float)):
+        hook_completion_seen_at = None
     persisted_raw = raw.get("persisted_seqs")
     persisted_seqs: tuple[int, ...] = ()
     if isinstance(persisted_raw, list):
@@ -6280,6 +6323,7 @@ def _read_compaction_state(bridge_dir: Path) -> CompactionForwardState:
                 claude_session_id=sid if isinstance(sid, str) else None,
                 transcript_path=tpath if isinstance(tpath, str) else None,
                 seen_at=seen_at if isinstance(seen_at, (int, float)) else None,
+                is_standalone=bool(pending_raw.get("is_standalone")),
             )
     return CompactionForwardState(
         pending=pending,
@@ -6288,6 +6332,7 @@ def _read_compaction_state(bridge_dir: Path) -> CompactionForwardState:
         last_precompact_cursor=last_precompact_cursor,
         expect_completion_ack=expect_completion_ack,
         expect_completion_ack_seq=expect_completion_ack_seq,
+        hook_completion_seen_at=hook_completion_seen_at,
     )
 
 
@@ -6306,6 +6351,7 @@ def _write_compaction_state(bridge_dir: Path, state: CompactionForwardState) -> 
         "last_precompact_cursor": state.last_precompact_cursor,
         "expect_completion_ack": state.expect_completion_ack,
         "expect_completion_ack_seq": state.expect_completion_ack_seq,
+        "hook_completion_seen_at": state.hook_completion_seen_at,
         "updated_at": time.time(),
     }
     if state.pending is not None:
@@ -6316,6 +6362,8 @@ def _write_compaction_state(bridge_dir: Path, state: CompactionForwardState) -> 
             pending_payload["transcript_path"] = state.pending.transcript_path
         if state.pending.seen_at is not None:
             pending_payload["seen_at"] = state.pending.seen_at
+        if state.pending.is_standalone:
+            pending_payload["is_standalone"] = True
         payload["pending"] = pending_payload
     _write_json_atomic(bridge_dir / _COMPACTION_STATE_FILE, payload)
 
@@ -6375,10 +6423,11 @@ async def _note_precompact(
                     event_cursor if event_cursor is not None else state.last_precompact_cursor
                 ),
                 # A fresh compaction cycle opens: any trailing completion ack
-                # we were still expecting belonged to the previous cycle and
-                # is now moot.
+                # or hook-completion wait we were still tracking belonged to
+                # the previous cycle and is now moot.
                 expect_completion_ack=False,
                 expect_completion_ack_seq=0,
+                hook_completion_seen_at=None,
             ),
         )
 
@@ -6459,6 +6508,129 @@ async def _consume_pending_compaction(
     return await asyncio.to_thread(_check)
 
 
+async def _note_hook_completion_seen(bridge_dir: Path, seq: int) -> None:
+    """
+    Mark that the completion hook observed ``seq`` finish, without persisting.
+
+    First sighting only: a replay of the same hook event never resets the
+    wait clock :data:`_COMPACTION_SUMMARY_WAIT_TIMEOUT_S` is measured from.
+
+    :param bridge_dir: Native Claude bridge directory.
+    :param seq: The still-pending compaction's sequence number.
+    :returns: None.
+    """
+
+    def _mutate() -> None:
+        state = _read_compaction_state(bridge_dir)
+        pending = state.pending
+        if pending is None or pending.seq != seq or state.hook_completion_seen_at is not None:
+            return
+        _write_compaction_state(
+            bridge_dir,
+            CompactionForwardState(
+                pending=pending,
+                last_seq=state.last_seq,
+                persisted_seqs=state.persisted_seqs,
+                last_precompact_cursor=state.last_precompact_cursor,
+                expect_completion_ack=state.expect_completion_ack,
+                expect_completion_ack_seq=state.expect_completion_ack_seq,
+                hook_completion_seen_at=time.time(),
+            ),
+        )
+
+    await asyncio.to_thread(_mutate)
+
+
+async def _maybe_finalize_stale_compaction_completion(
+    client: httpx.AsyncClient,
+    *,
+    session_id: str,
+    bridge_dir: Path,
+    retry_tracker: _PostRetryTracker,
+    force: bool = False,
+) -> None:
+    """
+    Persist the placeholder boundary once the summary wait times out.
+
+    No-op unless the hook already saw this compaction complete and either
+    the wait exceeded :data:`_COMPACTION_SUMMARY_WAIT_TIMEOUT_S` or *force*
+    is set (a clean-shutdown flush, so a boundary is never left stranded).
+
+    :param client: Omnigent HTTP client.
+    :param session_id: Omnigent session/conversation id.
+    :param bridge_dir: Native Claude bridge directory.
+    :param retry_tracker: Retry/backoff tracker; keyed per compaction seq.
+    :param force: Skip the timeout and the retry backoff gate.
+    :returns: None.
+    """
+    state = await asyncio.to_thread(_read_compaction_state, bridge_dir)
+    pending = state.pending
+    seen_at = state.hook_completion_seen_at
+    if pending is None or seen_at is None or pending.seq in state.persisted_seqs:
+        return
+    if not force and (time.time() - seen_at) < _COMPACTION_SUMMARY_WAIT_TIMEOUT_S:
+        return
+    seq = pending.seq
+    retry_key = f"compaction-hook-timeout:{seq}"
+    if not force and retry_tracker.retry_delay_s(retry_key) is not None:
+        return
+    try:
+        await _persist_native_compaction_item(
+            client,
+            session_id=session_id,
+            bridge_dir=bridge_dir,
+        )
+    except httpx.HTTPError as exc:
+        if post_may_have_been_delivered(exc):
+            # Ambiguous delivery: mark persisted rather than risk a
+            # duplicate boundary on retry.
+            _logger.warning(
+                "Ambiguous compaction placeholder POST (timeout path) for %s "
+                "(may be committed); marking persisted; seq=%s",
+                session_id,
+                seq,
+                exc_info=True,
+            )
+            retry_tracker.clear(retry_key)
+            await _mark_compaction_persisted(bridge_dir, seq)
+        else:
+            decision = retry_tracker.record_failure(retry_key, exc, session_id=session_id)
+            _logger.warning(
+                "Failed to persist compaction placeholder after summary wait "
+                "timeout; session=%s seq=%s attempt=%s permanent=%s "
+                "next_retry_s=%.3f http_status=%s",
+                session_id,
+                seq,
+                decision.attempts,
+                decision.permanent,
+                decision.delay_s,
+                _http_status_for_log(exc),
+                exc_info=True,
+                extra={"session_id": session_id},
+            )
+        return
+    except Exception:  # noqa: BLE001
+        # Non-HTTP failure (e.g. reading Claude session messages). The next
+        # poll (or the next shutdown flush) retries.
+        _logger.warning(
+            "Unexpected error persisting compaction placeholder (timeout path) for %s; seq=%s",
+            session_id,
+            seq,
+            exc_info=True,
+        )
+        return
+    retry_tracker.clear(retry_key)
+    _logger.warning(
+        "Compaction boundary persisted with placeholder summary after the "
+        "transcript record never arrived; session=%s seq=%s force=%s",
+        session_id,
+        seq,
+        force,
+        extra={"session_id": session_id},
+    )
+    await _mark_compaction_persisted(bridge_dir, seq)
+
+
 async def _mark_compaction_persisted(
     bridge_dir: Path,
     seq: int,
@@ -6470,6 +6642,8 @@ async def _mark_compaction_persisted(
 
     Adds ``seq`` to ``persisted_seqs`` (bounded) and clears ``pending`` when
     it matches, so neither completion signal re-persists the same boundary.
+    Also clears ``hook_completion_seen_at``: once persisted there is nothing
+    left to wait for.
 
     :param bridge_dir: Native Claude bridge directory.
     :param seq: The compaction sequence number whose boundary POST succeeded.
@@ -6502,6 +6676,7 @@ async def _mark_compaction_persisted(
                 # compaction the transcript path just persisted, never a
                 # different one whose PreCompact also went missing (P2-1).
                 expect_completion_ack_seq=(seq if expect_completion_ack else 0),
+                hook_completion_seen_at=None,
             ),
         )
 
@@ -6537,6 +6712,8 @@ async def _note_transcript_summary_without_token(bridge_dir: Path) -> None:
                 last_precompact_cursor=state.last_precompact_cursor,
                 expect_completion_ack=False,
                 expect_completion_ack_seq=0,
+                # Pending is untouched here — preserve its hook-wait mark.
+                hook_completion_seen_at=state.hook_completion_seen_at,
             ),
         )
 
@@ -6577,6 +6754,8 @@ async def _discard_pending_compaction(bridge_dir: Path, seq: int) -> bool:
                 last_precompact_cursor=state.last_precompact_cursor,
                 expect_completion_ack=False,
                 expect_completion_ack_seq=0,
+                # Pending is cleared here too — nothing left to wait for.
+                hook_completion_seen_at=None,
             ),
         )
         return True
@@ -6702,6 +6881,8 @@ async def _claim_standalone_completion(bridge_dir: Path) -> int | None:
                     last_precompact_cursor=state.last_precompact_cursor,
                     expect_completion_ack=False,
                     expect_completion_ack_seq=0,
+                    # No pending token (checked above) — nothing to wait for.
+                    hook_completion_seen_at=None,
                 ),
             )
             return None
@@ -6727,12 +6908,15 @@ async def _claim_standalone_completion(bridge_dir: Path) -> int | None:
                     claude_session_id=None,
                     transcript_path=None,
                     seen_at=time.time(),
+                    is_standalone=True,
                 ),
                 last_seq=next_seq,
                 persisted_seqs=state.persisted_seqs,
                 last_precompact_cursor=state.last_precompact_cursor,
                 expect_completion_ack=False,
                 expect_completion_ack_seq=0,
+                # A fresh standalone cycle opens with its own pending token.
+                hook_completion_seen_at=None,
             ),
         )
         return next_seq

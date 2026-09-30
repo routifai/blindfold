@@ -10004,14 +10004,16 @@ async def test_persist_native_compaction_item_empty_items_uses_fallback(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_compaction_completed_triggers_persist(tmp_path: Path) -> None:
+async def test_compaction_completed_posts_status_without_persisting_yet(
+    tmp_path: Path,
+) -> None:
     """
-    ``SessionStart source=compact`` triggers both status POST and item persistence.
+    ``SessionStart source=compact`` posts status but defers the item persist.
 
-    When the forwarder processes a ``SessionStart source=compact`` record
-    (compaction completed), it must call ``_post_external_compaction_status``
-    to surface the status AND ``_persist_native_compaction_item`` to write
-    the compaction boundary item.
+    The status POST (which raises/lowers the web UI's spinner) fires
+    immediately, as always. The boundary item persist is now deferred to
+    give the transcript's real summary first refusal — it must NOT happen
+    within the same await chain as the status POST.
     """
     bridge_dir = tmp_path / "bridge"
     transcript_path = tmp_path / "session.jsonl"
@@ -10027,7 +10029,7 @@ async def test_compaction_completed_triggers_persist(tmp_path: Path) -> None:
     )
     # PreCompact mints the pending token the completion signal consumes.
     # A real compaction always fires PreCompact before the compact
-    # SessionStart; the hook path only persists when that token exists.
+    # SessionStart; the hook path only defers when that token exists.
     record_hook_event(
         bridge_dir,
         {"hook_event_name": "PreCompact", "session_id": "claude-session"},
@@ -10042,12 +10044,7 @@ async def test_compaction_completed_triggers_persist(tmp_path: Path) -> None:
         },
     )
     server, thread, base_url = _start_recording_server()
-    persist_called = asyncio.Event()
-
-    async def _persist_side_effect(*args: Any, **kwargs: Any) -> None:
-        persist_called.set()
-
-    persist_mock = AsyncMock(side_effect=_persist_side_effect)
+    persist_mock = _persist_mock()
     with patch(
         "omnigent.harnesses.claude_native.forwarder._persist_native_compaction_item",
         persist_mock,
@@ -10076,9 +10073,10 @@ async def test_compaction_completed_triggers_persist(tmp_path: Path) -> None:
                     request = candidate
                     break
             assert request is not None, "compaction-completed status was never posted"
-            # Wait for _persist_native_compaction_item to be called
-            # (it runs right after the POST in the same await chain).
-            await asyncio.wait_for(persist_called.wait(), timeout=5.0)
+            # Give the deferred path a moment to (incorrectly) persist early,
+            # asserted before cancellation triggers its own shutdown flush.
+            await asyncio.sleep(0.2)
+            persist_mock.assert_not_called()
         finally:
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
@@ -10090,10 +10088,6 @@ async def test_compaction_completed_triggers_persist(tmp_path: Path) -> None:
     # The recording server captured the compaction-completed status POST.
     assert request["body"]["type"] == "external_compaction_status"
     assert request["body"]["data"]["status"] == "completed"
-    # _persist_native_compaction_item was called with the right session id.
-    persist_mock.assert_called_once()
-    call_kwargs = persist_mock.call_args
-    assert call_kwargs[1]["session_id"] == "conv_persist"
 
 
 @pytest.mark.asyncio
@@ -10625,6 +10619,337 @@ async def test_completion_hook_after_transcript_persist_is_absorbed(tmp_path: Pa
     after = _read_compaction_state(bridge_dir)
     assert after.expect_completion_ack is False
     assert after.persisted_seqs == (1,)  # still exactly one boundary
+
+
+@pytest.mark.asyncio
+async def test_hook_completion_defers_when_pending_token_exists(tmp_path: Path) -> None:
+    """
+    The completion hook defers to the transcript instead of persisting.
+
+    Reproduces the production race from the hook side: the flaky
+    ``SessionStart source=compact`` hook sees the compaction complete while
+    the pending token is still live. It must NOT persist a placeholder right
+    away — only mark the wait — so the transcript's real summary (which the
+    forwarder polls for every cycle) gets first refusal on the boundary.
+    """
+    bridge_dir = tmp_path / "bridge"
+    transcript_path = tmp_path / "session.jsonl"
+    transcript_path.write_text("", encoding="utf-8")
+    record_hook_event(
+        bridge_dir,
+        {
+            "hook_event_name": "SessionStart",
+            "session_id": "claude-session",
+            "transcript_path": str(transcript_path),
+        },
+    )
+    record_hook_event(
+        bridge_dir,
+        {"hook_event_name": "PreCompact", "session_id": "claude-session"},
+    )
+    record_hook_event(
+        bridge_dir,
+        {
+            "hook_event_name": "SessionStart",
+            "source": "compact",
+            "session_id": "claude-session",
+        },
+    )
+    server, thread, base_url = _start_recording_server()
+    persist_mock = _persist_mock()
+    with patch(
+        "omnigent.harnesses.claude_native.forwarder._persist_native_compaction_item",
+        persist_mock,
+    ):
+        task = asyncio.create_task(
+            forward_claude_transcript_to_session(
+                base_url=base_url,
+                headers={},
+                session_id="conv_defer",
+                bridge_dir=bridge_dir,
+                agent_name="claude-native-ui",
+                start_at_end=False,
+                poll_interval_s=0.01,
+            )
+        )
+        try:
+            for _ in range(50):
+                state = _read_compaction_state(bridge_dir)
+                if state.hook_completion_seen_at is not None:
+                    break
+                await asyncio.sleep(0.02)
+            # Assert the deferred state BEFORE cancelling: cancellation
+            # itself triggers the shutdown flush, which would persist the
+            # placeholder and make a post-cancellation assertion moot.
+            persist_mock.assert_not_called()
+            assert state.hook_completion_seen_at is not None
+            assert state.pending is not None and state.pending.seq == 1
+            assert state.persisted_seqs == ()
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5.0)
+
+
+@pytest.mark.asyncio
+async def test_hook_first_then_summary_persists_one_item_with_real_text(
+    tmp_path: Path,
+) -> None:
+    """
+    Core regression test: the hook wins the race but only one item persists.
+
+    The hook observes completion first (as it does in most live compactions)
+    and defers. Once the transcript's ``isCompactSummary`` record lands, the
+    forwarder must persist exactly ONE compaction item, carrying the real
+    summary text — never the placeholder, never a second corrected item.
+    """
+    bridge_dir = tmp_path / "bridge"
+    transcript_path = tmp_path / "session.jsonl"
+    transcript_path.write_text("", encoding="utf-8")
+    record_hook_event(
+        bridge_dir,
+        {
+            "hook_event_name": "SessionStart",
+            "session_id": "claude-session",
+            "transcript_path": str(transcript_path),
+        },
+    )
+    record_hook_event(
+        bridge_dir,
+        {"hook_event_name": "PreCompact", "session_id": "claude-session"},
+    )
+    record_hook_event(
+        bridge_dir,
+        {
+            "hook_event_name": "SessionStart",
+            "source": "compact",
+            "session_id": "claude-session",
+        },
+    )
+    server, thread, base_url = _start_recording_server()
+    persist_mock = _persist_mock()
+    with patch(
+        "omnigent.harnesses.claude_native.forwarder._persist_native_compaction_item",
+        persist_mock,
+    ):
+        task = asyncio.create_task(
+            forward_claude_transcript_to_session(
+                base_url=base_url,
+                headers={},
+                session_id="conv_hook_first",
+                bridge_dir=bridge_dir,
+                agent_name="claude-native-ui",
+                start_at_end=False,
+                poll_interval_s=0.01,
+            )
+        )
+        try:
+            # Wait for the hook to defer before the real summary lands, so
+            # this genuinely exercises the hook-first ordering.
+            for _ in range(50):
+                if _read_compaction_state(bridge_dir).hook_completion_seen_at is not None:
+                    break
+                await asyncio.sleep(0.02)
+            with transcript_path.open("a", encoding="utf-8") as fh:
+                fh.write(
+                    json.dumps(
+                        {
+                            "type": "user",
+                            "isCompactSummary": True,
+                            "message": {
+                                "role": "user",
+                                "content": "the real summary",
+                            },
+                        }
+                    )
+                    + "\n"
+                )
+            for _ in range(100):
+                if persist_mock.call_count >= 1:
+                    break
+                await asyncio.sleep(0.02)
+            # Give any (incorrect) second persist a chance to land before
+            # asserting exactly one call.
+            await asyncio.sleep(0.2)
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5.0)
+
+    persist_mock.assert_called_once()
+    assert persist_mock.call_args[1].get("summary_override") == "the real summary"
+    state = _read_compaction_state(bridge_dir)
+    assert state.hook_completion_seen_at is None
+    assert state.persisted_seqs == (1,)
+
+
+@pytest.mark.asyncio
+async def test_stale_hook_completion_falls_back_to_placeholder_after_timeout(
+    tmp_path: Path,
+) -> None:
+    """
+    A hook completion older than the wait timeout persists the placeholder.
+
+    Unit-level check of the fallback itself: the transcript summary never
+    arrived, so once the wait exceeds
+    ``_COMPACTION_SUMMARY_WAIT_TIMEOUT_S`` the periodic check must persist
+    the boundary anyway rather than lose it.
+    """
+    from omnigent.harnesses.claude_native.forwarder import (
+        _maybe_finalize_stale_compaction_completion,
+        _PendingCompaction,
+        _write_compaction_state,
+    )
+
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
+    _write_compaction_state(
+        bridge_dir,
+        CompactionForwardState(
+            pending=_PendingCompaction(seq=1, claude_session_id="claude-1"),
+            last_seq=1,
+            hook_completion_seen_at=time.time() - 9999,
+        ),
+    )
+
+    persist = _persist_mock()
+    with patch(
+        "omnigent.harnesses.claude_native.forwarder._persist_native_compaction_item", persist
+    ):
+        await _maybe_finalize_stale_compaction_completion(
+            AsyncMock(),
+            session_id="conv_timeout",
+            bridge_dir=bridge_dir,
+            retry_tracker=_PostRetryTracker(),
+        )
+
+    persist.assert_called_once()
+    assert persist.call_args[1].get("summary_override") is None
+    state = _read_compaction_state(bridge_dir)
+    assert state.hook_completion_seen_at is None
+    assert state.persisted_seqs == (1,)
+
+
+@pytest.mark.asyncio
+async def test_fresh_hook_completion_is_not_yet_finalized(tmp_path: Path) -> None:
+    """
+    A hook completion within the wait window is left alone.
+
+    :param tmp_path: Pytest temp directory fixture.
+    :returns: None.
+    """
+    from omnigent.harnesses.claude_native.forwarder import (
+        _maybe_finalize_stale_compaction_completion,
+        _PendingCompaction,
+        _write_compaction_state,
+    )
+
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
+    _write_compaction_state(
+        bridge_dir,
+        CompactionForwardState(
+            pending=_PendingCompaction(seq=1, claude_session_id="claude-1"),
+            last_seq=1,
+            hook_completion_seen_at=time.time(),
+        ),
+    )
+
+    persist = _persist_mock()
+    with patch(
+        "omnigent.harnesses.claude_native.forwarder._persist_native_compaction_item", persist
+    ):
+        await _maybe_finalize_stale_compaction_completion(
+            AsyncMock(),
+            session_id="conv_not_yet",
+            bridge_dir=bridge_dir,
+            retry_tracker=_PostRetryTracker(),
+        )
+
+    persist.assert_not_called()
+    state = _read_compaction_state(bridge_dir)
+    assert state.hook_completion_seen_at is not None
+    assert state.persisted_seqs == ()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_flush_forces_placeholder_regardless_of_wait(tmp_path: Path) -> None:
+    """
+    ``force=True`` (the shutdown flush) persists even inside the wait window.
+
+    A boundary the hook already confirmed must never be left stranded just
+    because the session ended before the timeout elapsed.
+    """
+    from omnigent.harnesses.claude_native.forwarder import (
+        _maybe_finalize_stale_compaction_completion,
+        _PendingCompaction,
+        _write_compaction_state,
+    )
+
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
+    _write_compaction_state(
+        bridge_dir,
+        CompactionForwardState(
+            pending=_PendingCompaction(seq=1, claude_session_id="claude-1"),
+            last_seq=1,
+            hook_completion_seen_at=time.time(),
+        ),
+    )
+
+    persist = _persist_mock()
+    with patch(
+        "omnigent.harnesses.claude_native.forwarder._persist_native_compaction_item", persist
+    ):
+        await _maybe_finalize_stale_compaction_completion(
+            AsyncMock(),
+            session_id="conv_shutdown",
+            bridge_dir=bridge_dir,
+            retry_tracker=_PostRetryTracker(),
+            force=True,
+        )
+
+    persist.assert_called_once()
+    assert persist.call_args[1].get("summary_override") is None
+    state = _read_compaction_state(bridge_dir)
+    assert state.persisted_seqs == (1,)
+
+
+@pytest.mark.asyncio
+async def test_summary_first_leaves_hook_completion_unset(tmp_path: Path) -> None:
+    """
+    When the transcript path wins the race, no hook-wait mark is left set.
+
+    Mirrors :func:`test_normal_hook_after_transcript_does_not_double_persist`
+    but asserts on the new field directly: the transcript path already
+    persisted the real summary, so ``hook_completion_seen_at`` must stay
+    unset — only ``expect_completion_ack`` is armed for the trailing hook.
+    """
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
+    await _note_precompact(bridge_dir, claude_session_id="claude-1", transcript_path=None)
+
+    persist = _persist_mock()
+    with patch(
+        "omnigent.harnesses.claude_native.forwarder._persist_native_compaction_item", persist
+    ):
+        await _handle_compact_summary_item(
+            AsyncMock(),
+            session_id="conv_summary_first",
+            bridge_dir=bridge_dir,
+            item=_compact_summary_item("the real summary"),
+            retry_tracker=_PostRetryTracker(),
+        )
+
+    state = _read_compaction_state(bridge_dir)
+    assert state.expect_completion_ack is True
+    assert state.hook_completion_seen_at is None
 
 
 @pytest.mark.asyncio
