@@ -163,7 +163,14 @@ Worktree `omnigent-ro-harness`, branch `ro-harness`.
      `session_history` tool call must be in the record.
 - A baseline session (mode unset) behaves as upstream.
 
-Later: Pi (compaction in `resume.py`, a token estimate); a permission-gated
+Later: Pi, through Pi's own compaction rather than a pane recycle (verified
+live on Pi 0.87.1): Omnigent's Pi extension handles `session_before_compact`,
+which fires on Pi's automatic threshold, receives `previousSummary`,
+`messagesToSummarize`, `tokensBefore` and `firstKeptEntryId`, and returns our
+summary (fixed header + state-file prompt) and our whole-turn `firstKeptEntryId`.
+Pi writes its own `CompactionEntry` and keeps running; Omnigent records the
+matching `compaction` item. Set `compaction.reserveTokens` so Pi's trigger
+matches our threshold (it's settings.json, not a CLI flag). a permission-gated
 `session_history` read of the same user's other chats (the main chat pulls from
 side chats, nothing is pushed, as in Muse); memory with two paths, as in Muse: an immediate in-turn write to the injected
 memory block (from any chat), plus an hourly consolidation job that runs only
