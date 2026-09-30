@@ -61,6 +61,7 @@ from omnigent.debug_logging import (
     runner_primary_session_id,
     set_current_session_id,
 )
+from omnigent.entities import NON_CONTENT_ITEM_TYPES
 from omnigent.entities.session_resources import (
     DEFAULT_ENVIRONMENT_ID,
     SessionResourceView,
@@ -8047,6 +8048,12 @@ def create_runner_app(
                     previous_summary = item.get("summary")
                     found_boundary = True
                     break
+                # Lifecycle/metadata items (resource_event, routing_decision, …)
+                # were never part of the model's own context — the agent loop
+                # already excludes them (NON_CONTENT_ITEM_TYPES) — so they must
+                # not reach the summarizer's LLM input or the kept tail either.
+                if item.get("type") in NON_CONTENT_ITEM_TYPES:
+                    continue
                 collected.append(item)
             if found_boundary or not page.get("has_more"):
                 break
@@ -13666,10 +13673,10 @@ def create_runner_app(
 
         spec_entry = _session_spec_cache.get(session_id)
         if spec_entry is None:
-            return None
+            return _resolve_local_provider_connection(model)
         spec = spec_entry.spec if hasattr(spec_entry, "spec") else spec_entry
         if spec is None:
-            return None
+            return _resolve_local_provider_connection(model)
 
         auth = getattr(spec.executor, "auth", None)
 
@@ -13706,7 +13713,60 @@ def create_runner_app(
             )
             return _resolve_databricks_connection(_db_profile, session_id)
 
-        return None
+        # No spec-level auth, legacy profile, or global auth resolved: fall
+        # back to the runner's own local provider config (the ``providers:``
+        # block in ~/.omnigent/config.yaml — the credentials the native CLIs
+        # themselves launch with). Without this, a plain local/self-hosted
+        # deployment has no way to authenticate this call at all: the LLM
+        # adapter sends no Authorization header when connection_params is
+        # None (it never reads provider env vars itself), so callers like
+        # rollover's summarizer always 401 on such a deployment.
+        return _resolve_local_provider_connection(model)
+
+    def _resolve_local_provider_connection(model: str) -> dict[str, str] | None:
+        """Resolve a connection from ~/.omnigent/config.yaml's providers: block.
+
+        Picks the family's ``default: true`` provider, falling back to the
+        first provider configured for that family — the same precedence
+        :func:`_resolve_provider_connection` uses once a provider name is
+        known, but starting from the model alone.
+
+        :param model: LLM model string, e.g. ``"gpt-4o"`` or ``"claude-haiku-4-5"``.
+        :returns: A ``{"base_url", "api_key"}`` connection dict, or ``None``
+            when no local provider serves this model's family.
+        """
+        try:
+            from omnigent.onboarding.detected import effective_config_with_detected
+            from omnigent.onboarding.provider_config import (
+                first_available_provider,
+                get_default_provider,
+                load_config,
+            )
+
+            config = effective_config_with_detected(load_config())
+            family = "anthropic" if model.startswith(("anthropic/", "claude")) else "openai"
+            entry = get_default_provider(config, family) or first_available_provider(
+                config, family
+            )
+            if entry is None:
+                return None
+            fam = entry.family(family)
+            if fam is None:
+                return None
+            conn: dict[str, str] = {}
+            if fam.api_key:
+                conn["api_key"] = fam.api_key
+            if fam.base_url:
+                conn["base_url"] = fam.base_url
+            return conn or None
+        except Exception:
+            _logger.warning(
+                "/v1/summarize: failed to resolve a local provider for model %r",
+                model,
+                exc_info=True,
+                extra={"session_id": runner_primary_session_id()},
+            )
+            return None
 
     def _resolve_provider_connection(
         provider_name: str,
