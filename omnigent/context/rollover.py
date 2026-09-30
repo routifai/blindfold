@@ -42,8 +42,8 @@ _DEFAULT_THRESHOLD_WINDOW_FRACTION = 0.45
 # progressive-summarization check) so the rolling summary stays cumulative.
 _SUMMARY_REQUEST_TEXT = (
     "[This is an automatically generated summary of the prior conversation "
-    "context. The original messages are available but not included in this "
-    "prompt for brevity.]\n\nPlease provide a summary of our conversation so far."
+    "context, inserted by the system. It is not a message from the user; the "
+    "user's own earlier messages can be read with the session_history tool.]"
 )
 
 # Fixed, code-authored preface for every rollover summary (PLAN.md "A,
