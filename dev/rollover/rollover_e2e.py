@@ -26,7 +26,11 @@ BASE_URL = os.environ.get("ROLLOVER_BASE_URL", "http://127.0.0.1:8795")
 OUT_DIR = Path(os.environ.get("ROLLOVER_OUT_DIR", "rollover-e2e-out"))
 RESULTS_PATH = OUT_DIR / "results.json"
 
-AGENT_NAMES = {"claude-native": "claude-native-ui", "codex-native": "codex-native-ui"}
+AGENT_NAMES = {
+    "claude-native": "claude-native-ui",
+    "codex-native": "codex-native-ui",
+    "pi-native": "pi-native-ui",
+}
 AGENTS: dict[str, str] = {}
 HOST_ID = os.environ.get("ROLLOVER_HOST_ID", "")
 

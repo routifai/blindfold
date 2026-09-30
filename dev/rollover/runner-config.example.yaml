@@ -15,3 +15,12 @@ providers:
         default: gpt-5-nano
     default: openai
     kind: key
+  openrouter:
+    default: pi
+    kind: gateway
+    openai:
+      api_key_ref: env:OPENROUTER_API_KEY
+      base_url: https://openrouter.ai/api/v1
+      models:
+        default: anthropic/claude-haiku-4.5
+      wire_api: chat
