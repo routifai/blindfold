@@ -63,6 +63,7 @@ results: list[dict[str, Any]] = []
 # One unambiguous probe for every blindfolded case. "What was the last message
 # I sent?" is ambiguous on Codex, which inserts its own <environment_context>
 # user message whenever it resumes a thread.
+TOOL_PROMPT = "Run the shell command `echo TOOL-CANARY-7` and reply with exactly what it printed."
 QUESTION = (
     "What's my codeword? Answer only from what you already know in this conversation: "
     "do not run any tools or read any files. Reply with the codeword or UNKNOWN."
@@ -311,6 +312,16 @@ async def main() -> None:
                 labels={"omnigent.blindfold": "true", "omnigent.context.max_messages": "1"},
                 messages=[QUESTION],
             )
+            # Tool calls: a blindfolded turn that runs a shell command must leave
+            # the call and its output in the session record.
+            await run_case(
+                context,
+                client,
+                harness=harness,
+                case="tool_calls",
+                labels={"omnigent.blindfold": "true", "omnigent.context.max_messages": "1"},
+                messages=[TOOL_PROMPT],
+            )
             # Baseline: no blindfold label at all, same codeword probe.
             await run_case(
                 context,
@@ -328,16 +339,33 @@ async def main() -> None:
     # in-memory system prompt for that one turn should ever have seen it).
     async with httpx.AsyncClient(timeout=30.0) as client:
         for record in results:
+            if record["case"] == "tool_calls":
+                items = await last_item_ids(client, record["session_id"], limit=100)
+                types = [i.get("type") for i in items]
+                record["tool_items_recorded"] = (
+                    "function_call" in types
+                    and "function_call_output" in types
+                    and any(
+                        "TOOL-CANARY-7" in json.dumps(i)
+                        for i in items
+                        if i.get("type") == "function_call_output"
+                    )
+                )
+                continue
             if record["case"] != "memory_fixture":
                 continue
             items = await last_item_ids(client, record["session_id"], limit=100)
-            # The model's own answer ("MANGO-7") is naturally recorded; what must
-            # never be recorded is the memory item itself or the rendered block.
-            leaked = [
-                i["id"]
+            # The model's own output (answer, reasoning) may quote the memory; what
+            # must never be recorded is the memory item itself or the rendered block.
+            recorded_inputs = [
+                json.dumps(i)
                 for i in items
-                if "The user's codeword is MANGO-7" in json.dumps(i)
-                or "long_term_memory" in json.dumps(i)
+                if i.get("type") != "reasoning" and i.get("role") != "assistant"
+            ]
+            leaked = [
+                text
+                for text in recorded_inputs
+                if "The user's codeword is MANGO-7" in text or "long_term_memory" in text
             ]
             record["memory_fixture_leaked_into_record"] = bool(leaked)
 
@@ -364,6 +392,9 @@ async def main() -> None:
                 verdict += " (BUT LEAKED INTO RECORD)"
         elif case == "no_leaks":
             verdict = "PASS" if "BANANA-99" not in last_reply else "FAIL"
+        elif case == "tool_calls":
+            ok = "TOOL-CANARY-7" in last_reply and record.get("tool_items_recorded")
+            verdict = "PASS" if ok else "FAIL"
         elif case == "baseline":
             verdict = "PASS" if "PAPAYA-42" in last_reply else "FAIL"
         print(f"{harness:14s} {case:16s} {verdict:10s} reply={last_reply[:120]!r}")
