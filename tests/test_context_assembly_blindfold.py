@@ -17,7 +17,9 @@ from omnigent.context_assembly.blindfold import (
     BlindfoldTurnContext,
     fetch_blindfold_turn_context,
     is_blindfolded,
+    post_oneshot_items,
 )
+from omnigent.context_assembly.oneshot_events import OneShotItem
 
 
 def _item(item_id: str, *, role: str = "user") -> dict[str, Any]:
@@ -291,3 +293,134 @@ class TestOneShotEnv:
         assert "OPENROUTER_API_KEY" not in env
         assert "GITHUB_TOKEN" not in env
         assert env["PATH"] == "/usr/bin"
+
+
+class TestPostOneShotItems:
+    """Posting a one-shot turn's parsed items — see maybe_run_blindfold_turn's
+    callers, which already deliver the turn's final answer via
+    ``TurnComplete.response``; this must never post that answer again."""
+
+    def _capturing_transport(self, posted: list[dict[str, Any]]) -> httpx.MockTransport:
+        def _route(request: httpx.Request) -> httpx.Response:
+            posted.append(json.loads(request.content))
+            return httpx.Response(200)
+
+        return httpx.MockTransport(_route)
+
+    async def test_skips_the_last_assistant_message_but_posts_everything_else(
+        self,
+    ) -> None:
+        posted: list[dict[str, Any]] = []
+        items = [
+            OneShotItem("reasoning", {"agent": "X", "summary": [], "content": []}),
+            OneShotItem(
+                "function_call",
+                {"agent": "X", "name": "read", "arguments": "{}", "call_id": "c1"},
+            ),
+            OneShotItem("function_call_output", {"call_id": "c1", "output": "ok"}),
+            OneShotItem(
+                "message",
+                {
+                    "role": "assistant",
+                    "agent": "X",
+                    "content": [{"type": "output_text", "text": "done"}],
+                },
+            ),
+        ]
+        async with httpx.AsyncClient(
+            base_url="http://server", transport=self._capturing_transport(posted)
+        ) as client:
+            await post_oneshot_items(
+                client, session_id="conv_1", response_id="turn_1", items=items, final_text="done"
+            )
+        posted_types = [entry["data"]["item_type"] for entry in posted]
+        assert posted_types == ["reasoning", "function_call", "function_call_output"]
+        assert all(entry["data"]["response_id"] == "turn_1" for entry in posted)
+
+    async def test_only_the_last_of_several_assistant_messages_is_skipped(self) -> None:
+        posted: list[dict[str, Any]] = []
+        first = OneShotItem(
+            "message",
+            {
+                "role": "assistant",
+                "agent": "X",
+                "content": [{"type": "output_text", "text": "first"}],
+            },
+        )
+        last = OneShotItem(
+            "message",
+            {
+                "role": "assistant",
+                "agent": "X",
+                "content": [{"type": "output_text", "text": "last"}],
+            },
+        )
+        async with httpx.AsyncClient(
+            base_url="http://server", transport=self._capturing_transport(posted)
+        ) as client:
+            await post_oneshot_items(
+                client,
+                session_id="conv_1",
+                response_id="turn_1",
+                items=[first, last],
+                final_text="last",
+            )
+        assert len(posted) == 1
+        assert posted[0]["data"]["item_data"]["content"][0]["text"] == "first"
+
+    async def test_a_last_message_that_is_not_the_final_answer_is_kept(self) -> None:
+        posted: list[dict[str, Any]] = []
+        last = OneShotItem(
+            "message",
+            {
+                "role": "assistant",
+                "agent": "X",
+                "content": [{"type": "output_text", "text": "partial"}],
+            },
+        )
+        async with httpx.AsyncClient(
+            base_url="http://server", transport=self._capturing_transport(posted)
+        ) as client:
+            await post_oneshot_items(
+                client,
+                session_id="conv_1",
+                response_id="turn_1",
+                items=[last],
+                final_text="something else",
+            )
+        assert len(posted) == 1
+
+    async def test_no_items_posts_nothing(self) -> None:
+        posted: list[dict[str, Any]] = []
+        async with httpx.AsyncClient(
+            base_url="http://server", transport=self._capturing_transport(posted)
+        ) as client:
+            await post_oneshot_items(
+                client, session_id="conv_1", response_id="turn_1", items=[], final_text=None
+            )
+        assert posted == []
+
+    async def test_a_post_failure_is_swallowed_and_does_not_block_later_items(self) -> None:
+        posted: list[dict[str, Any]] = []
+        calls = 0
+
+        def _flaky_route(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return httpx.Response(500)
+            posted.append(json.loads(request.content))
+            return httpx.Response(200)
+
+        items = [
+            OneShotItem("reasoning", {"agent": "X", "summary": [], "content": []}),
+            OneShotItem("function_call_output", {"call_id": "c1", "output": "ok"}),
+        ]
+        async with httpx.AsyncClient(
+            base_url="http://server", transport=httpx.MockTransport(_flaky_route)
+        ) as client:
+            await post_oneshot_items(
+                client, session_id="conv_1", response_id="turn_1", items=items, final_text=None
+            )
+        assert len(posted) == 1
+        assert posted[0]["data"]["item_type"] == "function_call_output"

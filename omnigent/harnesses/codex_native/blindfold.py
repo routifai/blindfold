@@ -55,9 +55,11 @@ from omnigent.context_assembly.blindfold import (
     BlindfoldTurnContext,
     fetch_blindfold_turn_context,
     is_blindfolded,
+    post_oneshot_items,
     read_server_connection,
     record_user_message,
 )
+from omnigent.context_assembly.oneshot_events import parse_codex_exec_json
 
 _logger = logging.getLogger(__name__)
 
@@ -158,6 +160,7 @@ async def maybe_run_blindfold_turn(
             model=model,
             command=command,
             turn_id=turn_id,
+            client=client,
         )
 
         with contextlib.suppress(httpx.HTTPError, ValueError):
@@ -200,6 +203,7 @@ async def _run_one_shot(
     selected_items: list[dict],
     model: str,
     command: str,
+    client: httpx.AsyncClient,
 ) -> BlindfoldTurnResult:
     """Run one disposable ``codex exec`` process and report the outcome."""
     # Measured separately from the process wall time below so a latency
@@ -267,10 +271,11 @@ async def _run_one_shot(
         doc["developer_instructions"] = system_text
         (fresh_codex_home / "config.toml").write_text(tomlkit.dumps(doc), encoding="utf-8")
 
-    # codex exec's plain stdout is a human-readable transcript (reasoning,
-    # tool-call summaries), not just the final answer; --output-last-message
-    # isolates exactly that, the same clean signal claude's `--output-format
-    # text` and pi's `--print` give directly on stdout.
+    # --output-last-message isolates the final answer text, the same clean
+    # signal claude's `--output-format text` and pi's `--print` give directly
+    # on stdout. --json additionally streams every item (tool calls, their
+    # results, reasoning) to stdout as it happens — see parse_codex_exec_json,
+    # which is what makes those visible in the session record at all.
     last_message_path = fresh_codex_home / "last-message.txt"
     args = (
         ["exec", "resume", fresh_external_id, new_message_text]
@@ -280,7 +285,7 @@ async def _run_one_shot(
             new_message_text,
         ]
     )
-    args += ["--output-last-message", str(last_message_path)]
+    args += ["--output-last-message", str(last_message_path), "--json"]
     # The one-shot workspace is whatever the executor's own cwd is, which is
     # not necessarily a trusted git repo from Codex's point of view; skip
     # that check rather than force every blindfolded workspace to be one.
@@ -304,6 +309,7 @@ async def _run_one_shot(
 
     response_text: str | None = None
     error: str | None = None
+    tool_call_count = 0
     setup_ms = (time.monotonic() - setup_started) * 1000
     started = time.monotonic()
     try:
@@ -325,11 +331,25 @@ async def _run_one_shot(
                 proc.kill()
             error = f"codex exec timed out after {_TURN_TIMEOUT_SECONDS:.0f}s"
         else:
+            # Parse regardless of exit code: a crash partway through the turn
+            # can still have written useful tool-call events before it died.
+            items, parsed_final_text = parse_codex_exec_json(
+                stdout.decode("utf-8", errors="replace")
+            )
+            tool_call_count = sum(1 for item in items if item.item_type == "function_call")
+            try:
+                final_text: str | None = last_message_path.read_text(encoding="utf-8").strip()
+            except OSError:
+                final_text = parsed_final_text
+            await post_oneshot_items(
+                client,
+                session_id=session_id,
+                response_id=turn_id,
+                items=items,
+                final_text=final_text,
+            )
             if proc.returncode == 0:
-                try:
-                    response_text = last_message_path.read_text(encoding="utf-8").strip()
-                except OSError:
-                    response_text = stdout.decode("utf-8", errors="replace").strip()
+                response_text = (final_text or "").strip()
             else:
                 error = (
                     f"codex exec exited {proc.returncode}: "
@@ -341,7 +361,7 @@ async def _run_one_shot(
 
     _logger.info(
         "blindfold codex-native turn=%s session=%s setup_ms=%.0f process_s=%.2fs ok=%s "
-        "has_memory_block=%s resumed_with_items=%d",
+        "has_memory_block=%s resumed_with_items=%d tool_calls=%d",
         turn_id,
         session_id,
         setup_ms,
@@ -349,6 +369,7 @@ async def _run_one_shot(
         error is None,
         "<long_term_memory>" in system_text,
         len(selected_items),
+        tool_call_count,
     )
 
     with contextlib.suppress(OSError):

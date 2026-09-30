@@ -67,9 +67,11 @@ from omnigent.context_assembly.blindfold import (
     BlindfoldTurnContext,
     fetch_blindfold_turn_context,
     is_blindfolded,
+    post_oneshot_items,
     read_server_connection,
     record_user_message,
 )
+from omnigent.context_assembly.oneshot_events import parse_claude_stream_json
 
 _logger = logging.getLogger(__name__)
 
@@ -204,6 +206,7 @@ async def maybe_run_blindfold_turn(
             selected_items=ctx.prior_history_items,
             model=model,
             command=command,
+            client=client,
         )
 
         with contextlib.suppress(httpx.HTTPError, ValueError):
@@ -247,6 +250,7 @@ async def _run_one_shot(
     selected_items: list[dict],
     model: str,
     command: str,
+    client: httpx.AsyncClient,
 ) -> BlindfoldTurnResult:
     """Run one disposable ``claude -p`` process and report the outcome."""
     # Measured separately from the process wall time below so a latency
@@ -259,7 +263,19 @@ async def _run_one_shot(
     fresh_config_dir = Path(tempfile.mkdtemp(prefix="omnigent-blindfold-claude-"))
     workspace = Path.cwd().resolve()
     fresh_external_id = str(uuid.uuid4())
-    args = ["-p", new_message_text, "--output-format", "text", "--setting-sources", ""]
+    # stream-json (+ --verbose, which -p mode requires for it) is the only
+    # one-shot output format that carries tool calls and their results, not
+    # just the final answer — see parse_claude_stream_json, which turns this
+    # into Omnigent items below.
+    args = [
+        "-p",
+        new_message_text,
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--setting-sources",
+        "",
+    ]
     if system_text:
         args += ["--append-system-prompt", system_text]
     if model:
@@ -300,6 +316,7 @@ async def _run_one_shot(
 
     response_text: str | None = None
     error: str | None = None
+    tool_call_count = 0
     setup_ms = (time.monotonic() - setup_started) * 1000
     started = time.monotonic()
     try:
@@ -321,8 +338,22 @@ async def _run_one_shot(
                 proc.kill()
             error = f"claude -p timed out after {_TURN_TIMEOUT_SECONDS:.0f}s"
         else:
+            # Parse regardless of exit code: a crash partway through the turn
+            # can still have written useful tool-call events before it died.
+            items, final_text = parse_claude_stream_json(stdout.decode("utf-8", errors="replace"))
+            tool_call_count = sum(1 for item in items if item.item_type == "function_call")
+            await post_oneshot_items(
+                client,
+                session_id=session_id,
+                response_id=turn_id,
+                items=items,
+                final_text=final_text,
+            )
             if proc.returncode == 0:
-                response_text = stdout.decode("utf-8", errors="replace").strip()
+                # final_text is None only if the process exited 0 without ever
+                # emitting a `result` event — not expected, but "" beats
+                # crashing on a response the caller must still return.
+                response_text = (final_text or "").strip()
             else:
                 error = (
                     f"claude -p exited {proc.returncode}: "
@@ -334,7 +365,7 @@ async def _run_one_shot(
 
     _logger.info(
         "blindfold claude-native turn=%s session=%s setup_ms=%.0f process_s=%.2fs ok=%s "
-        "has_memory_block=%s resumed_with_items=%d",
+        "has_memory_block=%s resumed_with_items=%d tool_calls=%d",
         turn_id,
         session_id,
         setup_ms,
@@ -342,6 +373,7 @@ async def _run_one_shot(
         error is None,
         "<long_term_memory>" in system_text,
         len(selected_items),
+        tool_call_count,
     )
 
     with contextlib.suppress(OSError):

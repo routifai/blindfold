@@ -59,10 +59,30 @@ Claude Code on `claude-haiku-4-5-20251001`, Pi on OpenRouter `anthropic/claude-h
 
 The memory item and `<long_term_memory>` block never appear in the session record (the model's own answer does, as expected).
 
+## Tool calls in the record
+
+Each one-shot CLI invocation now uses its structured event-stream output
+(Claude Code `--output-format stream-json --verbose`, Pi `--mode json`,
+Codex `exec --json`) instead of plain text, so a turn's tool calls, their
+results, and any reasoning reach the session record the same way a resident
+native session's do (`function_call` / `function_call_output` / `message` /
+`reasoning` conversation items) — see
+`omnigent/context_assembly/oneshot_events.py` for the per-CLI parsers and
+`omnigent/context_assembly/blindfold.py`'s `post_oneshot_items` for how
+they're posted. The turn's own final answer is posted once, by the normal
+`TurnComplete.response` path — a matching item is never also posted here.
+
+Items are posted after the one-shot process finishes (in event order), not
+incrementally while it runs, so the UI won't show a blindfolded turn's tool
+calls until the whole turn completes.
+
+Not yet mapped: Codex's `mcp_tool_call`, `image_view`, and
+`image_generation` item types (mirroring the app-server forwarder's own gap
+— `mcpToolCall`'s shape hasn't been verified against the real CLI either).
+
 ## Known limits
 
-- Tool calls made inside a blindfolded one-shot are not yet written to the record (only the final answer), so the UI doesn't show them.
 - A second turn in a blindfolded session can wait about a minute before it starts (runner turn tracking), not yet root-caused.
-- No streaming: the answer arrives when the one-shot finishes.
+- No streaming: the answer arrives when the one-shot finishes (see "Tool calls in the record" above — this applies to tool-call items too).
 - Blindfold applies to runner-launched sessions (web UI, API); a `omnigent claude` launched by hand from a terminal is not blindfolded.
 - Without the probe's "do not run any tools" instruction, agentic models may search the disk (`env`, `find`, `grep`) and read files that exist in the workspace — that's tool access, not injected context.
