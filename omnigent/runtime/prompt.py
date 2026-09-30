@@ -60,10 +60,8 @@ EMBEDDED_BROWSER_PRIORITY_INSTRUCTION = (
     "attached) or for non-interactive bulk fetching."
 )
 
-# Rollover super chat (rollover/DESIGN.md): compaction periodically rewrites
-# older history into a summary, so the model's own context can lose exact
-# wording. Session-scoped, not spec-scoped — appended only when the
-# session's labels mark it as rollover (``omnigent.context.labels.is_rollover``).
+# Rollover sessions compact older history into a summary, so exact wording can
+# be lost; appended only when the session's labels select rollover.
 ROLLOVER_CONTEXT_INSTRUCTION = (
     "Rollover: this session periodically compacts older messages into a "
     "summary; the summary may omit details, and is a pointer, not the "
