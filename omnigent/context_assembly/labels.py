@@ -29,9 +29,21 @@ DEFAULT_MAX_MESSAGES = 20
 # end without standing up a memory store.
 MEMORY_FIXTURE_LABEL = "omnigent.context.memory_fixture"
 
+# CLI process lifecycle for a blindfolded session's per-turn harness process.
+# Unset (default) is "fresh": a new, disposable CLI process every turn, as in
+# v0.2 of the contract. "warm_if_valid" opts a session into reusing a
+# long-lived process across turns whenever the harness's own validity rule
+# holds (same system+memory prompt, same model, and the exact same prior
+# history the process has already seen, nothing dropped from the front by a
+# sliding window) — see each native harness's own `blindfold_warm` module for
+# the reuse/discard rule and the fail-closed default. Coordinated by name
+# across harnesses; every harness reacts to the same label.
+LIFECYCLE_LABEL = "omnigent.context.lifecycle"
+LIFECYCLE_WARM_IF_VALID = "warm_if_valid"
+
 
 # Every label that configures blindfold mode for a session; a side chat forked
 # from a blindfolded session drops all of them.
 BLINDFOLD_SESSION_LABELS: frozenset[str] = frozenset(
-    {BLINDFOLD_LABEL, MAX_MESSAGES_LABEL, MEMORY_FIXTURE_LABEL}
+    {BLINDFOLD_LABEL, MAX_MESSAGES_LABEL, MEMORY_FIXTURE_LABEL, LIFECYCLE_LABEL}
 )
