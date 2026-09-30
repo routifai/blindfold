@@ -8061,6 +8061,20 @@ def create_runner_app(
         collected.reverse()
         return collected, previous_summary
 
+    async def _rollover_superseded(conv_id: str, last_window_item_id: str) -> bool:
+        """Whether a turn started, or a content item landed, after the rollover window."""
+        if _native_turn_in_flight(conv_id):
+            return True
+        resp = await server_client.get(
+            f"/v1/sessions/{conv_id}/items", params={"limit": 20, "order": "desc"}
+        )
+        resp.raise_for_status()
+        for item in resp.json().get("data") or []:
+            if item.get("type") in NON_CONTENT_ITEM_TYPES:
+                continue
+            return item.get("id") != last_window_item_id
+        return False
+
     async def _apply_rollover_if_over_threshold(conv_id: str, labels: dict[str, str]) -> None:
         items, previous_summary = await _fetch_rollover_window(conv_id)
         if not items:
@@ -8081,6 +8095,16 @@ def create_runner_app(
             llm_client=_get_runner_llm_client(),
             connection=connection,
         )
+        # Summarizing takes seconds; a message sent meanwhile is already typed
+        # into the pane. Back off rather than kill that turn: the next clean
+        # turn end re-checks, since the context is still over the threshold.
+        if await _rollover_superseded(conv_id, str(items[-1].get("id"))):
+            _logger.info(
+                "rollover deferred for %s: a new turn started during summarization",
+                conv_id,
+                extra={"session_id": conv_id},
+            )
+            return
         resp = await server_client.post(
             f"/v1/sessions/{conv_id}/events",
             json={"type": "compaction", "data": data.model_dump(exclude_none=True)},
@@ -13759,7 +13783,7 @@ def create_runner_app(
             if fam.base_url:
                 conn["base_url"] = fam.base_url
             return conn or None
-        except Exception:
+        except Exception:  # noqa: BLE001 — a missing local provider falls back to no auth
             _logger.warning(
                 "/v1/summarize: failed to resolve a local provider for model %r",
                 model,

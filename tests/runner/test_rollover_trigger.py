@@ -11,6 +11,7 @@ single-flight guard, and "never mid-turn".
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any
 
 import pytest
@@ -259,3 +260,43 @@ async def test_single_flight_guard_skips_concurrent_rollover(
     )
 
     assert len(fake_client.posted_events) <= 1
+
+
+@pytest.mark.asyncio
+async def test_defers_when_a_new_message_arrives_during_summarization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A message sent while the summary is being written is already running in
+    the pane: rollover must neither post the checkpoint nor kill that pane."""
+    conv_id = "conv_rollover_race"
+    items = [_msg(f"m{i}", "user" if i % 2 == 0 else "assistant", f"msg {i}") for i in range(10)]
+    fake_client = _FakeServerClient(items)
+
+    class _SlowLLMResponses(_FakeLLMResponses):
+        async def create(self, **kwargs: Any) -> Any:
+            items.append(_msg("m10", "user", "sent during summarization"))
+            return await super().create(**kwargs)
+
+    class _SlowLLMClient:
+        responses = _SlowLLMResponses()
+
+    pm = _FakeProcessManager(_ScriptedHarnessClient([]))
+    app = create_runner_app(
+        process_manager=pm,  # type: ignore[arg-type]
+        spec_resolver=_resolver,
+        server_client=fake_client,
+    )
+    await _create_native_session(app, conv_id)
+    labels = {"omnigent.context.mode": "rollover", "omnigent.context.rollover_at_tokens": "1"}
+    app.state.session_init_envelopes[conv_id] = (
+        time.monotonic(),
+        type("Envelope", (), {"snapshot": type("Snapshot", (), {"labels": labels})()})(),
+    )
+    monkeypatch.setattr("omnigent.runner.app._get_runner_llm_client", lambda: _SlowLLMClient())
+    fake_reaper = _FakeReaper()
+    app.state.native_pane_reaper = fake_reaper
+
+    await app.state.maybe_apply_rollover(conv_id)
+
+    assert fake_client.posted_events == []
+    assert fake_reaper.reaped_ids == []
