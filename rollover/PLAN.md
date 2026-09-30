@@ -44,6 +44,46 @@ Worktree `omnigent-ro-core`, branch `ro-core`.
 - Tests: the selection and counting rules, the trigger threshold, "no
   rollover mid-turn", "OFF is unchanged", and side-chat seeding.
 
+### A, revision 2: rules measured on Meta Muse (binding, supersede A above)
+
+Evidence: five real Muse compactions read from its own database (see the Muse
+evidence page). These replace the "last N messages" rule.
+
+1. **Kept tail = whole turns.** A turn is a user message plus everything after
+   it up to the next user message. Walk turns backward from the end and add
+   whole turns while the total stays within `omnigent.context.rollover_keep_tokens`
+   (new label, default 16_000, via `count_tokens`) **and** within
+   `rollover_keep_messages` (user+assistant messages, default 20). The tail
+   always starts at a user message. Never split a turn; never keep a
+   `function_call` without its output.
+2. **Empty tail is valid.** If the most recent turn alone exceeds the budget,
+   keep no turns; the summary covers everything (Muse did this 2 of 5 times).
+3. **Fixed header, added by code, not the LLM**, at the start of the summary text:
+   "This conversation grew past its context limit and earlier turns were
+   compacted into the summary below. The work in it is your own; build on it
+   instead of redoing it. Files, processes and jobs your tools created still
+   exist. Standing instructions and memory are live every turn and are not
+   part of this summary. When facts conflict, the latest evidence and user
+   corrections win. The summary may omit details: recover exact earlier
+   messages with the session_history tool before relying on them."
+4. **Summarizer instruction = a state file, not a narrative.** Title
+   `## Context checkpoint — YYYY-MM-DD`; sections by topic, always starting
+   with the user's identity, preferences and constraints (including corrections
+   and "do not" rules) and always ending with "Current position / next step";
+   each active task with exact identifiers (ids, paths, URLs, numbers),
+   timestamps with time zone, status and next step; look-alike items in
+   separate sections; negative facts ("no message was sent"); what the user was
+   told about failures; absolute dates only. Rewrite the previous checkpoint
+   into the new one (update in place, drop resolved noise) rather than
+   appending. Pass this via a small optional prompt parameter on
+   `summarize_history` / `build_summarization_prompt`; do not fork them.
+5. **No stale-usage double rollover.** Ignore the reported
+   `last_context_tokens` label when it predates the latest compaction item;
+   fall back to `count_tokens` over the items since that compaction.
+6. **Memory and standing instructions never go into `compacted_messages`**
+   (they're injected live every turn). `token_count` on the item = the
+   estimated tokens of summary + kept tail (Claude's `compact_boundary` needs it).
+
 ### B: Recall tool and system-prompt instructions
 
 Worktree `omnigent-ro-recall`, branch `ro-recall`.
@@ -73,6 +113,23 @@ Worktree `omnigent-ro-recall`, branch `ro-recall`.
   around it.
 - Tests: scoping (no cross-session read), paging limits, search scoping, and
   the instruction present only for rollover sessions.
+
+### B, revision 2: recall shaped like Muse's `chat.read_messages` (binding)
+
+1. `session_history(action="read")` returns **full turns** (a user message plus
+   everything that answered it), **newest first**, each with role, content,
+   timestamps and item ids. Paging uses an opaque `cursor`; the response
+   returns `next_cursor` for the next *older* page (no cursor = newest turns).
+   `limit` counts turns: default 5, minimum 1, maximum 20. Reading never
+   changes the session. Own session only for now.
+2. The tool is **always available** in rollover sessions (never deferred),
+   because recall is needed right after a compaction.
+3. `status` returns what can be computed: `context_window_tokens`,
+   `current_context_tokens` plus `source` (`"reported"` or `"estimate"`),
+   `rollover_trigger_tokens`, `tokens_remaining_to_rollover`,
+   `context_used_percent`. Omit what can't be computed.
+4. `ROLLOVER_CONTEXT_INSTRUCTION` also says that standing instructions and
+   memory are live every turn and are not part of the compacted summary.
 
 ### C: Omnigent owns compaction (harness side)
 
@@ -108,8 +165,9 @@ Worktree `omnigent-ro-harness`, branch `ro-harness`.
 
 Later: Pi (compaction in `resume.py`, a token estimate); a permission-gated
 `session_history` read of the same user's other chats (the main chat pulls from
-side chats, nothing is pushed, as in Muse); memory with an hourly consolidation
-job that runs only when there are new turns; and the time tag.
+side chats, nothing is pushed, as in Muse); memory with two paths, as in Muse: an immediate in-turn write to the injected
+memory block (from any chat), plus an hourly consolidation job that runs only
+when there are new turns and indexes memory for search; and the time tag.
 
 ## Rules for every agent
 
