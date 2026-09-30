@@ -114,6 +114,23 @@ Worktree `omnigent-ro-recall`, branch `ro-recall`.
 - Tests: scoping (no cross-session read), paging limits, search scoping, and
   the instruction present only for rollover sessions.
 
+### B, revision 2: recall shaped like Muse's `chat.read_messages` (binding)
+
+1. `session_history(action="read")` returns **full turns** (a user message plus
+   everything that answered it), **newest first**, each with role, content,
+   timestamps and item ids. Paging uses an opaque `cursor`; the response
+   returns `next_cursor` for the next *older* page (no cursor = newest turns).
+   `limit` counts turns: default 5, minimum 1, maximum 20. Reading never
+   changes the session. Own session only for now.
+2. The tool is **always available** in rollover sessions (never deferred),
+   because recall is needed right after a compaction.
+3. `status` returns what can be computed: `context_window_tokens`,
+   `current_context_tokens` plus `source` (`"reported"` or `"estimate"`),
+   `rollover_trigger_tokens`, `tokens_remaining_to_rollover`,
+   `context_used_percent`. Omit what can't be computed.
+4. `ROLLOVER_CONTEXT_INSTRUCTION` also says that standing instructions and
+   memory are live every turn and are not part of the compacted summary.
+
 ### C: Omnigent owns compaction (harness side)
 
 Worktree `omnigent-ro-harness`, branch `ro-harness`.
