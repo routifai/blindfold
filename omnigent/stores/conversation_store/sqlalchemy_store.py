@@ -117,6 +117,15 @@ from omnigent.stores.conversation_store.overrides import (
 
 _logger = logging.getLogger(__name__)
 
+
+def _fts5_literal_query(query: str) -> str:
+    """Quote each term so FTS5 matches it literally, e.g. ``"CW-42" "loan"``.
+
+    Unquoted, FTS5 reads ``-`` / ``:`` / ``*`` as operators and fails on ids.
+    """
+    return " ".join('"' + term.replace('"', '""') + '"' for term in query.split())
+
+
 _SESSION_TODOS_STATE_KEY = "_omnigent_native_plan_snapshot_v1"
 
 
@@ -1972,6 +1981,7 @@ class SqlAlchemyConversationStore(ConversationStore):
             # tsvector indexing is a future optimization (tracked in GAPS.md).
             use_fts = _supports_fts5(self._conv_engine.dialect.name)
             if use_fts:
+                query = _fts5_literal_query(query)
                 if conversation_id is not None:
                     stmt = text(
                         "SELECT item_id FROM conversation_items_fts "

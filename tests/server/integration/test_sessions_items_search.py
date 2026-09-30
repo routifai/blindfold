@@ -52,6 +52,19 @@ async def test_search_finds_own_session_item(client: httpx.AsyncClient) -> None:
     assert body["data"][0]["type"] == "message"
 
 
+async def test_search_matches_hyphenated_identifiers(client: httpx.AsyncClient) -> None:
+    """Ids like account or reference numbers must not be parsed as FTS syntax."""
+    session_id = await _create_session(client, "search-route-hyphen")
+    await _post_user_message(client, session_id, "My codeword is CW-CODEX-A7E00A: keep it.")
+
+    resp = await client.get(
+        f"/v1/sessions/{session_id}/items/search",
+        params={"query": "CW-CODEX-A7E00A:"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert len(resp.json()["data"]) == 1
+
+
 async def test_search_is_scoped_to_the_session(client: httpx.AsyncClient) -> None:
     session_a = await _create_session(client, "search-route-a")
     session_b = await _create_session(client, "search-route-b")

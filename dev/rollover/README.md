@@ -82,7 +82,7 @@ export E2E_CLAUDE_MODEL=<claude model id>
 export E2E_CODEX_MODEL=<codex model id>
 ```
 
-`ROLLOVER_E2E_AT_TOKENS` optionally overrides `omnigent.context.rollover_at_tokens`
+`ROLLOVER_E2E_HARNESSES` picks the CLIs to run (comma-separated; default all three). `ROLLOVER_E2E_AT_TOKENS` optionally overrides `omnigent.context.rollover_at_tokens`
 for every harness (still floored at 100k by `resolve_rollover_threshold`) —
 useful for forcing more than one compaction within the fixed filler below on
 a model with a very large context window, where the real 60%-of-window

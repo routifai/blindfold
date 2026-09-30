@@ -33,6 +33,7 @@ BASE_URL = os.environ.get("ROLLOVER_BASE_URL", "http://127.0.0.1:8795")
 OUT_DIR = Path(os.environ.get("ROLLOVER_OUT_DIR", "rollover-e2e-out"))
 RESULTS_PATH = OUT_DIR / "results.json"
 TURN_TIMEOUT_S = float(os.environ.get("ROLLOVER_TURN_TIMEOUT_S", "240"))
+TURN_SETTLE_S = float(os.environ.get("ROLLOVER_TURN_SETTLE_S", "8"))
 
 AGENT_NAMES = {
     "claude-native": "claude-native-ui",
@@ -190,34 +191,42 @@ async def send_message_and_wait(
     composer = page.get_by_label("Message the agent")
     await expect(composer).to_be_visible(timeout=30_000)
     await composer.fill(text)
+    bubble_locator = page.locator('[data-testid="message-bubble"][data-role="assistant"]')
+    bubbles_before = await bubble_locator.count()
     t0 = time.monotonic()
     await page.get_by_role("button", name="Send", exact=True).click()
 
     first_output_s: float | None = None
-    bubble_locator = page.locator('[data-testid="message-bubble"][data-role="assistant"]')
     deadline = time.monotonic() + TURN_TIMEOUT_S
     while time.monotonic() < deadline:
         count = await bubble_locator.count()
-        if count > 0:
+        if count > bubbles_before:
             txt = await bubble_locator.last.inner_text()
             if txt.strip():
                 first_output_s = time.monotonic() - t0
                 break
         await asyncio.sleep(0.2)
 
+    # The turn is done once its last new item is an assistant message and no
+    # item has landed for TURN_SETTLE_S (a preamble can precede tool calls).
     reply_text = ""
-    reply_item_id = None
     new_items: list[dict] = []
+    last_change = time.monotonic()
     while time.monotonic() < deadline:
         items = await last_item_ids(client, session_id)
-        new_items = [i for i in items if i["id"] not in seen_before]
-        for item in new_items:
-            if item.get("type") == "message" and item.get("role") == "assistant":
-                reply_text = _assistant_text(item)
-                reply_item_id = item["id"]
-        if reply_item_id is not None:
+        fresh = [i for i in items if i["id"] not in seen_before]
+        if len(fresh) != len(new_items):
+            new_items, last_change = fresh, time.monotonic()
+        tail = new_items[0] if new_items else None  # newest first
+        if (
+            tail is not None
+            and tail.get("type") == "message"
+            and tail.get("role") == "assistant"
+            and time.monotonic() - last_change >= TURN_SETTLE_S
+        ):
+            reply_text = _assistant_text(tail)
             break
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(0.5)
     done_s = time.monotonic() - t0
 
     shot_path = OUT_DIR / f"{label}.png"
@@ -507,7 +516,8 @@ async def main() -> None:
         browser = await pw.chromium.launch()
         context = await browser.new_context(viewport={"width": 1400, "height": 900})
 
-        for harness in ("claude-native", "codex-native", "pi-native"):
+        wanted = os.environ.get("ROLLOVER_E2E_HARNESSES", "claude-native,codex-native,pi-native")
+        for harness in [h.strip() for h in wanted.split(",") if h.strip()]:
             if harness not in AGENTS:
                 print(f"[{harness}] no agent registered, skipping", flush=True)
                 continue
