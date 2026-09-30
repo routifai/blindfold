@@ -2088,7 +2088,10 @@ module.exports = function (pi) {
     // Omnigent's threshold, not Pi's window-relative one: compact once a
     // settled turn leaves the context over it; the hook below writes the summary.
     pi.on("agent_settled", async (_event, ctx) => {
-      if (shouldRolloverAfterTurn(ctx.getContextUsage?.(), config.rollover)) ctx.compact();
+      if (!shouldRolloverAfterTurn(ctx.getContextUsage?.(), config.rollover)) return;
+      ctx.compact({
+        onError: (err) => console.error(`[omnigent] rollover compaction failed: ${err?.message ?? err}`),
+      });
     });
     pi.on("session_before_compact", async (event, ctx) => {
       rememberContext(ctx);

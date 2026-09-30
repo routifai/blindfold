@@ -2043,26 +2043,20 @@ def pi_native_provider_launch(
     from omnigent.context.labels import is_rollover
 
     if is_rollover(labels):
-        # Pi triggers its own compaction at contextTokens > contextWindow -
-        # reserveTokens, so reserveTokens is set to leave exactly our
-        # threshold's worth of room — Pi's session_before_compact hook then
-        # takes over with Omnigent's own summary (see the resident extension).
+        from omnigent.context.rollover import resolve_keep_tokens, resolve_rollover_threshold
+
+        # The extension compacts at our threshold after each settled turn; Pi
+        # must keep our tail size. With a known window, Pi's own trigger
+        # (contextTokens > window - reserveTokens) is aligned as well.
+        compaction: dict[str, object] = {
+            "enabled": True,
+            "keepRecentTokens": resolve_keep_tokens(labels),
+        }
         context_window = _model_context_window(rendered, model_provider_id, selected_model)
         if context_window is not None:
-            from omnigent.context.rollover import resolve_keep_tokens, resolve_rollover_threshold
-
             threshold = resolve_rollover_threshold(labels)
-            overlay["compaction"] = {
-                "enabled": True,
-                "reserveTokens": max(context_window - threshold, 1),
-                "keepRecentTokens": resolve_keep_tokens(labels),
-            }
-        else:
-            _LOGGER.warning(
-                "pi-native rollover: unknown context window for model %s; "
-                "leaving Pi's own compaction settings untouched",
-                selected_model,
-            )
+            compaction["reserveTokens"] = max(context_window - threshold, 1)
+        overlay["compaction"] = compaction
     prepare_managed_pi_agent_dir(agent_dir, overlay=overlay)
     env = {PI_CODING_AGENT_DIR_ENV_VAR: str(agent_dir)}
     if provider.inference_bound:

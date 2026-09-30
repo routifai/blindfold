@@ -883,11 +883,11 @@ def test_provider_launch_writes_compaction_settings_for_rollover(
     }
 
 
-def test_provider_launch_skips_compaction_overlay_with_unknown_context_window(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+def test_provider_launch_keeps_tail_size_with_unknown_context_window(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """An unknown context window logs a warning and leaves Pi's own
-    compaction settings untouched rather than guessing."""
+    """Without a known window Pi's own trigger can't be aligned, but its kept
+    tail must still be ours; the extension compacts at our threshold."""
     provider = creds.PiProviderConfig(
         provider_id="omnigent",
         base_url="https://api.anthropic.com",
@@ -903,11 +903,9 @@ def test_provider_launch_skips_compaction_overlay_with_unknown_context_window(
     )
     labels = {"omnigent.context.mode": "rollover"}
 
-    with caplog.at_level("WARNING", logger="omnigent.harnesses.pi_native.credentials"):
-        creds.pi_native_provider_launch(tmp_path / "pi-agent", provider, labels=labels)
+    creds.pi_native_provider_launch(tmp_path / "pi-agent", provider, labels=labels)
 
-    assert "compaction" not in captured["overlay"]
-    assert "unknown context window" in caplog.text
+    assert captured["overlay"]["compaction"] == {"enabled": True, "keepRecentTokens": 16_000}
 
 
 def test_provider_launch_returns_env_and_args(tmp_path: Path) -> None:
