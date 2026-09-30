@@ -322,7 +322,7 @@ def test_search_caps_limit(session_fixture: _Fixture) -> None:
 def test_status_from_labels_omits_unknown_fields() -> None:
     """No usage labels at all -> only the (documented-default) trigger is reported."""
     result = status_from_labels({})
-    assert result == {"rollover_trigger_tokens": 90_000}
+    assert result == {"rollover_trigger_tokens": 100_000}
 
 
 def test_status_from_labels_computes_headroom_and_percent() -> None:

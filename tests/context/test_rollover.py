@@ -10,6 +10,7 @@ import pytest
 from omnigent.context.rollover import (
     CHECKPOINT_HEADER,
     DEFAULT_ROLLOVER_THRESHOLD_TOKENS,
+    MIN_ROLLOVER_THRESHOLD_TOKENS,
     SUMMARIZER_DATE_PLACEHOLDER,
     build_rollover_item,
     resolve_keep_tokens,
@@ -149,22 +150,35 @@ def test_select_recent_no_user_message_is_empty_tail() -> None:
 # ── threshold / keep-budget resolution ──────────────────────────────────
 
 
-def test_threshold_default_is_90k_when_no_label_or_window() -> None:
+def test_threshold_default_when_no_label_or_window() -> None:
     assert resolve_rollover_threshold(None) == DEFAULT_ROLLOVER_THRESHOLD_TOKENS
     assert resolve_rollover_threshold({}) == DEFAULT_ROLLOVER_THRESHOLD_TOKENS
 
 
 def test_threshold_falls_back_to_45pct_of_context_window() -> None:
-    labels = {_LAST_CONTEXT_WINDOW_LABEL_KEY: "200000"}
-    assert resolve_rollover_threshold(labels) == 90_000
+    labels = {_LAST_CONTEXT_WINDOW_LABEL_KEY: "400000"}
+    assert resolve_rollover_threshold(labels) == 180_000
 
 
 def test_threshold_explicit_label_wins_over_window() -> None:
     labels = {
-        "omnigent.context.rollover_at_tokens": "12345",
-        _LAST_CONTEXT_WINDOW_LABEL_KEY: "200000",
+        "omnigent.context.rollover_at_tokens": "150000",
+        _LAST_CONTEXT_WINDOW_LABEL_KEY: "400000",
     }
-    assert resolve_rollover_threshold(labels) == 12345
+    assert resolve_rollover_threshold(labels) == 150_000
+
+
+def test_threshold_never_drops_below_the_floor() -> None:
+    assert (
+        resolve_rollover_threshold({"omnigent.context.rollover_at_tokens": "12345"})
+        == MIN_ROLLOVER_THRESHOLD_TOKENS
+    )
+    # A small window caps the floor so the CLI still compacts before its limit.
+    labels = {
+        "omnigent.context.rollover_at_tokens": "5000",
+        _LAST_CONTEXT_WINDOW_LABEL_KEY: "100000",
+    }
+    assert resolve_rollover_threshold(labels) == 80_000
 
 
 def test_threshold_ignores_invalid_label() -> None:

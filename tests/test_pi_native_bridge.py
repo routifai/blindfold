@@ -289,7 +289,7 @@ def test_write_extension_files_carries_rollover_config_for_rollover_sessions(
     assert SUMMARIZER_DATE_PLACEHOLDER in payload["rollover"]["summarizerInstruction"]
     assert "state file" in payload["rollover"]["summarizerInstruction"]
     # No label and no known window: the default threshold, independent of Pi.
-    assert payload["rollover"]["thresholdTokens"] == 90_000
+    assert payload["rollover"]["thresholdTokens"] == 100_000
 
 
 def test_refresh_config_auth_headers_replaces_only_auth(tmp_path: Path) -> None:

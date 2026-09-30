@@ -3800,7 +3800,7 @@ async def test_codex_native_launch_config_reads_the_auto_harness_flag(
 @pytest.mark.parametrize(
     ("labels", "expected"),
     [
-        ({"omnigent.context.mode": "rollover"}, 90_000),
+        ({"omnigent.context.mode": "rollover"}, 100_000),
         ({"omnigent.context.mode": "blindfold"}, None),
         ({}, None),
     ],

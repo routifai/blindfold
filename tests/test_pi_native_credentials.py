@@ -870,7 +870,7 @@ def test_provider_launch_writes_compaction_settings_for_rollover(
     )
     labels = {
         "omnigent.context.mode": "rollover",
-        "omnigent.context.rollover_at_tokens": "50000",
+        "omnigent.context.rollover_at_tokens": "120000",
         "omnigent.context.rollover_keep_tokens": "8000",
     }
 
@@ -878,7 +878,7 @@ def test_provider_launch_writes_compaction_settings_for_rollover(
 
     assert captured["overlay"]["compaction"] == {
         "enabled": True,
-        "reserveTokens": 200_000 - 50_000,
+        "reserveTokens": 200_000 - 120_000,
         "keepRecentTokens": 8_000,
     }
 

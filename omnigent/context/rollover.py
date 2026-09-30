@@ -27,7 +27,12 @@ from omnigent.server.routes._sessions.common import (
 
 # Fallback threshold when no window is known for the session's model —
 # well under the smallest context window Omnigent routes to today.
-DEFAULT_ROLLOVER_THRESHOLD_TOKENS = 90_000
+DEFAULT_ROLLOVER_THRESHOLD_TOKENS = 100_000
+
+# Claude Code starts at ~60k tokens and Codex keeps ~20k of user messages, so
+# a lower threshold leaves the CLI over it right after compacting: a loop.
+MIN_ROLLOVER_THRESHOLD_TOKENS = 100_000
+_MIN_THRESHOLD_WINDOW_FRACTION = 0.8
 
 # Fraction of the session's context window used as the default threshold,
 # leaving headroom for a heavy tool turn before the CLI hits its own limit.
@@ -116,19 +121,25 @@ def resolve_rollover_threshold(labels: Mapping[str, str] | None) -> int:
 
     Priority: the :data:`~omnigent.context.labels.ROLLOVER_AT_TOKENS_LABEL`
     label (an explicit positive int) > 45% of the session's last-reported
-    context window > :data:`DEFAULT_ROLLOVER_THRESHOLD_TOKENS`.
+    context window > :data:`DEFAULT_ROLLOVER_THRESHOLD_TOKENS`, never below
+    :data:`MIN_ROLLOVER_THRESHOLD_TOKENS` (capped at 80% of a known window).
 
     :param labels: The session's labels, or ``None``.
     :returns: The threshold, in tokens.
     """
     labels = labels or {}
-    explicit = _parse_positive_int(labels.get(ROLLOVER_AT_TOKENS_LABEL))
-    if explicit is not None:
-        return explicit
     window = _parse_positive_int(labels.get(_LAST_CONTEXT_WINDOW_LABEL_KEY))
+    threshold = _parse_positive_int(labels.get(ROLLOVER_AT_TOKENS_LABEL))
+    if threshold is None:
+        threshold = (
+            int(window * _DEFAULT_THRESHOLD_WINDOW_FRACTION)
+            if window is not None
+            else DEFAULT_ROLLOVER_THRESHOLD_TOKENS
+        )
+    floor = MIN_ROLLOVER_THRESHOLD_TOKENS
     if window is not None:
-        return int(window * _DEFAULT_THRESHOLD_WINDOW_FRACTION)
-    return DEFAULT_ROLLOVER_THRESHOLD_TOKENS
+        floor = min(floor, int(window * _MIN_THRESHOLD_WINDOW_FRACTION))
+    return max(threshold, floor)
 
 
 def resolve_keep_tokens(labels: Mapping[str, str] | None) -> int:
