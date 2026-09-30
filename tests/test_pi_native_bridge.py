@@ -248,6 +248,48 @@ def test_write_extension_files_defaults_tools_to_empty(tmp_path: Path) -> None:
     assert payload["tools"] == []
 
 
+def test_write_extension_files_omits_rollover_outside_rollover_mode(tmp_path: Path) -> None:
+    """Unset/non-rollover labels write ``rollover: null`` — the extension's
+    session_before_compact registration stays gated off, byte-for-byte."""
+    bridge_dir = tmp_path / "bridge"
+
+    for labels in (None, {}, {"omnigent.context.mode": "something_else"}):
+        _ext, cfg = pi_native_bridge.write_extension_files(
+            bridge_dir,
+            session_id="conv_abc",
+            server_url="http://omnigent.test",
+            conversation_url="http://omnigent.test/c/conv_abc",
+            labels=labels,
+        )
+        payload = json.loads(cfg.read_text(encoding="utf-8"))
+        assert payload["rollover"] is None
+
+
+def test_write_extension_files_carries_rollover_config_for_rollover_sessions(
+    tmp_path: Path,
+) -> None:
+    """A rollover-labeled session gets the fixed header + summarizer
+    instruction verbatim from ``omnigent.context.rollover`` — never
+    hand-duplicated in the JS extension."""
+    from omnigent.context.rollover import CHECKPOINT_HEADER, SUMMARIZER_DATE_PLACEHOLDER
+
+    bridge_dir = tmp_path / "bridge"
+
+    _ext, cfg = pi_native_bridge.write_extension_files(
+        bridge_dir,
+        session_id="conv_abc",
+        server_url="http://omnigent.test",
+        conversation_url="http://omnigent.test/c/conv_abc",
+        labels={"omnigent.context.mode": "rollover"},
+    )
+
+    payload = json.loads(cfg.read_text(encoding="utf-8"))
+    assert payload["rollover"]["checkpointHeader"] == CHECKPOINT_HEADER
+    assert payload["rollover"]["datePlaceholder"] == SUMMARIZER_DATE_PLACEHOLDER
+    assert SUMMARIZER_DATE_PLACEHOLDER in payload["rollover"]["summarizerInstruction"]
+    assert "state file" in payload["rollover"]["summarizerInstruction"]
+
+
 def test_refresh_config_auth_headers_replaces_only_auth(tmp_path: Path) -> None:
     """Refreshing the bearer rewrites only ``authHeaders``, leaving the rest.
 

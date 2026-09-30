@@ -824,6 +824,92 @@ def test_write_models_config_is_owner_only(tmp_path: Path) -> None:
     assert written["providers"]["omnigent"]["apiKey"] == "sk-secret"
 
 
+def test_provider_launch_no_compaction_overlay_without_rollover_label(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A non-rollover (or unlabeled) session never touches Pi's own compaction
+    settings — byte-for-byte upstream behaviour."""
+    provider = creds.PiProviderConfig(
+        provider_id="omnigent",
+        base_url="https://api.anthropic.com",
+        api="anthropic-messages",
+        model="claude-sonnet-4-6",
+        api_key="sk-secret",
+        auth_header=False,
+        extra_models=[{"id": "claude-sonnet-4-6", "contextWindow": 200_000}],
+    )
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        "omnigent.inner.pi_settings.prepare_managed_pi_agent_dir",
+        lambda _agent_dir, *, overlay=None, **_kwargs: captured.update(overlay=overlay),
+    )
+
+    for labels in (None, {}, {"omnigent.context.mode": "something_else"}):
+        creds.pi_native_provider_launch(tmp_path / "pi-agent", provider, labels=labels)
+        assert "compaction" not in captured["overlay"]
+
+
+def test_provider_launch_writes_compaction_settings_for_rollover(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A rollover session's known-context-window model gets Pi's own
+    ``compaction`` settings tuned to Omnigent's threshold/keep labels."""
+    provider = creds.PiProviderConfig(
+        provider_id="omnigent",
+        base_url="https://api.anthropic.com",
+        api="anthropic-messages",
+        model="claude-sonnet-4-6",
+        api_key="sk-secret",
+        auth_header=False,
+        extra_models=[{"id": "claude-sonnet-4-6", "contextWindow": 200_000}],
+    )
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        "omnigent.inner.pi_settings.prepare_managed_pi_agent_dir",
+        lambda _agent_dir, *, overlay=None, **_kwargs: captured.update(overlay=overlay),
+    )
+    labels = {
+        "omnigent.context.mode": "rollover",
+        "omnigent.context.rollover_at_tokens": "50000",
+        "omnigent.context.rollover_keep_tokens": "8000",
+    }
+
+    creds.pi_native_provider_launch(tmp_path / "pi-agent", provider, labels=labels)
+
+    assert captured["overlay"]["compaction"] == {
+        "enabled": True,
+        "reserveTokens": 200_000 - 50_000,
+        "keepRecentTokens": 8_000,
+    }
+
+
+def test_provider_launch_skips_compaction_overlay_with_unknown_context_window(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An unknown context window logs a warning and leaves Pi's own
+    compaction settings untouched rather than guessing."""
+    provider = creds.PiProviderConfig(
+        provider_id="omnigent",
+        base_url="https://api.anthropic.com",
+        api="anthropic-messages",
+        model="claude-sonnet-4-6",
+        api_key="sk-secret",
+        auth_header=False,
+    )
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        "omnigent.inner.pi_settings.prepare_managed_pi_agent_dir",
+        lambda _agent_dir, *, overlay=None, **_kwargs: captured.update(overlay=overlay),
+    )
+    labels = {"omnigent.context.mode": "rollover"}
+
+    with caplog.at_level("WARNING", logger="omnigent.harnesses.pi_native.credentials"):
+        creds.pi_native_provider_launch(tmp_path / "pi-agent", provider, labels=labels)
+
+    assert "compaction" not in captured["overlay"]
+    assert "unknown context window" in caplog.text
+
+
 def test_provider_launch_returns_env_and_args(tmp_path: Path) -> None:
     """pi_native_provider_launch writes config and returns the env + CLI args."""
     provider = creds.PiProviderConfig(

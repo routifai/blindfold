@@ -7988,7 +7988,13 @@ def create_runner_app(
 
     async def _maybe_apply_rollover(conv_id: str) -> None:
         """Cheap no-op for every non-rollover turn; the label gates all I/O below."""
-        if not _is_native_harness(conv_id) or conv_id in _rollover_in_progress:
+        # pi-native rolls over through Pi's own compaction hook; recycling its
+        # pane too would double-compact.
+        if (
+            not _is_native_harness(conv_id)
+            or _session_harness_name(conv_id) == "pi-native"
+            or conv_id in _rollover_in_progress
+        ):
             return
         # Opened before any await, so a turn arriving right now already waits.
         _rollover_in_progress.add(conv_id)

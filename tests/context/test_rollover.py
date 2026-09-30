@@ -10,12 +10,14 @@ import pytest
 from omnigent.context.rollover import (
     CHECKPOINT_HEADER,
     DEFAULT_ROLLOVER_THRESHOLD_TOKENS,
+    SUMMARIZER_DATE_PLACEHOLDER,
     build_rollover_item,
     estimate_context_tokens,
     resolve_keep_messages,
     resolve_keep_tokens,
     resolve_rollover_threshold,
     select_recent,
+    state_file_summarizer_instruction,
 )
 from omnigent.harnesses.claude_native import main as claude_native
 from omnigent.harnesses.codex_native import main as codex_native
@@ -411,6 +413,19 @@ async def test_rollover_item_accepted_by_codex_native_resume_rebuild(tmp_path: P
     assert records[1]["payload"]["message"] == f"{CHECKPOINT_HEADER}\n\nROLLING SUMMARY"
     kept_ids = [m.get("id") for m in replacement_history if "id" in m]
     assert kept_ids == ["u4", "a4"]
+
+
+def test_state_file_summarizer_instruction_defaults_to_utc_today() -> None:
+    instruction = state_file_summarizer_instruction()
+    assert "## Context checkpoint —" in instruction
+    assert SUMMARIZER_DATE_PLACEHOLDER not in instruction
+
+
+def test_state_file_summarizer_instruction_accepts_a_caller_supplied_date() -> None:
+    """The pi-native bridge passes SUMMARIZER_DATE_PLACEHOLDER at launch time
+    and substitutes the real date itself, later, at actual compaction time."""
+    instruction = state_file_summarizer_instruction(today=SUMMARIZER_DATE_PLACEHOLDER)
+    assert f"## Context checkpoint — {SUMMARIZER_DATE_PLACEHOLDER}" in instruction
 
 
 def test_items_for_summarizer_keeps_only_provider_schema_fields() -> None:

@@ -335,6 +335,40 @@ def _enqueue_payload(bridge_dir: Path, item_id: str, payload: _JsonObject) -> No
             os.unlink(tmp_name)
 
 
+def rollover_extension_config(labels: Mapping[str, str] | None) -> _JsonObject | None:
+    """
+    Build the resident Pi extension's rollover config block.
+
+    ``None`` outside rollover mode, so the extension never registers its
+    ``session_before_compact`` handler and non-rollover sessions stay
+    byte-for-byte upstream. Carries Omnigent's checkpoint header and
+    state-file summarizer instruction verbatim (see
+    ``omnigent/context/rollover.py``) so the JS side never hand-duplicates
+    that wording; the summarizer instruction still carries
+    :data:`~omnigent.context.rollover.SUMMARIZER_DATE_PLACEHOLDER` since Pi's
+    own compaction can run long after this config is written.
+
+    :param labels: The session's labels, or ``None``.
+    :returns: The config block, or ``None`` outside rollover mode.
+    """
+    from omnigent.context.labels import is_rollover
+    from omnigent.context.rollover import (
+        CHECKPOINT_HEADER,
+        SUMMARIZER_DATE_PLACEHOLDER,
+        state_file_summarizer_instruction,
+    )
+
+    if not is_rollover(labels):
+        return None
+    return {
+        "checkpointHeader": CHECKPOINT_HEADER,
+        "summarizerInstruction": state_file_summarizer_instruction(
+            today=SUMMARIZER_DATE_PLACEHOLDER
+        ),
+        "datePlaceholder": SUMMARIZER_DATE_PLACEHOLDER,
+    }
+
+
 def write_extension_files(
     bridge_dir: Path,
     *,
@@ -343,6 +377,7 @@ def write_extension_files(
     conversation_url: str,
     auth_headers: dict[str, str] | None = None,
     tools: list[_JsonObject] | None = None,
+    labels: Mapping[str, str] | None = None,
 ) -> tuple[Path, Path]:
     """
     Write the Pi extension and config used by a native Pi terminal.
@@ -360,6 +395,8 @@ def write_extension_files(
         runner uses), so the Pi agent can invoke Omnigent ``sys_*`` tools with
         centralized server-side policy enforcement. ``None``/empty registers no
         tools (Pi falls back to its own built-in tool surface only).
+    :param labels: The session's labels. Only rollover-mode labels change
+        anything here — see :func:`rollover_extension_config`.
     :returns: ``(extension_path, config_path)``.
     """
     bridge_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -371,6 +408,7 @@ def write_extension_files(
         "inboxDir": str(bridge_dir / _INBOX_DIR),
         "authHeaders": auth_headers or {},
         "tools": tools or [],
+        "rollover": rollover_extension_config(labels),
     }
     # A marker left by a previous Pi process would report this launch ready early.
     (bridge_dir / _INPUT_READY_FILE).unlink(missing_ok=True)
