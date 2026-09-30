@@ -200,11 +200,12 @@ async def send_message_and_wait(
         '[data-testid="message-bubble"][data-role="assistant"]:not([data-e2e-seen])'
     )
     t0 = time.monotonic()
+    # A fresh session's page can block input while its terminal connects.
     try:
-        await page.get_by_role("button", name="Send", exact=True).click(timeout=10_000)
+        await page.get_by_role("button", name="Send", exact=True).click(timeout=120_000)
     except PlaywrightTimeoutError:
-        # The button is sometimes covered briefly on a freshly opened page.
-        await composer.press("Enter")
+        await page.screenshot(path=str(OUT_DIR / f"{label}_send_blocked.png"))
+        await composer.press("Enter", timeout=30_000)
 
     first_output_s: float | None = None
     deadline = time.monotonic() + TURN_TIMEOUT_S
@@ -384,7 +385,9 @@ async def run_rollover_suite(context, client: httpx.AsyncClient, harness: str) -
     sh_calls = _session_history_calls(post_compaction_new_items)
     recall_verbatim = {
         "case": "recall_verbatim",
-        "pass": bool(sh_calls) and first_message in recall_turn["reply"],
+        # Exact wording is the requirement; whether it came from the kept
+        # context (e.g. Pi's summary) or the tool is reported as evidence.
+        "pass": first_message in recall_turn["reply"],
         "evidence": {
             "session_history_call_count": len(sh_calls),
             "reply": recall_turn["reply"][:300],

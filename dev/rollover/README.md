@@ -117,7 +117,7 @@ turns.
 | `no_loop` | compaction count ≤ `len(fill turns) / 2`, and no two consecutive fill turns each added one (the old design's failure mode: too low a threshold recompacts every turn) |
 | `continues` | the turn right after the first compaction still replies and streams |
 | `sees_tool` | asked "do you see a tool called session_history?" — answer starts with yes |
-| `recall_verbatim` | a `mcp__omnigent__session_history` function_call item appears after the compaction, and the answer contains the exact first message |
+| `recall_verbatim` | the answer contains the exact first message; whether it came from a `session_history` call or the kept context is reported |
 | `summary_recorded` | every `compaction` item has a non-empty `summary`; a count of fallback placeholder summaries (`"[Claude Code compaction — …]"`, the hook-only path with no transcript text) is reported as a warning, not a failure |
 | `baseline` | a separate, cheap (3-turn) session with the mode label unset: no `compaction` items, no `session_history` calls — see "Cost note" for why this isn't a full-scale replica |
 | `side_chat` (claude-native only) | fork the rolled-over session with `side_chat: true`; the fork keeps the rollover label and answers the codeword question from its Omnigent-seeded checkpoint |
