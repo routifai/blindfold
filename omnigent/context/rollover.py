@@ -22,7 +22,7 @@ from omnigent.context.labels import (
     ROLLOVER_KEEP_MESSAGES_LABEL,
     ROLLOVER_KEEP_TOKENS_LABEL,
 )
-from omnigent.entities import CompactionData
+from omnigent.entities import NON_CONTENT_ITEM_TYPES, CompactionData
 from omnigent.runtime.compaction import count_tokens, summarize_history
 from omnigent.server.routes._sessions.common import (
     _LAST_CONTEXT_TOKENS_LABEL_KEY,
@@ -212,6 +212,31 @@ def select_recent(
     return items[selected_start:] if selected_start < len(items) else []
 
 
+# Bookkeeping fields ``ConversationItem.to_api_dict()`` adds on top of the
+# type-specific ones (see API.md) — meaningful to Omnigent's own storage and
+# to the native resume rebuilders, but not part of any provider's Responses
+# API ``input`` item schema. Left in, a strict provider (observed: OpenAI)
+# 400s on the unknown field instead of ignoring it.
+_ITEM_BOOKKEEPING_FIELDS = ("id", "response_id", "status", "created_at", "created_by", "model")
+
+
+def _items_for_summarizer(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Project *items* into a shape safe to send as LLM input.
+
+    Drops storage-only bookkeeping fields, and drops ``reasoning`` items
+    entirely — like ``history_to_input_items``, they are output-only and, on
+    a resident session, provider-specific (Claude's reasoning content is not
+    a valid OpenAI Responses API ``reasoning`` input item). Only used for the
+    summarizer's own input — :func:`select_recent`'s kept tail keeps the
+    full item dicts, which the native resume rebuilders need.
+    """
+    return [
+        {k: v for k, v in item.items() if k not in _ITEM_BOOKKEEPING_FIELDS}
+        for item in items
+        if item.get("type") != "reasoning"
+    ]
+
+
 def _summary_exchange(summary_text: str) -> list[dict[str, Any]]:
     """Build the synthetic user/assistant pair standing in for a summary."""
     return [
@@ -281,7 +306,7 @@ async def build_rollover_item(
     if not items_since_previous_compaction:
         raise ValueError("build_rollover_item requires at least one item to summarize")
 
-    messages_to_summarize = list(items_since_previous_compaction)
+    messages_to_summarize = _items_for_summarizer(items_since_previous_compaction)
     if previous_summary:
         messages_to_summarize = _summary_exchange(previous_summary) + messages_to_summarize
 
@@ -349,6 +374,13 @@ async def build_side_chat_seed(
         own ``compaction`` item.
     :raises ValueError: If *items* is empty.
     """
+    # Raw session items include lifecycle entries the model never saw; keep the
+    # parent's checkpoints, which the seed builds on.
+    items = [
+        item
+        for item in items
+        if item.get("type") == "compaction" or item.get("type") not in NON_CONTENT_ITEM_TYPES
+    ]
     if not items:
         raise ValueError("build_side_chat_seed requires a non-empty parent record")
 

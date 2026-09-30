@@ -61,6 +61,7 @@ from omnigent.debug_logging import (
     runner_primary_session_id,
     set_current_session_id,
 )
+from omnigent.entities import NON_CONTENT_ITEM_TYPES
 from omnigent.entities.session_resources import (
     DEFAULT_ENVIRONMENT_ID,
     SessionResourceView,
@@ -92,6 +93,7 @@ from omnigent.llms.summarize import (
     build_summarization_prompt,
     extract_summary_text,
 )
+from omnigent.models.model_fallbacks import ROLLOVER_SUMMARY_FALLBACK_MODEL
 from omnigent.native.native_coding_agents import (
     native_coding_agent_for_agent_name,
     native_coding_agent_for_harness,
@@ -3155,8 +3157,12 @@ def create_runner_app(
     # writing a compaction item / recycling its pane, so a second convergence
     # (e.g. an overlapping continuation) never rolls it over twice at once.
     _rollover_in_progress: set[str] = set()
+    # Set while a rollover is being written; a turn arriving meanwhile waits on
+    # it so it lands in the relaunched pane instead of the one being reaped.
+    _rollover_gates: dict[str, asyncio.Event] = {}
+    _ROLLOVER_GATE_TIMEOUT_S = 120.0
     _ROLLOVER_FETCH_MAX_PAGES = 25
-    _DEFAULT_ROLLOVER_MODEL = "gpt-4o"
+    _DEFAULT_ROLLOVER_MODEL = ROLLOVER_SUMMARY_FALLBACK_MODEL
     # Conversations whose claude-sdk `/compact` published an up-front
     # `response.compaction.in_progress`. Used to (a) swallow the executor's own
     # later `in_progress` so the web shows a single spinner, and (b) publish a
@@ -8004,6 +8010,7 @@ def create_runner_app(
         if conv_id in _rollover_in_progress:
             return
         _rollover_in_progress.add(conv_id)
+        gate = _rollover_gates[conv_id] = asyncio.Event()
         try:
             full_labels = await _session_labels_for_runner_spawn(
                 server_client=server_client, session_id=conv_id
@@ -8017,6 +8024,8 @@ def create_runner_app(
                 extra={"session_id": conv_id},
             )
         finally:
+            gate.set()
+            _rollover_gates.pop(conv_id, None)
             _rollover_in_progress.discard(conv_id)
 
     async def _fetch_rollover_window(
@@ -8047,12 +8056,22 @@ def create_runner_app(
                     previous_summary = item.get("summary")
                     found_boundary = True
                     break
+                # Lifecycle/metadata items (resource_event, routing_decision, …)
+                # were never part of the model's own context — the agent loop
+                # already excludes them (NON_CONTENT_ITEM_TYPES) — so they must
+                # not reach the summarizer's LLM input or the kept tail either.
+                if item.get("type") in NON_CONTENT_ITEM_TYPES:
+                    continue
                 collected.append(item)
             if found_boundary or not page.get("has_more"):
                 break
             before = page_items[-1].get("id")
         collected.reverse()
         return collected, previous_summary
+
+    def _rollover_superseded(conv_id: str) -> bool:
+        """Whether a turn already reached the pane despite the rollover gate."""
+        return _native_turn_in_flight(conv_id)
 
     async def _apply_rollover_if_over_threshold(conv_id: str, labels: dict[str, str]) -> None:
         items, previous_summary = await _fetch_rollover_window(conv_id)
@@ -8074,6 +8093,15 @@ def create_runner_app(
             llm_client=_get_runner_llm_client(),
             connection=connection,
         )
+        # New turns wait on the rollover gate; one that slipped into the pane
+        # anyway must not be killed, so defer to the next clean turn end.
+        if _rollover_superseded(conv_id):
+            _logger.info(
+                "rollover deferred for %s: a new turn started during summarization",
+                conv_id,
+                extra={"session_id": conv_id},
+            )
+            return
         resp = await server_client.post(
             f"/v1/sessions/{conv_id}/events",
             json={"type": "compaction", "data": data.model_dump(exclude_none=True)},
@@ -8114,6 +8142,7 @@ def create_runner_app(
 
     app.state.finish_turn_and_maybe_roll_over = _finish_turn_and_maybe_roll_over
     app.state.maybe_apply_rollover = _maybe_apply_rollover
+    app.state.rollover_gates = _rollover_gates
     app.state.session_init_envelopes = _session_init_envelopes
 
     async def _cancel_active_turn(
@@ -9026,6 +9055,10 @@ def create_runner_app(
         conv: str,
     ) -> None:
         _subagent_wake_pending.discard(conv)
+        rollover_gate = _rollover_gates.get(conv)
+        if rollover_gate is not None:
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(rollover_gate.wait(), timeout=_ROLLOVER_GATE_TIMEOUT_S)
         # Capture our own task so the finally floor can identity-compare before
         # clearing the slot (see below).
         _own_task = asyncio.current_task()
@@ -13666,10 +13699,10 @@ def create_runner_app(
 
         spec_entry = _session_spec_cache.get(session_id)
         if spec_entry is None:
-            return None
+            return _resolve_local_provider_connection(model)
         spec = spec_entry.spec if hasattr(spec_entry, "spec") else spec_entry
         if spec is None:
-            return None
+            return _resolve_local_provider_connection(model)
 
         auth = getattr(spec.executor, "auth", None)
 
@@ -13706,7 +13739,60 @@ def create_runner_app(
             )
             return _resolve_databricks_connection(_db_profile, session_id)
 
-        return None
+        # No spec-level auth, legacy profile, or global auth resolved: fall
+        # back to the runner's own local provider config (the ``providers:``
+        # block in ~/.omnigent/config.yaml — the credentials the native CLIs
+        # themselves launch with). Without this, a plain local/self-hosted
+        # deployment has no way to authenticate this call at all: the LLM
+        # adapter sends no Authorization header when connection_params is
+        # None (it never reads provider env vars itself), so callers like
+        # rollover's summarizer always 401 on such a deployment.
+        return _resolve_local_provider_connection(model)
+
+    def _resolve_local_provider_connection(model: str) -> dict[str, str] | None:
+        """Resolve a connection from ~/.omnigent/config.yaml's providers: block.
+
+        Picks the family's ``default: true`` provider, falling back to the
+        first provider configured for that family — the same precedence
+        :func:`_resolve_provider_connection` uses once a provider name is
+        known, but starting from the model alone.
+
+        :param model: LLM model string, e.g. ``"gpt-4o"`` or ``"claude-haiku-4-5"``.
+        :returns: A ``{"base_url", "api_key"}`` connection dict, or ``None``
+            when no local provider serves this model's family.
+        """
+        try:
+            from omnigent.onboarding.detected import effective_config_with_detected
+            from omnigent.onboarding.provider_config import (
+                first_available_provider,
+                get_default_provider,
+                load_config,
+            )
+
+            config = effective_config_with_detected(load_config())
+            family = "anthropic" if model.startswith(("anthropic/", "claude")) else "openai"
+            entry = get_default_provider(config, family) or first_available_provider(
+                config, family
+            )
+            if entry is None:
+                return None
+            fam = entry.family(family)
+            if fam is None:
+                return None
+            conn: dict[str, str] = {}
+            if fam.api_key:
+                conn["api_key"] = fam.api_key
+            if fam.base_url:
+                conn["base_url"] = fam.base_url
+            return conn or None
+        except Exception:  # noqa: BLE001 — a missing local provider falls back to no auth
+            _logger.warning(
+                "/v1/summarize: failed to resolve a local provider for model %r",
+                model,
+                exc_info=True,
+                extra={"session_id": runner_primary_session_id()},
+            )
+            return None
 
     def _resolve_provider_connection(
         provider_name: str,
