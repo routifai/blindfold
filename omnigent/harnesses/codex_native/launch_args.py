@@ -14,11 +14,8 @@ from urllib.parse import urlsplit, urlunsplit
 import tomlkit
 from tomlkit.exceptions import TOMLKitError
 
-#: Token count no real conversation reaches, used to override Codex's own
-#: auto-compact threshold effectively off. Verified against the installed
-#: Codex CLI (0.159.2): a real, typed (i64) ``config.toml`` field — its
-#: exact disable sentinel (if any) is not confirmed, so a value this large
-#: guarantees the threshold is never reached regardless of semantics.
+#: A token count no conversation reaches: keeps Codex's own auto-compact from
+#: ever firing without relying on an undocumented "disabled" sentinel.
 _CODEX_AUTO_COMPACT_DISABLE_TOKEN_LIMIT = 999_999_999_999
 
 
