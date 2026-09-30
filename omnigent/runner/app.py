@@ -7980,23 +7980,11 @@ def create_runner_app(
             )
         try:
             loop = asyncio.get_running_loop()
-            # Rollover only acts on a clean completion, and always finishes
-            # (compaction item + pane recycle) before any queued message can
-            # start its own turn — so the two never race.
-            _cont = loop.create_task(
-                _finish_turn_and_maybe_roll_over(
-                    conv_id, clean=error is None and not was_interrupted
-                ),
-            )
+            _cont = loop.create_task(_check_and_start_next_turn(conv_id))
             _cont.add_done_callback(_background_tasks.discard)
             _background_tasks.add(_cont)
         except RuntimeError:
             pass
-
-    async def _finish_turn_and_maybe_roll_over(conv_id: str, *, clean: bool) -> None:
-        if clean:
-            await _maybe_apply_rollover(conv_id)
-        await _check_and_start_next_turn(conv_id)
 
     async def _maybe_apply_rollover(conv_id: str) -> None:
         """Cheap no-op for every non-rollover turn; the label gates all I/O below."""
@@ -8126,7 +8114,6 @@ def create_runner_app(
             extra={"session_id": conv_id},
         )
 
-    app.state.finish_turn_and_maybe_roll_over = _finish_turn_and_maybe_roll_over
     app.state.maybe_apply_rollover = _maybe_apply_rollover
     app.state.rollover_gates = _rollover_gates
     app.state.session_init_envelopes = _session_init_envelopes
@@ -10775,6 +10762,12 @@ def create_runner_app(
                     allow_history_preview_fallback=False,
                 )
             turn_completed = data.get("turn_completed") if isinstance(data, dict) else None
+            # A native turn truly ends at the CLI's completed-idle edge (delivery
+            # returns as soon as the prompt is typed), so rollover starts here.
+            if status == "idle" and (turn_completed is True or terminal_status == "completed"):
+                _rollover_task = asyncio.create_task(_maybe_apply_rollover(conversation_id))
+                _background_tasks.add(_rollover_task)
+                _rollover_task.add_done_callback(_background_tasks.discard)
             interrupt_pending = False
             interrupt_work_id: str | None = None
             if status == "idle" and terminal_status is None and turn_completed is not True:
