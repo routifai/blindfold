@@ -11,7 +11,6 @@ single-flight guard, and "never mid-turn".
 from __future__ import annotations
 
 import asyncio
-import time
 from typing import Any
 
 import pytest
@@ -37,12 +36,15 @@ class _FakeResponse:
 
 
 class _FakeServerClient(NullServerClient):
-    """Serves ``GET .../items`` from an in-memory item list and records
+    """Serves ``GET .../items`` from an in-memory item list, ``GET .../labels``
+    from an in-memory label map (the durable rollover-label cache's fallback
+    fetch when nothing has warmed it yet, as in these tests), and records
     ``POST .../events`` compaction writes — everything else falls back to
     :class:`NullServerClient`'s no-op stub."""
 
-    def __init__(self, items: list[dict[str, Any]]) -> None:
+    def __init__(self, items: list[dict[str, Any]], labels: dict[str, str] | None = None) -> None:
         self._items = items
+        self._labels = labels or {}
         self.posted_events: list[dict[str, Any]] = []
         self.posted_usage_events: list[dict[str, Any]] = []
 
@@ -51,6 +53,8 @@ class _FakeServerClient(NullServerClient):
         # gathered callers would run start-to-finish back to back, hiding a
         # broken single-flight guard behind an accidental lack of interleaving.
         await asyncio.sleep(0)
+        if url.endswith("/labels"):
+            return _FakeResponse({"labels": self._labels})
         if not url.endswith("/items"):
             return await super().get(url, **kwargs)
         params = kwargs.get("params") or {}
@@ -148,7 +152,7 @@ async def test_no_trigger_when_label_unset(monkeypatch: pytest.MonkeyPatch) -> N
     fetches items or posts a compaction event, even after many messages."""
     conv_id = "conv_rollover_unset"
     items = [_msg(f"m{i}", "user" if i % 2 == 0 else "assistant", f"msg {i}") for i in range(10)]
-    fake_client = _FakeServerClient(items)
+    fake_client = _FakeServerClient(items, labels={})
     pm = _FakeProcessManager(_ScriptedHarnessClient([]))
     app = create_runner_app(
         process_manager=pm,  # type: ignore[arg-type]
@@ -156,10 +160,6 @@ async def test_no_trigger_when_label_unset(monkeypatch: pytest.MonkeyPatch) -> N
         server_client=fake_client,
     )
     await _create_native_session(app, conv_id)
-    app.state.session_init_envelopes[conv_id] = (
-        time.monotonic(),
-        type("Envelope", (), {"snapshot": type("Snapshot", (), {"labels": {}})()})(),
-    )
 
     await app.state.maybe_apply_rollover(conv_id)
 
@@ -172,7 +172,11 @@ async def test_never_triggers_mid_turn(monkeypatch: pytest.MonkeyPatch) -> None:
     the session is in rollover mode and long past its threshold."""
     conv_id = "conv_rollover_midturn"
     items = [_msg(f"m{i}", "user" if i % 2 == 0 else "assistant", f"msg {i}") for i in range(10)]
-    fake_client = _FakeServerClient(items)
+    labels = {
+        "omnigent.context.mode": "rollover",
+        "omnigent.context.rollover_at_tokens": "1",
+    }
+    fake_client = _FakeServerClient(items, labels=labels)
     pm = _FakeProcessManager(_ScriptedHarnessClient([]))
     app = create_runner_app(
         process_manager=pm,  # type: ignore[arg-type]
@@ -180,14 +184,6 @@ async def test_never_triggers_mid_turn(monkeypatch: pytest.MonkeyPatch) -> None:
         server_client=fake_client,
     )
     await _create_native_session(app, conv_id)
-    labels = {
-        "omnigent.context.mode": "rollover",
-        "omnigent.context.rollover_at_tokens": "1",
-    }
-    app.state.session_init_envelopes[conv_id] = (
-        time.monotonic(),
-        type("Envelope", (), {"snapshot": type("Snapshot", (), {"labels": labels})()})(),
-    )
     monkeypatch.setattr("omnigent.runner.app._get_runner_llm_client", lambda: _FakeLLMClient())
 
     await app.state.finish_turn_and_maybe_roll_over(conv_id, clean=False)
@@ -203,7 +199,12 @@ async def test_triggers_and_recycles_pane_when_over_threshold(
     shaped like other producers' and recycles its native pane."""
     conv_id = "conv_rollover_trigger"
     items = [_msg(f"m{i}", "user" if i % 2 == 0 else "assistant", f"msg {i}") for i in range(10)]
-    fake_client = _FakeServerClient(items)
+    labels = {
+        "omnigent.context.mode": "rollover",
+        "omnigent.context.rollover_at_tokens": "1",
+        "omnigent.context.rollover_keep_messages": "2",
+    }
+    fake_client = _FakeServerClient(items, labels=labels)
     pm = _FakeProcessManager(_ScriptedHarnessClient([]))
     app = create_runner_app(
         process_manager=pm,  # type: ignore[arg-type]
@@ -211,15 +212,6 @@ async def test_triggers_and_recycles_pane_when_over_threshold(
         server_client=fake_client,
     )
     await _create_native_session(app, conv_id)
-    labels = {
-        "omnigent.context.mode": "rollover",
-        "omnigent.context.rollover_at_tokens": "1",
-        "omnigent.context.rollover_keep_messages": "2",
-    }
-    app.state.session_init_envelopes[conv_id] = (
-        time.monotonic(),
-        type("Envelope", (), {"snapshot": type("Snapshot", (), {"labels": labels})()})(),
-    )
     monkeypatch.setattr("omnigent.runner.app._get_runner_llm_client", lambda: _FakeLLMClient())
     fake_reaper = _FakeReaper()
     app.state.native_pane_reaper = fake_reaper
@@ -248,7 +240,8 @@ async def test_single_flight_guard_skips_concurrent_rollover(
     """A rollover already in flight for a session is never started twice."""
     conv_id = "conv_rollover_single_flight"
     items = [_msg("m0", "user", "hi")]
-    fake_client = _FakeServerClient(items)
+    labels = {"omnigent.context.mode": "rollover", "omnigent.context.rollover_at_tokens": "1"}
+    fake_client = _FakeServerClient(items, labels=labels)
     pm = _FakeProcessManager(_ScriptedHarnessClient([]))
     app = create_runner_app(
         process_manager=pm,  # type: ignore[arg-type]
@@ -256,17 +249,9 @@ async def test_single_flight_guard_skips_concurrent_rollover(
         server_client=fake_client,
     )
     await _create_native_session(app, conv_id)
-    labels = {"omnigent.context.mode": "rollover", "omnigent.context.rollover_at_tokens": "1"}
-    app.state.session_init_envelopes[conv_id] = (
-        time.monotonic(),
-        type("Envelope", (), {"snapshot": type("Snapshot", (), {"labels": labels})()})(),
-    )
 
-    # Simulate an in-progress rollover for this conversation by pre-seeding
-    # the runner's own single-flight guard set via the public hook: call
-    # maybe_apply_rollover concurrently and assert it never double-posts.
-    import asyncio
-
+    # maybe_apply_rollover is called concurrently; the single-flight guard
+    # must ensure it never double-posts regardless of interleaving.
     monkeypatch.setattr("omnigent.runner.app._get_runner_llm_client", lambda: _FakeLLMClient())
     await asyncio.gather(
         app.state.maybe_apply_rollover(conv_id),

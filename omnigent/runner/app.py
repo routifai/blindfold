@@ -7996,15 +7996,19 @@ def create_runner_app(
         """Cheap no-op for every non-rollover turn; the label gates all I/O below."""
         if not _is_native_harness(conv_id):
             return
-        envelope = _fresh_session_init_envelope(conv_id)
-        labels = envelope.snapshot.labels if envelope is not None else None
-        if not is_rollover(labels):
+        # Durable per-session cache (see _rollover_labels_for_session) — no
+        # per-turn label round trip for the common case, unlike a TTL cache.
+        mode_labels = await _rollover_labels_for_session(conv_id)
+        if not is_rollover(mode_labels):
             return
         if conv_id in _rollover_in_progress:
             return
         _rollover_in_progress.add(conv_id)
         try:
-            await _apply_rollover_if_over_threshold(conv_id, dict(labels or {}))
+            full_labels = await _session_labels_for_runner_spawn(
+                server_client=server_client, session_id=conv_id
+            )
+            await _apply_rollover_if_over_threshold(conv_id, dict(full_labels or {}))
         except Exception:  # noqa: BLE001 — never break the chat over a rollover failure
             _logger.warning(
                 "rollover check failed for %s; session continues un-rolled",
