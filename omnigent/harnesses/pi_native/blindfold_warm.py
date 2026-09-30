@@ -89,8 +89,8 @@ _SWEEP_INTERVAL_SECONDS = 60.0
 # Read-loop poll granularity while waiting on a turn's RPC events — bounds
 # how promptly an overall-timeout is noticed without busy-looping.
 _READ_POLL_SECONDS = 5.0
-# One session's own turn rarely produces more than a handful of items; 200 is
-# generous headroom for the post-turn "what did the record actually gain"
+# One turn rarely produces more than a handful of items; 200 is generous
+# headroom for the "what did the previous turn actually add to the record"
 # resync fetch (see _sync_seen_ids_after_turn) while staying a single page.
 _TRAILING_SYNC_FETCH_LIMIT = 200
 
