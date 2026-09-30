@@ -270,6 +270,7 @@ def _check_validity(
     model: str,
     prior_ids: list[str],
     recent_ids_ascending: list[str],
+    new_item_id: str | None,
 ) -> str:
     """Contract for reuse (see module docstring): system+memory text
     identical, model identical, process alive, and the assembler's
@@ -303,7 +304,15 @@ def _check_validity(
             # in a way this module doesn't model (e.g. compaction). Refuse
             # rather than guess.
             return "history_untraceable"
-        tail = recent_ids_ascending[recent_ids_ascending.index(anchor) :]
+        # Ground-truth tail since the anchor: everything the last turn(s)
+        # produced, EXCLUDING this turn's own new message -- that one isn't
+        # "prior" history (contract: the last ref is always the new
+        # message, and prior_ids never includes it).
+        tail = [
+            item_id
+            for item_id in recent_ids_ascending[recent_ids_ascending.index(anchor) :]
+            if item_id != new_item_id
+        ]
         expected = process.seen_item_ids[:-1] + tail
     if expected != prior_ids:
         return "history_mismatch"
@@ -516,6 +525,7 @@ async def run_warm_turn(
             model=model,
             prior_ids=prior_ids,
             recent_ids_ascending=recent_ids_ascending,
+            new_item_id=new_item_id,
         )
         reused = reason == "valid"
         if not reused:
