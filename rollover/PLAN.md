@@ -108,8 +108,9 @@ Worktree `omnigent-ro-harness`, branch `ro-harness`.
 
 Later: Pi (compaction in `resume.py`, a token estimate); a permission-gated
 `session_history` read of the same user's other chats (the main chat pulls from
-side chats, nothing is pushed, as in Muse); memory with an hourly consolidation
-job that runs only when there are new turns; and the time tag.
+side chats, nothing is pushed, as in Muse); memory with two paths, as in Muse: an immediate in-turn write to the injected
+memory block (from any chat), plus an hourly consolidation job that runs only
+when there are new turns and indexes memory for search; and the time tag.
 
 ## Rules for every agent
 
