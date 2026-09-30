@@ -32,15 +32,15 @@ const harnesses = [];
 // Build a fresh extension instance with its own temp inbox directory. Each call
 // produces independent closure state (activeResponseId, pendingInterruptUntil,
 // latestContext, ...).
-function makeHarness({ captureEvents = false, existingTools = [] } = {}) {
+function makeHarness({ captureEvents = false, existingTools = [], configOverrides = {} } = {}) {
   const inboxDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-native-inbox-"));
   const configPath = path.join(inboxDir, "config.json");
   // A serverUrl + sessionId make postEvent attempt a real fetch; with a mock
   // global fetch that lets a test capture the posted event bodies. Without
   // them postEvent fails closed (the interrupt tests rely on that).
   const config = captureEvents
-    ? { inboxDir, bridgeDir: inboxDir, serverUrl: "http://mock", sessionId: "conv_test" }
-    : { inboxDir, bridgeDir: inboxDir };
+    ? { inboxDir, bridgeDir: inboxDir, serverUrl: "http://mock", sessionId: "conv_test", ...configOverrides }
+    : { inboxDir, bridgeDir: inboxDir, ...configOverrides };
   fs.writeFileSync(configPath, JSON.stringify(config));
   process.env.OMNIGENT_PI_NATIVE_CONFIG = configPath;
 
@@ -48,6 +48,9 @@ function makeHarness({ captureEvents = false, existingTools = [] } = {}) {
   const postedEvents = [];
   if (captureEvents) {
     global.fetch = async (url, opts) => {
+      if (String(url).includes("/items")) {
+        return { ok: true, status: 200, json: async () => ({ data: [{ id: "item_last" }] }) };
+      }
       try {
         if (opts && typeof opts.body === "string" && String(url).endsWith("/events")) {
           postedEvents.push(JSON.parse(opts.body));
@@ -76,7 +79,7 @@ function makeHarness({ captureEvents = false, existingTools = [] } = {}) {
   const mod = require(EXT_PATH);
   mod(pi);
 
-  const h = { pi, handlers, inboxDir, postedEvents, registeredTools };
+  const h = { pi, handlers, inboxDir, postedEvents, registeredTools, mod };
   harnesses.push(h);
   return h;
 }
@@ -559,6 +562,127 @@ async function testQueuedPromptDuringStartupStaysRunningUntilAgentEnd() {
   }
 }
 
+// --- rollover session_before_compact coverage ---
+
+function makeRolloverConfig() {
+  return {
+    rollover: {
+      checkpointHeader: "HEADER-TEXT",
+      summarizerInstruction: "Write a state file for {today}.",
+      datePlaceholder: "{today}",
+    },
+  };
+}
+
+function testRolloverHandlerNotRegisteredOutsideRolloverMode() {
+  const h = makeHarness({ captureEvents: true });
+  assert(
+    "session_before_compact is not registered without a rollover config",
+    h.handlers.session_before_compact === undefined,
+  );
+}
+
+function testRolloverHandlerRegisteredForRolloverSessions() {
+  const h = makeHarness({ captureEvents: true, configOverrides: makeRolloverConfig() });
+  assert(
+    "session_before_compact IS registered for a rollover session",
+    typeof h.handlers.session_before_compact === "function",
+  );
+}
+
+async function testRolloverCompactionReturnsHeaderSummaryAndFirstKeptEntryId() {
+  const h = makeHarness({ captureEvents: true, configOverrides: makeRolloverConfig() });
+  let capturedInstructions = null;
+  h.mod.testHooks.loadPiCompactionApi = () => ({
+    generateSummary: async (
+      _messages,
+      _model,
+      _reserve,
+      _apiKey,
+      _headers,
+      _signal,
+      customInstructions,
+    ) => {
+      capturedInstructions = customInstructions;
+      return "SUMMARY BODY";
+    },
+  });
+  const ctx = {
+    model: { id: "m", provider: "p" },
+    modelRegistry: {
+      getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "key", headers: {} }),
+    },
+  };
+  const event = {
+    preparation: {
+      messagesToSummarize: [],
+      previousSummary: undefined,
+      tokensBefore: 12345,
+      firstKeptEntryId: "entry_7",
+      settings: { reserveTokens: 4096 },
+    },
+  };
+
+  const result = await h.handlers.session_before_compact(event, ctx);
+
+  const today = new Date().toISOString().slice(0, 10);
+  assert(
+    "the summarizer instruction's date placeholder is substituted before the call",
+    capturedInstructions === `Write a state file for ${today}.`,
+    String(capturedInstructions),
+  );
+  assert(
+    "the returned compaction carries the fixed checkpoint header + summary",
+    result && result.compaction && result.compaction.summary === "HEADER-TEXT\n\nSUMMARY BODY",
+    JSON.stringify(result),
+  );
+  assert(
+    "the returned compaction reuses Pi's OWN firstKeptEntryId/tokensBefore",
+    result.compaction.firstKeptEntryId === "entry_7" && result.compaction.tokensBefore === 12345,
+    JSON.stringify(result),
+  );
+  const compactionEvents = h.postedEvents.filter((e) => e.type === "compaction");
+  assert(
+    "a matching compaction item is reported to Omnigent",
+    compactionEvents.length === 1 &&
+      compactionEvents[0].data.summary === "HEADER-TEXT\n\nSUMMARY BODY" &&
+      compactionEvents[0].data.last_item_id === "item_last",
+    JSON.stringify(compactionEvents),
+  );
+}
+
+async function testRolloverCompactionFailsOpenOnSummarizerError() {
+  const h = makeHarness({ captureEvents: true, configOverrides: makeRolloverConfig() });
+  h.mod.testHooks.loadPiCompactionApi = () => ({
+    generateSummary: async () => {
+      throw new Error("boom");
+    },
+  });
+  const ctx = {
+    model: { id: "m", provider: "p" },
+    modelRegistry: { getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "key" }) },
+  };
+  const event = {
+    preparation: {
+      messagesToSummarize: [],
+      tokensBefore: 10,
+      firstKeptEntryId: "entry_1",
+      settings: {},
+    },
+  };
+
+  const result = await h.handlers.session_before_compact(event, ctx);
+
+  assert(
+    "a summarizer error falls back to Pi's own default compaction (undefined)",
+    result === undefined,
+  );
+  assert(
+    "no compaction item is reported to Omnigent on failure",
+    h.postedEvents.filter((e) => e.type === "compaction").length === 0,
+  );
+}
+
 (async () => {
   try {
     await testSessionStartupDoesNotCompleteATurn();
@@ -573,6 +697,10 @@ async function testQueuedPromptDuringStartupStaysRunningUntilAgentEnd() {
     await testAgentLoopInterruptFallbackNoIsIdleBeforeTurnStart();
     await testMidTurnInterruptFallbackNoIsIdle();
     await testAgentStartClearsStaleWindow();
+    testRolloverHandlerNotRegisteredOutsideRolloverMode();
+    testRolloverHandlerRegisteredForRolloverSessions();
+    await testRolloverCompactionReturnsHeaderSummaryAndFirstKeptEntryId();
+    await testRolloverCompactionFailsOpenOnSummarizerError();
   } finally {
     for (const h of harnesses) {
       if (h.pi.__omnigentInboxPoller) clearInterval(h.pi.__omnigentInboxPoller);

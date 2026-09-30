@@ -1118,6 +1118,157 @@ async function postModelOptions(config, ctx) {
 }
 
 /**
+ * Whether this session should own Pi's auto-compaction (rollover mode).
+ *
+ * Driven entirely by ``config.rollover``, written server-side only for a
+ * session labeled ``omnigent.context.mode=rollover`` (see
+ * ``omnigent/harnesses/pi_native/bridge.py:rollover_extension_config``). A
+ * non-rollover session's config carries no ``rollover`` key, so this stays
+ * false and the caller never registers the ``session_before_compact`` hook.
+ */
+function shouldHandleRolloverCompact(config) {
+  return Boolean(config && config.rollover && config.rollover.checkpointHeader);
+}
+
+/** Replace the summarizer instruction's date placeholder with today's date. */
+function applyTodayPlaceholder(instructionText, placeholder) {
+  if (typeof instructionText !== "string") return instructionText;
+  if (typeof placeholder !== "string" || !placeholder) return instructionText;
+  const today = new Date().toISOString().slice(0, 10);
+  return instructionText.split(placeholder).join(today);
+}
+
+/**
+ * Shape the value returned to Pi's ``session_before_compact`` hook.
+ *
+ * Prepends Omnigent's fixed :data:`CHECKPOINT_HEADER` (passed in via
+ * ``config.rollover.checkpointHeader`` — never hand-duplicated here) to the
+ * LLM-generated summary text, and carries Pi's OWN ``firstKeptEntryId`` /
+ * ``tokensBefore`` straight through from ``preparation`` (Pi already applied
+ * its whole-turn cut-point rules to compute them).
+ */
+function buildRolloverCompactionResult({
+  checkpointHeader,
+  summaryText,
+  firstKeptEntryId,
+  tokensBefore,
+}) {
+  const summary = `${checkpointHeader}\n\n${summaryText}`;
+  return {
+    summary,
+    result: { compaction: { summary, firstKeptEntryId, tokensBefore } },
+  };
+}
+
+/**
+ * Load Pi's own compaction API (``generateSummary``) lazily and defensively.
+ *
+ * Required at call time, not module load, so a Pi build/runtime that can't
+ * resolve the package (e.g. this file loaded outside Pi's jiti extension
+ * loader) degrades to Pi's own default compaction instead of crashing the
+ * session. Overridable via ``module.exports.testHooks`` for unit tests.
+ */
+function _loadPiCompactionApi() {
+  try {
+    // eslint-disable-next-line global-require
+    return require("@earendil-works/pi-coding-agent");
+  } catch (_err) {
+    return null;
+  }
+}
+
+/** The Omnigent item id to record as a rollover checkpoint's boundary. */
+async function fetchLastConversationItemId(config) {
+  if (!config || !config.serverUrl || !config.sessionId || typeof fetch !== "function") {
+    return null;
+  }
+  const url =
+    `${config.serverUrl}/v1/sessions/${encodeURIComponent(config.sessionId)}/items` +
+    "?limit=1&order=desc";
+  try {
+    const resp = await fetch(url, { headers: headers(config) });
+    if (!resp || !resp.ok) return null;
+    const json = await resp.json();
+    const data = Array.isArray(json && json.data) ? json.data : [];
+    return data.length && data[0] && typeof data[0].id === "string" ? data[0].id : null;
+  } catch (_err) {
+    return null;
+  }
+}
+
+/**
+ * Report a Pi-driven rollover compaction to Omnigent as a ``compaction``
+ * item (summary + boundary), the same item shape the pane-recycle path
+ * writes for claude-native/codex-native — so recall (``session_history``)
+ * and resume see one consistent checkpoint record regardless of harness.
+ */
+async function reportRolloverCompaction(config, { summary, model, tokensBefore }) {
+  const lastItemId = (await fetchLastConversationItemId(config)) || `pi-compact-${Date.now()}`;
+  await postEvent(config, {
+    type: "compaction",
+    data: {
+      summary,
+      last_item_id: lastItemId,
+      model: model || "unknown",
+      token_count: toInt(tokensBefore) || 0,
+    },
+  });
+}
+
+/**
+ * Handle Pi's ``session_before_compact`` for a rollover session: build
+ * Omnigent's state-file summary with Pi's own ``generateSummary`` and hand
+ * it back so Pi records ITS OWN ``CompactionEntry`` (no pane recycle — see
+ * ``rollover/PLAN.md``'s "Later: Pi" paragraph). Fails open on any error so
+ * Pi's default compaction still runs rather than stalling the session.
+ */
+async function handleRolloverBeforeCompact(config, event, ctx) {
+  const preparation = event && event.preparation;
+  if (!preparation) return undefined;
+  const model = ctx && ctx.model;
+  if (!ctx || !ctx.modelRegistry || typeof ctx.modelRegistry.getApiKeyAndHeaders !== "function") {
+    return undefined;
+  }
+  if (!model) return undefined;
+  const api = module.exports.testHooks.loadPiCompactionApi();
+  if (!api || typeof api.generateSummary !== "function") return undefined;
+  try {
+    const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+    if (!auth || auth.ok === false) return undefined;
+    const customInstructions = applyTodayPlaceholder(
+      config.rollover.summarizerInstruction,
+      config.rollover.datePlaceholder,
+    );
+    const settings = preparation.settings || {};
+    const summaryText = await api.generateSummary(
+      preparation.messagesToSummarize,
+      model,
+      settings.reserveTokens,
+      auth.apiKey,
+      auth.headers,
+      event.signal,
+      customInstructions,
+      preparation.previousSummary,
+    );
+    if (typeof summaryText !== "string" || !summaryText.trim()) return undefined;
+    const built = buildRolloverCompactionResult({
+      checkpointHeader: config.rollover.checkpointHeader,
+      summaryText,
+      firstKeptEntryId: preparation.firstKeptEntryId,
+      tokensBefore: preparation.tokensBefore,
+    });
+    await reportRolloverCompaction(config, {
+      summary: built.summary,
+      model: modelReference(model),
+      tokensBefore: preparation.tokensBefore,
+    });
+    return built.result;
+  } catch (_err) {
+    return undefined;
+  }
+}
+
+/**
  * Tell the runner's terminal watcher that Pi now accepts input: the inbox
  * poller is armed, so queued web messages will be delivered. The runner
  * clears the marker before each launch and logs ``native_input_ready`` when
@@ -1921,6 +2072,16 @@ module.exports = function (pi) {
     await publishTaskList();
   });
 
+  // Rollover sessions only (config.rollover is null otherwise — see
+  // rollover_extension_config): let Pi run its own compaction, but with
+  // Omnigent's state-file summary instead of Pi's default narrative one.
+  if (shouldHandleRolloverCompact(config)) {
+    pi.on("session_before_compact", async (event, ctx) => {
+      rememberContext(ctx);
+      return handleRolloverBeforeCompact(config, event, ctx);
+    });
+  }
+
   pi.on("model_select", async (event, ctx) => {
     rememberContext(ctx);
     // Mirror a model switch made inside the Pi TUI (the ``/model`` command or
@@ -2205,4 +2366,14 @@ module.exports = function (pi) {
       await postToolResult(result, responseId);
     }
   });
+};
+
+// Pure helpers plus an overridable loader, exposed for unit tests only —
+// Pi's jiti extension loader (``jiti.import(extensionPath, { default: true })``)
+// only ever touches the default export above.
+module.exports.testHooks = {
+  shouldHandleRolloverCompact,
+  buildRolloverCompactionResult,
+  applyTodayPlaceholder,
+  loadPiCompactionApi: _loadPiCompactionApi,
 };
