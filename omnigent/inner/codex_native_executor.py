@@ -49,6 +49,7 @@ from omnigent.inner.executor import (
     ExecutorError,
     ExecutorEvent,
     Message,
+    TextChunk,
     ToolSpec,
     TurnComplete,
 )
@@ -457,6 +458,31 @@ class CodexNativeExecutor(Executor):
         )
         if not input_items:
             yield ExecutorError(message="Codex native turn had no user input to send")
+            return
+        # Blindfold-mode sessions never use the resident app-server thread
+        # below — each turn is a disposable one-shot `codex exec` process per
+        # the context-assembly contract v0.2. No-op for every other session:
+        # it reads local bridge state written once at prepare time and
+        # returns immediately when that's absent or the label isn't set. See
+        # omnigent.harnesses.codex_native.blindfold.
+        from omnigent.harnesses.codex_native.blindfold import maybe_run_blindfold_turn
+
+        _blindfold_text = " ".join(
+            item["text"]
+            for item in input_items
+            if isinstance(item, dict) and item.get("type") == "text" and item.get("text")
+        )
+        blindfold_result = await maybe_run_blindfold_turn(
+            bridge_dir=self._bridge_dir,
+            session_id=self._request_session_id or "",
+            new_message_text=_blindfold_text,
+        )
+        if blindfold_result.handled:
+            if blindfold_result.error is not None:
+                yield ExecutorError(message=blindfold_result.error)
+                return
+            yield TextChunk(text=blindfold_result.response_text or "")
+            yield TurnComplete(response=blindfold_result.response_text)
             return
         # Wait for the bridge to boot OUTSIDE the injection lock. Poll quickly
         # during the expected startup window, then back off. Once state exists,

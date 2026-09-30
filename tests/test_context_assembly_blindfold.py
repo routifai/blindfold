@@ -7,6 +7,7 @@ pattern as tests/test_pi_native_resume.py.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -186,3 +187,61 @@ class TestFetchBlindfoldTurnContext:
     async def test_missing_fallback_instructions_yields_empty_system_prompt(self) -> None:
         ctx = await self._call(_handler(items_body={"data": []}), fallback_instructions=None)
         assert ctx.system_prompt == ""
+
+
+class TestServerConnectionFile:
+    def test_round_trips_base_url_and_headers(self, tmp_path: Path) -> None:
+        from omnigent.context_assembly.blindfold import (
+            read_server_connection,
+            write_server_connection,
+        )
+
+        write_server_connection(
+            tmp_path, base_url="http://host:8780", headers={"Authorization": "Bearer x"}
+        )
+        conn = read_server_connection(tmp_path)
+        assert conn is not None
+        assert conn.base_url == "http://host:8780"
+        assert conn.headers == {"Authorization": "Bearer x"}
+        assert conn.blindfolded is None
+
+    def test_persists_blindfolded_flag_when_labels_given(self, tmp_path: Path) -> None:
+        from omnigent.context_assembly.blindfold import (
+            read_server_connection,
+            write_server_connection,
+        )
+
+        write_server_connection(
+            tmp_path,
+            base_url="http://host:8780",
+            headers={},
+            labels={"omnigent.blindfold": "true"},
+        )
+        conn = read_server_connection(tmp_path)
+        assert conn is not None
+        assert conn.blindfolded is True
+
+    def test_persists_false_for_an_unlabelled_session(self, tmp_path: Path) -> None:
+        from omnigent.context_assembly.blindfold import (
+            read_server_connection,
+            write_server_connection,
+        )
+
+        write_server_connection(tmp_path, base_url="http://host:8780", headers={}, labels={})
+        conn = read_server_connection(tmp_path)
+        assert conn is not None
+        assert conn.blindfolded is False
+
+    def test_missing_file_returns_none(self, tmp_path: Path) -> None:
+        from omnigent.context_assembly.blindfold import read_server_connection
+
+        assert read_server_connection(tmp_path) is None
+
+    def test_malformed_file_returns_none(self, tmp_path: Path) -> None:
+        from omnigent.context_assembly.blindfold import (
+            _CONNECTION_FILE,
+            read_server_connection,
+        )
+
+        (tmp_path / _CONNECTION_FILE).write_text("not json", encoding="utf-8")
+        assert read_server_connection(tmp_path) is None

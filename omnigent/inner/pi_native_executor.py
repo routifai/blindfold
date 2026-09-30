@@ -19,6 +19,7 @@ from omnigent.inner.executor import (
     ExecutorError,
     ExecutorEvent,
     Message,
+    TextChunk,
     ToolSpec,
     TurnComplete,
 )
@@ -96,6 +97,24 @@ class PiNativeExecutor(Executor):
         text = _latest_user_text(messages, self._bridge_dir)
         if not text:
             yield ExecutorError(message="Pi native turn had no user text to send")
+            return
+        # Blindfold-mode sessions never use the resident extension-driven
+        # terminal below — see omnigent.harnesses.pi_native.blindfold for why
+        # (mirrors claude-native's own blindfold module). No-op for every
+        # other session.
+        from omnigent.harnesses.pi_native.blindfold import maybe_run_blindfold_turn
+
+        blindfold_result = await maybe_run_blindfold_turn(
+            bridge_dir=self._bridge_dir,
+            session_id=self._request_session_id or "",
+            new_message_text=text,
+        )
+        if blindfold_result.handled:
+            if blindfold_result.error is not None:
+                yield ExecutorError(message=blindfold_result.error)
+                return
+            yield TextChunk(text=blindfold_result.response_text or "")
+            yield TurnComplete(response=blindfold_result.response_text)
             return
         self._refresh_auth_headers()
         enqueue_user_message(self._bridge_dir, text)

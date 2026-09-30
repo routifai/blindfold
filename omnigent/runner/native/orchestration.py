@@ -598,6 +598,9 @@ class _CodexNativeLaunchConfig:
         pinned into the private ``config.toml`` at launch so the thread (and
         the TUI footer) start at it instead of the shared config's default.
         ``None`` leaves Codex's configured effort in place.
+    :param labels: This session's labels, read from the same snapshot fetch
+        (no extra round trip). Currently consumed only by the blindfold-mode
+        wiring's fast local "not blindfolded" path.
     """
 
     workspace: Path
@@ -613,6 +616,7 @@ class _CodexNativeLaunchConfig:
     routing_enabled: bool = False
     turn_routing: bool = False
     reasoning_effort: str | None = None
+    labels: dict[str, str] = dataclasses.field(default_factory=dict)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -647,6 +651,12 @@ class _PiNativeLaunchConfig:
     :param reasoning_effort: Persisted per-session effort, e.g. ``"high"``.
         Consumed by the pi-native launch as ``--thinking``; ``None`` leaves
         Pi's model default in place.
+    :param labels: This session's labels, read from the same snapshot fetch
+        (no extra round trip). Currently consumed only by the blindfold-mode
+        wiring (``write_server_connection``'s fast local "not blindfolded"
+        path) — the fork-directive labels above are parsed from this same
+        dict independently and kept as their own fields for clarity at their
+        call sites.
     """
 
     workspace: Path
@@ -658,6 +668,7 @@ class _PiNativeLaunchConfig:
     fork_carry_history: bool = False
     model_override: str | None = None
     reasoning_effort: str | None = None
+    labels: dict[str, str] = dataclasses.field(default_factory=dict)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1225,6 +1236,7 @@ async def _pi_native_launch_config(
         reasoning_effort=reasoning_effort
         if isinstance(reasoning_effort, str) and reasoning_effort
         else None,
+        labels=labels if isinstance(labels, dict) else {},
     )
 
 
@@ -1348,6 +1360,7 @@ async def _codex_native_launch_config(
         routing_enabled=routing_class.routing_enabled,
         turn_routing=routing_class.turn_routing,
         reasoning_effort=reasoning_effort,
+        labels=labels if isinstance(labels, dict) else {},
     )
 
 
@@ -2481,6 +2494,19 @@ async def _auto_create_pi_terminal(
     binding_token = _runner_tunnel_binding_token_from_env()
     if binding_token:
         auth_headers[RUNNER_TUNNEL_TOKEN_HEADER] = binding_token
+    # Blindfold-mode turns (omnigent.harnesses.pi_native.blindfold) run as
+    # disposable one-shot processes from inside the pi-native executor, a
+    # process that doesn't share this function's auth context. Persist how
+    # to reach the server into the bridge dir now, while a working URL +
+    # headers are in hand.
+    from omnigent.context_assembly.blindfold import write_server_connection
+
+    write_server_connection(
+        bridge_dir,
+        base_url=launch_config.server_url,
+        headers=auth_headers,
+        labels=launch_config.labels,
+    )
     # Build the Omnigent tool surface (sys_* tools) the Pi extension registers
     # via pi.registerTool. Reuses the same schema set the claude-native /
     # codex-native relay advertises, gated by the session's spec. Each tool's
@@ -4768,6 +4794,19 @@ async def _auto_create_codex_terminal(
     original_external_session_id = launch_config.external_session_id
     workspace = str(launch_config.workspace)
     bridge_dir = prepare_bridge_dir(session_id)
+    if server_client is not None:
+        # Blindfold-mode turns (omnigent.harnesses.codex_native.blindfold)
+        # run as disposable one-shot processes from inside the codex-native
+        # executor, a process that doesn't share this function's server
+        # client. Persist how to reach the server into the bridge dir now.
+        from omnigent.context_assembly.blindfold import write_server_connection
+
+        write_server_connection(
+            bridge_dir,
+            base_url=str(server_client.base_url),
+            headers=dict(server_client.headers),
+            labels=launch_config.labels,
+        )
     socket_path = socket_path_for_bridge_dir(bridge_dir)
     codex_home = codex_home_for_bridge_dir(bridge_dir)
     app_server = _AUTO_CODEX_APP_SERVERS.get(session_id)
@@ -8183,6 +8222,21 @@ async def _auto_create_claude_terminal(
 
     _runner_headers = databricks_request_headers(server_url, bearer_token=_auth_token)
     _runner_auth = _RunnerDatabricksAuth(_auth_factory)
+
+    # Blindfold-mode turns (see omnigent.harnesses.claude_native.blindfold)
+    # run as disposable one-shot processes from inside the claude-native
+    # executor, a process that doesn't share this function's auth context.
+    # Persist how to reach the server into the bridge dir now, while a
+    # working URL + headers are in hand, so every later turn can read them
+    # back locally instead of needing its own server-auth plumbing.
+    from omnigent.context_assembly.blindfold import write_server_connection
+
+    write_server_connection(
+        bridge_dir,
+        base_url=server_url,
+        headers=_runner_headers,
+        labels=session_init.snapshot.labels if session_init is not None else {},
+    )
 
     from omnigent.harnesses.claude_native.main import (
         build_native_claude_terminal_env,

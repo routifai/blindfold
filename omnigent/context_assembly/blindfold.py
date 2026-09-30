@@ -10,10 +10,14 @@ fail-closed default, so that logic lives in exactly one place.
 
 from __future__ import annotations
 
+import contextlib
+import json
 import logging
+import os
 import urllib.parse
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -22,6 +26,16 @@ from omnigent.context_assembly.labels import BLINDFOLD_LABEL
 from omnigent.context_assembly.models import AssembleResponse
 
 _logger = logging.getLogger(__name__)
+
+# Bridge-local file recording how a session's blindfold turns should reach
+# the Omnigent server. Written once by the runner-side code that first
+# prepares a native harness's bridge dir (it already holds a working server
+# URL + auth headers there); a blindfold turn runs inside the harness's
+# executor process, which may not share that code's environment but always
+# shares its filesystem — bridge_dir is the established place for exactly
+# this kind of local, co-located state (cf. each native harness's own bridge
+# state file).
+_CONNECTION_FILE = "omnigent-server-connection.json"
 
 # Contract §2 example; v0.2 has no per-harness/model budget catalog yet, so
 # every blindfolded turn asks for the same ceiling. Generous enough for the
@@ -45,6 +59,91 @@ def is_blindfolded(labels: dict[str, str] | None) -> bool:
     :returns: ``True`` only when ``omnigent.blindfold`` is exactly ``"true"``.
     """
     return bool(labels) and labels.get(BLINDFOLD_LABEL) == "true"
+
+
+def write_server_connection(
+    bridge_dir: Path,
+    *,
+    base_url: str,
+    headers: dict[str, str],
+    labels: dict[str, str] | None = None,
+) -> None:
+    """Persist how this session's blindfold turns should reach the server.
+
+    Best-effort and overwritten on every prepare, so a rotated/refreshed
+    token is picked up by the next turn. Static (not refresh-capable) — fine
+    for the single-user local test deployment this feature ships against
+    first; a multi-user deployment with short-lived bearer tokens would need
+    this refreshed more often than "once per bridge prepare".
+
+    :param bridge_dir: This session's native-harness bridge directory.
+    :param base_url: Omnigent server base URL, e.g.
+        ``"http://host.docker.internal:8780"``.
+    :param headers: Static auth headers to replay on the assemble/observe
+        calls.
+    :param labels: This session's labels, when cheaply available at the call
+        site (e.g. from an already-fetched session snapshot). Persisting
+        whether the session is blindfolded here lets every turn's
+        :func:`read_server_connection` skip a network round trip for the
+        (overwhelmingly common) non-blindfolded case — a turn otherwise pays
+        one ``GET /v1/sessions/{id}`` just to learn "no". ``None`` when
+        unavailable at the call site: the reader then reports "unknown" and
+        the caller falls back to checking over the network once.
+    """
+    path = bridge_dir / _CONNECTION_FILE
+    payload: dict[str, Any] = {"base_url": base_url, "headers": dict(headers)}
+    if labels is not None:
+        payload["blindfolded"] = is_blindfolded(labels)
+    tmp = path.with_suffix(".json.tmp")
+    try:
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        os.replace(tmp, path)
+        os.chmod(path, 0o600)
+    except OSError:
+        _logger.warning("Could not persist blindfold server connection at %s", path, exc_info=True)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            tmp.unlink()
+
+
+@dataclass
+class ServerConnection:
+    """How to reach the server, and whether this session is blindfolded.
+
+    :param base_url: Omnigent server base URL.
+    :param headers: Static auth headers.
+    :param blindfolded: ``True``/``False`` when known from the local file
+        (set at prepare time — see :func:`write_server_connection`), or
+        ``None`` when unknown — the caller must check over the network.
+    """
+
+    base_url: str
+    headers: dict[str, str]
+    blindfolded: bool | None
+
+
+def read_server_connection(bridge_dir: Path) -> ServerConnection | None:
+    """Read back what :func:`write_server_connection` persisted.
+
+    :param bridge_dir: This session's native-harness bridge directory.
+    :returns: The connection, or ``None`` when it was never written (not a
+        native-launch session) or is unreadable/malformed.
+    """
+    path = bridge_dir / _CONNECTION_FILE
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    base_url = raw.get("base_url")
+    headers = raw.get("headers")
+    if not isinstance(base_url, str) or not base_url or not isinstance(headers, dict):
+        return None
+    blindfolded = raw.get("blindfolded")
+    return ServerConnection(
+        base_url=base_url,
+        headers={str(k): str(v) for k, v in headers.items()},
+        blindfolded=blindfolded if isinstance(blindfolded, bool) else None,
+    )
 
 
 @dataclass

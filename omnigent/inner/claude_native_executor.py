@@ -38,6 +38,7 @@ from omnigent.inner.executor import (
     ExecutorError,
     ExecutorEvent,
     Message,
+    TextChunk,
     ToolSpec,
     TurnComplete,
     describe_exception,
@@ -182,6 +183,26 @@ class ClaudeNativeExecutor(Executor):
         notices = _latest_framework_notices(messages)
         if not text:
             yield ExecutorError(message="Claude native turn had no user text to send")
+            return
+        # Blindfold-mode sessions (label ``omnigent.blindfold=true``) never use
+        # the shared interactive pane below — each turn is a disposable
+        # one-shot CLI process per the context-assembly contract v0.2. A
+        # no-op for every other session: it reads local bridge state written
+        # once at prepare time and returns immediately when that's absent or
+        # the label isn't set. See omnigent.harnesses.claude_native.blindfold.
+        from omnigent.harnesses.claude_native.blindfold import maybe_run_blindfold_turn
+
+        blindfold_result = await maybe_run_blindfold_turn(
+            bridge_dir=self._bridge_dir,
+            session_id=self._request_session_id or "",
+            new_message_text=text,
+        )
+        if blindfold_result.handled:
+            if blindfold_result.error is not None:
+                yield ExecutorError(message=blindfold_result.error)
+                return
+            yield TextChunk(text=blindfold_result.response_text or "")
+            yield TurnComplete(response=blindfold_result.response_text)
             return
         if is_auth_slash_command(text):
             # Claude Code's sign-in flow is an interactive TUI handoff the
