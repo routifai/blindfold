@@ -56,8 +56,9 @@ every turn. Blindfold stays as an optional strict mode.
   `omnigent/`. Muse runs with `auto_compact_limit_tokens: -1`, meaning the
   runtime owns compaction. We need the same, or each CLI compacts silently on
   its own schedule.
-  - Claude Code's self-compaction reaches the record only as a plain user
-    message (`claude_native/bridge.py:8324`), not as a compaction item.
+  - Claude Code's self-compaction is already persisted upstream as a real
+    compaction item (`_persist_native_compaction_item`,
+    `claude_native/forwarder.py`).
   - Codex's self-compaction is mirrored as a compaction item
     (`codex_native/forwarder.py:6994`).
 - **Pi resume has no compaction handling** (0 hits in `pi_native/resume.py`),
