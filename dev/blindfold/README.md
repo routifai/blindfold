@@ -82,7 +82,6 @@ Not yet mapped: Codex's `mcp_tool_call`, `image_view`, and
 
 ## Known limits
 
-- A second turn in a blindfolded session can wait about a minute before it starts (runner turn tracking), not yet root-caused.
-- No streaming: the answer arrives when the one-shot finishes (see "Tool calls in the record" above — this applies to tool-call items too).
+- No streaming: the answer (and the turn's tool-call items) arrive when the one-shot finishes.
 - Blindfold applies to runner-launched sessions (web UI, API); a `omnigent claude` launched by hand from a terminal is not blindfolded.
 - Without the probe's "do not run any tools" instruction, agentic models may search the disk (`env`, `find`, `grep`) and read files that exist in the workspace — that's tool access, not injected context.

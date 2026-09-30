@@ -11418,6 +11418,46 @@ def create_runner_app(
             content=session_resource_view_to_dict(resource_view),
         )
 
+    def _native_session_confirmed_blindfolded(conv_id: str, terminal_name: str) -> bool:
+        """Whether *conv_id* is a blindfolded session, checked purely locally.
+
+        A blindfolded session's ``_auto_create_*_terminal`` never registers a
+        resident pane (see the blindfold guard added to each of those
+        functions in ``omnigent/runner/native/orchestration.py``), so the
+        per-turn pane self-heal below must not try to heal — or even probe
+        for — a pane that by design does not exist. Checked the same way
+        ``maybe_run_blindfold_turn`` itself checks it: a local, synchronous
+        read of the bridge-local connection file written at bridge-prepare
+        time — no network call, and ``False`` whenever that file is missing
+        or unreadable (every non-blindfold session, and a bridge_id
+        reassigned away from the session id).
+
+        :param conv_id: Omnigent conversation id.
+        :param terminal_name: Terminal short-name, e.g. ``"claude"``.
+        :returns: ``True`` only when locally confirmed blindfolded.
+        """
+        try:
+            from omnigent.context_assembly.blindfold import read_server_connection
+
+            if terminal_name == "claude":
+                from omnigent.harnesses.claude_native.bridge import (
+                    bridge_dir_for_bridge_id as _bridge_dir_for_bridge_id,
+                )
+            elif terminal_name == "codex":
+                from omnigent.harnesses.codex_native.bridge import (
+                    bridge_dir_for_bridge_id as _bridge_dir_for_bridge_id,
+                )
+            elif terminal_name == "pi":
+                from omnigent.harnesses.pi_native.bridge import (
+                    bridge_dir_for_session_id as _bridge_dir_for_bridge_id,
+                )
+            else:
+                return False
+            connection = read_server_connection(_bridge_dir_for_bridge_id(conv_id))
+        except (OSError, ImportError, ValueError):
+            return False
+        return connection is not None and connection.blindfolded is True
+
     async def _ensure_native_terminal_for_turn(conv_id: str, harness_name: str | None) -> None:
         """Re-create a reaped native pane before forwarding a turn (self-heal).
 
@@ -11446,6 +11486,16 @@ def create_runner_app(
         """
         terminal_name = native_terminal_name(harness_name)
         if terminal_name is None:
+            return
+        if _native_session_confirmed_blindfolded(conv_id, terminal_name):
+            # A blindfolded session never has a resident pane to heal — every
+            # turn is a disposable one-shot process (see
+            # omnigent.harnesses.*_native.blindfold) that never registers one
+            # in the first place (see the blindfold guard in each
+            # ``_auto_create_*_terminal``). Skip the registry probe and the
+            # ``create_session_terminal`` round trip entirely so a blindfold
+            # turn's dispatch never waits on (or repeatedly re-preps) a pane
+            # that will never exist.
             return
         terminal_registry = resource_registry.terminal_registry if resource_registry else None
         if terminal_registry is None:

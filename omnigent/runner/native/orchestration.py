@@ -2433,7 +2433,7 @@ async def _auto_create_pi_terminal(
     server_client: httpx.AsyncClient | None,
     agent_spec: AgentSpec | ResolvedSpec | None = None,
     ensure_comment_relay: _EnsureCommentRelay | None = None,
-) -> SessionResourceView:
+) -> SessionResourceView | None:
     """
     Auto-create a Pi terminal for a pi-native session.
 
@@ -2446,7 +2446,8 @@ async def _auto_create_pi_terminal(
         terminal inherits the agent's ``os_env.sandbox`` rather than falling
         back to the platform default. ``None`` only when the session has no
         spec; callers must not pass ``None`` to paper over a resolution error.
-    :returns: Created terminal resource view.
+    :returns: Created terminal resource view, or ``None`` when *session_id*
+        is confirmed blindfolded at launch — there is no resident pane.
     """
     await _cancel_auto_forwarder_task(session_id)
     from omnigent.conversation_browser import conversation_url
@@ -2499,7 +2500,7 @@ async def _auto_create_pi_terminal(
     # process that doesn't share this function's auth context. Persist how
     # to reach the server into the bridge dir now, while a working URL +
     # headers are in hand.
-    from omnigent.context_assembly.blindfold import write_server_connection
+    from omnigent.context_assembly.blindfold import read_server_connection, write_server_connection
 
     write_server_connection(
         bridge_dir,
@@ -2507,6 +2508,28 @@ async def _auto_create_pi_terminal(
         headers=auth_headers,
         labels=launch_config.labels,
     )
+
+    # A blindfolded session's turns never touch this pane (see
+    # omnigent.harnesses.pi_native.blindfold): every turn is a disposable
+    # ``pi --print`` one-shot the executor runs directly against the
+    # server-connection file just written above. See the matching guard in
+    # _auto_create_claude_terminal for the full rationale (vendor-memory
+    # leak through the terminal view, a wasted resident process, and that
+    # pane's own exit being what used to fail the active turn and stall the
+    # next one) and for why this reads the file back instead of branching on
+    # ``launch_config.labels`` directly (this function is also reached with
+    # no labels at all, e.g. the terminal-view UI's "ensure" endpoint).
+    _pi_connection = read_server_connection(bridge_dir)
+    if _pi_connection is not None and _pi_connection.blindfolded is True:
+        _logger.info(
+            "blindfold: skipping resident Pi terminal for session=%s "
+            "(bridge dir prepared; one-shot turns read the server-connection "
+            "file written above)",
+            session_id,
+            extra={"session_id": session_id},
+        )
+        return None
+
     # Build the Omnigent tool surface (sys_* tools) the Pi extension registers
     # via pi.registerTool. Reuses the same schema set the claude-native /
     # codex-native relay advertises, gated by the session's spec. Each tool's
@@ -4717,9 +4740,13 @@ async def _auto_create_codex_terminal(
     agent_spec: AgentSpec | ResolvedSpec | None = None,
     server_client: httpx.AsyncClient | None = None,
     ensure_comment_relay: _EnsureCommentRelay | None = None,
-) -> SessionResourceView:
+) -> SessionResourceView | None:
     """
     Auto-create a Codex terminal for a codex-native session.
+
+    Returns ``None`` instead of booting the app-server/TUI when *session_id*
+    is confirmed blindfolded at launch — there is no resident pane or
+    app-server for the caller to observe.
 
     Called when the runner receives a codex-native session via
     ``POST /v1/sessions`` or an explicit terminal ensure request and no
@@ -4811,6 +4838,28 @@ async def _auto_create_codex_terminal(
                 headers=dict(server_client.headers),
                 labels=launch_config.labels,
             )
+
+    # A blindfolded session's turns never touch the codex TUI or its
+    # app-server (see omnigent.harnesses.codex_native.blindfold): every turn
+    # is a disposable ``codex exec`` one-shot the executor runs directly
+    # against the server-connection file just written above. See the
+    # matching guard in _auto_create_claude_terminal for the full rationale
+    # and for why this reads the file back instead of branching on
+    # ``launch_config.labels`` directly (this function is also reached with
+    # no labels at all, e.g. the terminal-view UI's "ensure" endpoint).
+    from omnigent.context_assembly.blindfold import read_server_connection
+
+    _codex_connection = read_server_connection(bridge_dir)
+    if _codex_connection is not None and _codex_connection.blindfolded is True:
+        _logger.info(
+            "blindfold: skipping resident Codex terminal/app-server for session=%s "
+            "(bridge dir prepared; one-shot turns read the server-connection "
+            "file written above)",
+            session_id,
+            extra={"session_id": session_id},
+        )
+        return None
+
     socket_path = socket_path_for_bridge_dir(bridge_dir)
     codex_home = codex_home_for_bridge_dir(bridge_dir)
     app_server = _AUTO_CODEX_APP_SERVERS.get(session_id)
@@ -7681,6 +7730,38 @@ def _native_terminal_start_error_response(
     )
 
 
+def _blindfold_no_terminal_response(runtime_name: str) -> JSONResponse:
+    """
+    Return the ensure-path response for a blindfolded session's terminal.
+
+    A blindfolded session's ``auto_create_terminal`` adapter returns
+    ``None`` instead of a resource view — it never launches a resident
+    pane (see the blindfold guard in each ``_auto_create_*_terminal``).
+    There is nothing to attach to, so the terminal-view UI gets a clear
+    "not available" instead of a crash on a missing resource.
+
+    Must be a 2xx: the server's own ``_ensure_native_terminal_ready``
+    treats this same endpoint as "the authoritative readiness check for
+    native user messages" and fails the whole user turn on any non-2xx
+    response (see its docstring) — a blindfolded session's turns run fine
+    with no terminal at all, so "no terminal" here must read as success,
+    not as the native pane having failed to start.
+
+    :param runtime_name: Human-readable runtime name, e.g. ``"Claude Code"``.
+    :returns: HTTP 200 response describing the absent terminal.
+    """
+    return JSONResponse(
+        status_code=200,
+        content={
+            "blindfolded": True,
+            "message": (
+                f"{runtime_name} runs as disposable one-shot turns in "
+                "blindfold mode; there is no interactive terminal to open."
+            ),
+        },
+    )
+
+
 def _codex_ensure_response_with_policy_notice(
     session_id: str, terminal_view: SessionResourceView
 ) -> JSONResponse:
@@ -8051,9 +8132,13 @@ async def _auto_create_claude_terminal(
     auth_token_factory: Callable[[], str | None] | None = None,
     resolve_launch_config: Callable[[], Awaitable[ClaudeNativeUcodeConfig | None]] | None = None,
     record_launch_config: Callable[[str, ClaudeNativeUcodeConfig | None], None] | None = None,
-) -> SessionResourceView:
+) -> SessionResourceView | None:
     """
     Auto-create a Claude Code terminal for a claude-native session.
+
+    Returns ``None`` instead of launching anything when *session_id* is
+    confirmed blindfolded at launch (see the blindfold guard below) — there
+    is no resident pane for the caller to observe.
 
     Called when the runner receives a claude-native session via
     ``POST /v1/sessions`` and no terminal exists yet. This handles
@@ -8233,14 +8318,50 @@ async def _auto_create_claude_terminal(
     # Persist how to reach the server into the bridge dir now, while a
     # working URL + headers are in hand, so every later turn can read them
     # back locally instead of needing its own server-auth plumbing.
-    from omnigent.context_assembly.blindfold import write_server_connection
+    from omnigent.context_assembly.blindfold import read_server_connection, write_server_connection
 
+    _claude_launch_labels = session_init.snapshot.labels if session_init is not None else None
     write_server_connection(
         bridge_dir,
         base_url=server_url,
         headers=_runner_headers,
-        labels=session_init.snapshot.labels if session_init is not None else None,
+        labels=_claude_launch_labels,
     )
+
+    # A blindfolded session's turns never touch this pane at all (see
+    # omnigent.harnesses.claude_native.blindfold): every turn is a disposable
+    # ``claude -p`` one-shot the executor runs directly, using only the
+    # server-connection file just written above. Launching a resident,
+    # interactive Claude Code TUI here anyway would (a) give a person typing
+    # in the terminal-view UI a live CLI with its own vendor memory —
+    # breaking blindfold's "sees only what the assembler hands it" guarantee
+    # — (b) burn a process + forwarder per session for a pane blindfold
+    # never drives, and (c) that unused pane's own eventual exit is what used
+    # to spuriously fail the active one-shot turn and stall the next one (see
+    # the reverted _required_terminal_exit_is_blindfold_noise guard this
+    # replaces).
+    #
+    # Read the connection file back rather than branching on
+    # ``_claude_launch_labels`` directly: this function is also reached with
+    # ``session_init=None`` (e.g. the terminal-view UI's "ensure" endpoint,
+    # or a forked per-turn worker's own cold path) — a caller with no labels
+    # to hand ``write_server_connection`` above, which by design never
+    # overwrites a connection file an earlier, labels-bearing call already
+    # wrote (see its docstring). Reading it back gives every caller the same
+    # answer regardless of whether *this* call happened to carry labels.
+    # Fails open (launches the real pane, today's behavior) only when the
+    # file has never been written at all — this session has never been
+    # positively confirmed blindfolded by anyone.
+    _claude_connection = read_server_connection(bridge_dir)
+    if _claude_connection is not None and _claude_connection.blindfolded is True:
+        _logger.info(
+            "blindfold: skipping resident Claude terminal for session=%s "
+            "(bridge dir prepared; one-shot turns read the server-connection "
+            "file written above)",
+            session_id,
+            extra={"session_id": session_id},
+        )
+        return None
 
     from omnigent.harnesses.claude_native.main import (
         build_native_claude_terminal_env,
@@ -9415,7 +9536,7 @@ class PreLaunchResult:
     needs_terminal: bool = True
 
 
-async def _launch_pi(ctx: NativeLaunchContext) -> SessionResourceView:
+async def _launch_pi(ctx: NativeLaunchContext) -> SessionResourceView | None:
     """Adapter: build the pi-native terminal from a launch context."""
     return await _auto_create_pi_terminal(
         ctx.session_id,
@@ -9519,7 +9640,7 @@ async def _launch_kimi(ctx: NativeLaunchContext) -> SessionResourceView:
     )
 
 
-async def _launch_codex(ctx: NativeLaunchContext) -> SessionResourceView:
+async def _launch_codex(ctx: NativeLaunchContext) -> SessionResourceView | None:
     """Adapter: build the codex-native terminal from a launch context."""
     return await _auto_create_codex_terminal(
         ctx.session_id,
@@ -9544,7 +9665,7 @@ async def _launch_antigravity(ctx: NativeLaunchContext) -> SessionResourceView:
     )
 
 
-async def _launch_claude(ctx: NativeLaunchContext) -> SessionResourceView:
+async def _launch_claude(ctx: NativeLaunchContext) -> SessionResourceView | None:
     """Adapter: build the claude-native terminal from a launch context.
 
     ``server_client`` is required by the builder; the claude launch arm always
@@ -9806,6 +9927,11 @@ async def _ensure_native_terminal(
                 ),
             )
             view = await adapter(ctx)
+            if view is None:
+                # Confirmed blindfolded at launch — no resident pane exists
+                # or ever will for this session (see the blindfold guard in
+                # each ``_auto_create_*_terminal``). Nothing to attach to.
+                return _blindfold_no_terminal_response(agent.display_name)
             _logger.info(
                 "Native terminal started",
                 extra=debug_event(
