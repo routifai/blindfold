@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Super Chat Rollover</title>
+<style>
+:root{
+  --bg:#fbfaf7;--fg:#1d1d1b;--muted:#6b6a64;--line:#e3e0d8;--card:#ffffff;
+  --accent:#2f6fde;--accent-soft:#e8f0fd;--ok:#1f8a4c;--ok-soft:#e5f4ea;--warn:#b5651d;--warn-soft:#fbefe2;
+  --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --bg:#141413;--fg:#ecebe6;--muted:#9c9a92;--line:#2c2b28;--card:#1c1c1a;
+  --accent:#7aa7ff;--accent-soft:#1d2a44;--ok:#5cc98a;--ok-soft:#16301f;--warn:#e6a15c;--warn-soft:#35261a;}}
+:root[data-theme="dark"]{
+  --bg:#141413;--fg:#ecebe6;--muted:#9c9a92;--line:#2c2b28;--card:#1c1c1a;
+  --accent:#7aa7ff;--accent-soft:#1d2a44;--ok:#5cc98a;--ok-soft:#16301f;--warn:#e6a15c;--warn-soft:#35261a;}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:980px;margin:0 auto;padding:40px 16px 80px}
+h1{font-size:2rem;margin:0 0 .3rem;letter-spacing:-.01em}
+h2{font-size:1.3rem;margin:2.6rem 0 .8rem;padding-top:1rem;border-top:1px solid var(--line)}
+h3{font-size:1.02rem;margin:1.4rem 0 .4rem}
+p{margin:.5rem 0}
+.lede{color:var(--muted);font-size:1.08rem;max-width:720px}
+.pill{display:inline-block;font-size:.78rem;padding:2px 9px;border-radius:99px;background:var(--accent-soft);color:var(--accent);font-weight:600}
+code{font-family:var(--mono);font-size:.88em;background:var(--accent-soft);padding:1px 5px;border-radius:4px}
+pre{font-family:var(--mono);font-size:.86rem;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px;overflow-x:auto}
+.grid3{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px;margin-top:1rem}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px}
+.card h3{margin-top:0}
+.card .n{font-family:var(--mono);color:var(--accent);font-weight:700;font-size:.85rem}
+.tw{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:.92rem;margin:.6rem 0}
+th,td{text-align:left;vertical-align:top;padding:8px 10px;border-bottom:1px solid var(--line)}
+th{font-size:.8rem;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
+.have{color:var(--ok);font-weight:600}.miss{color:var(--warn);font-weight:600}
+figure{margin:1.2rem 0;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px}
+figure svg{width:100%;height:auto;display:block;color:var(--fg)}
+figcaption{color:var(--muted);font-size:.88rem;margin-top:8px}
+.cmp{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+@media (max-width:640px){.cmp{grid-template-columns:1fr}}
+.cmp .card.bad{border-color:var(--warn)}.cmp .card.good{border-color:var(--ok)}
+ul{padding-left:1.2rem}li{margin:.25rem 0}
+.phase{display:grid;grid-template-columns:44px 1fr;gap:12px;padding:12px 0;border-bottom:1px solid var(--line)}
+.phase .num{font-family:var(--mono);font-weight:700;color:var(--accent);font-size:1.3rem}
+.muted{color:var(--muted)}
+</style>
+</head>
+<body>
+<main>
+<span class="pill">design · no code yet · branch rollover-muse</span>
+<h1>Super chat rollover</h1>
+<p class="lede">One long-running chat that feels like a normal session: streaming, steering, prompt cache. Omnigent decides what the model carries forward, and the agent can still reach every message ever sent. The same shape as Meta Muse and Rakazo.</p>
+
+<div class="grid3">
+  <div class="card"><div class="n">01 · LIVE</div><h3>A normal resident session</h3><p>One native CLI (Claude Code, Codex, Pi) stays running between turns. Streaming, mid-turn steering, prompt cache and tool calls all work as they do upstream.</p></div>
+  <div class="card"><div class="n">02 · ROLLOVER</div><h3>Omnigent owns compaction</h3><p>When the context gets long, Omnigent writes a summary checkpoint and restarts the CLI from <em>summary + recent messages + memory</em>. Between turns only.</p></div>
+  <div class="card"><div class="n">03 · RECALL</div><h3>The summary is a pointer, not the truth</h3><p>A read-only tool pages and searches the full record, so "what was my first message?" gets an exact answer.</p></div>
+</div>
+
+<h2>Blindfold every turn vs rollover</h2>
+<div class="cmp">
+  <div class="card bad"><h3>Blindfold (built, strict mode)</h3>
+    <ul><li>A new CLI session every turn</li><li>No streaming, no steering</li><li>No warm prompt cache</li><li>A ~60 s web-UI hold on turn 2 and later (open)</li><li>Strict guarantee: the model never sees more than N messages</li></ul></div>
+  <div class="card good"><h3>Rollover (proposed, super chat)</h3>
+    <ul><li>A new CLI session only at rollover</li><li>Streaming and steering on every turn</li><li>The cache stays warm between rollovers</li><li>A fresh session costs about 0.5 s, once per rollover</li><li>The model sees summary + recent messages; recall fetches the rest exactly</li></ul></div>
+</div>
+
+<h2>One rollover, end to end</h2>
+<figure>
+<svg viewBox="0 0 940 330" role="img" aria-label="After a turn, the server estimates context tokens; above the threshold, the assembler writes a compaction item and the pane is recycled; the next turn relaunches the CLI from the compaction item.">
+  <defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <g font-family="system-ui,sans-serif" font-size="12.5" fill="currentColor">
+    <rect x="10" y="30" width="160" height="62" rx="10" fill="none" stroke="currentColor"/>
+    <text x="90" y="56" text-anchor="middle" font-weight="600">Turn N finishes</text>
+    <text x="90" y="74" text-anchor="middle" opacity=".7">resident CLI, streamed</text>
+
+    <rect x="230" y="30" width="190" height="62" rx="10" fill="none" stroke="currentColor"/>
+    <text x="325" y="56" text-anchor="middle" font-weight="600">Estimate context tokens</text>
+    <text x="325" y="74" text-anchor="middle" opacity=".7">since the last compaction item</text>
+
+    <rect x="480" y="30" width="200" height="62" rx="10" fill="none" stroke="#2f6fde" stroke-width="2"/>
+    <text x="580" y="56" text-anchor="middle" font-weight="600">Assembler builds the rollover</text>
+    <text x="580" y="74" text-anchor="middle" opacity=".7">summary + recent + memory</text>
+
+    <rect x="740" y="30" width="190" height="62" rx="10" fill="none" stroke="currentColor"/>
+    <text x="835" y="56" text-anchor="middle" font-weight="600">Write compaction item</text>
+    <text x="835" y="74" text-anchor="middle" opacity=".7">POST /events type=compaction</text>
+
+    <line x1="170" y1="61" x2="226" y2="61" stroke="currentColor" marker-end="url(#ar)"/>
+    <line x1="420" y1="61" x2="476" y2="61" stroke="currentColor" marker-end="url(#ar)"/>
+    <text x="448" y="52" text-anchor="middle" font-size="11">over threshold</text>
+    <line x1="680" y1="61" x2="736" y2="61" stroke="currentColor" marker-end="url(#ar)"/>
+
+    <line x1="325" y1="92" x2="325" y2="150" stroke="currentColor" stroke-dasharray="4 4" marker-end="url(#ar)"/>
+    <text x="335" y="128" font-size="11">under: nothing happens</text>
+
+    <line x1="835" y1="92" x2="835" y2="150" stroke="currentColor" marker-end="url(#ar)"/>
+    <rect x="740" y="154" width="190" height="62" rx="10" fill="none" stroke="currentColor"/>
+    <text x="835" y="180" text-anchor="middle" font-weight="600">Recycle the pane</text>
+    <text x="835" y="198" text-anchor="middle" opacity=".7">same path as the idle reaper</text>
+
+    <line x1="740" y1="185" x2="684" y2="185" stroke="currentColor" marker-end="url(#ar)"/>
+    <rect x="480" y="154" width="200" height="62" rx="10" fill="none" stroke="currentColor"/>
+    <text x="580" y="180" text-anchor="middle" font-weight="600">Turn N+1 arrives</text>
+    <text x="580" y="198" text-anchor="middle" opacity=".7">ensure path relaunches the CLI</text>
+
+    <line x1="480" y1="185" x2="424" y2="185" stroke="currentColor" marker-end="url(#ar)"/>
+    <rect x="230" y="154" width="190" height="62" rx="10" fill="none" stroke="#1f8a4c" stroke-width="2"/>
+    <text x="325" y="180" text-anchor="middle" font-weight="600">Resume rebuilder</text>
+    <text x="325" y="198" text-anchor="middle" opacity=".7">starts at the latest compaction</text>
+
+    <line x1="230" y1="185" x2="174" y2="185" stroke="currentColor" marker-end="url(#ar)"/>
+    <rect x="10" y="154" width="160" height="62" rx="10" fill="none" stroke="currentColor"/>
+    <text x="90" y="180" text-anchor="middle" font-weight="600">Fresh CLI session</text>
+    <text x="90" y="198" text-anchor="middle" opacity=".7">summary + recent only</text>
+
+    <rect x="10" y="256" width="920" height="56" rx="10" fill="none" stroke="currentColor" stroke-dasharray="3 5"/>
+    <text x="470" y="280" text-anchor="middle" font-weight="600">The full record in Omnigent's database is never trimmed</text>
+    <text x="470" y="298" text-anchor="middle" opacity=".7">The UI shows the whole chat plus a compaction marker · the recall tool reads from here</text>
+  </g>
+</svg>
+<figcaption>The green box already exists for Claude Code and Codex: their resume rebuilders start from the latest <code>compaction</code> item. The blue box is new: the assembler decides what goes into that item.</figcaption>
+</figure>
+
+<h2>What Omnigent already has</h2>
+<p class="muted">Every row was checked in the code on branch <code>rollover-muse</code>.</p>
+<div class="tw"><table>
+<tr><th>Piece</th><th>Where</th><th>Status</th></tr>
+<tr><td><code>compaction</code> item (summary, <code>last_item_id</code>, <code>compacted_messages</code>)</td><td><code>entities/conversation.py:491</code>, <code>routes_events.py:1465</code></td><td class="have">have</td></tr>
+<tr><td>Claude resume starts from the latest compaction</td><td><code>claude_native/main.py:5580</code></td><td class="have">have</td></tr>
+<tr><td>Codex resume starts from the latest compaction</td><td><code>codex_native/main.py:2249</code></td><td class="have">have</td></tr>
+<tr><td>Kill the pane, then relaunch it with the rebuilt history</td><td><code>runner/app.py:13852</code>, <code>app.py:11461</code></td><td class="have">have (idle-only today)</td></tr>
+<tr><td>LLM summarizer (can run on the runner's credentials)</td><td><code>runtime/compaction.py:350</code></td><td class="have">have</td></tr>
+<tr><td>Token usage from Claude and Codex</td><td><code>external_session_usage</code> from the forwarders</td><td class="have">have</td></tr>
+<tr><td>Full-text search scoped to one session</td><td><code>ConversationStore.search(conversation_id=…)</code></td><td class="have">have (not exposed)</td></tr>
+<tr><td>MCP relay into native CLIs</td><td><code>serve-mcp</code> (Claude, Codex), <code>/mcp</code> proxy (Pi)</td><td class="have">have</td></tr>
+<tr><td>Compaction marker in the UI</td><td><code>web/…/StatusBlocks.tsx</code></td><td class="have">have</td></tr>
+<tr><td>CLIs' own auto-compaction turned off</td><td>no reference anywhere in <code>omnigent/</code></td><td class="miss">missing</td></tr>
+<tr><td>Pi resume handles compaction</td><td><code>pi_native/resume.py</code>: 0 hits</td><td class="miss">missing</td></tr>
+<tr><td>Pi token usage</td><td>not reported</td><td class="miss">missing</td></tr>
+<tr><td>Recall tool scoped to the agent's own session</td><td><code>search_conversations</code> searches every conversation</td><td class="miss">missing</td></tr>
+</table></div>
+
+<h2>The pieces</h2>
+<h3>Mode switch</h3>
+<p>The label <code>omnigent.context.mode</code>: unset means upstream (side chats, the default); <code>rollover</code> is the super chat; <code>blindfold</code> is strict mode. Side chats drop the label.</p>
+<h3>Trigger</h3>
+<p>Checked after each turn: the tokens since the latest compaction item, plus system text and memory. Real usage is used where the forwarder reports it; otherwise <code>count_tokens</code>. The default threshold is <strong>45% of the model's window</strong>, following Muse's 150k of 350k, which leaves room for a heavy tool turn.</p>
+<h3>Rollover content</h3>
+<p>A rolling summary (<code>summarize_history</code> over everything since the last checkpoint, merged with the previous summary), plus the last 20 messages with their tool calls, plus memory. All of it is written as one <code>compaction</code> item.</p>
+<h3>Owning compaction</h3>
+<p>For <code>rollover</code> sessions, each CLI's own auto-compaction is off at launch. <strong>The exact flag for each CLI must be verified against the real CLI first.</strong> As a safety net, a CLI-side compaction is detected, the way the Codex forwarder already does.</p>
+<h3>Recall tool</h3>
+<pre>session_history(action="read", before=&lt;item id&gt;, limit=5)   # page backward · default 5 · max 20
+session_history(action="search", query="…", limit=10)          # FTS scoped to this session
+session_history(action="status")                                # tokens used · window · left before rollover</pre>
+<p>Read-only and scoped to the calling session; reading other chats is permission-gated. The tool and the system text carry the rule: <em>"The summary may omit details. When earlier context matters, recover it before answering."</em></p>
+<h3>Memory (phase 4)</h3>
+<p>A small curated memory block injected at every turn and every rollover; <code>memory_search</code> and <code>memory_write</code> (the agent writes <em>before</em> replying); a background writer in <code>observe</code>; provenance on every item; top-5 recall. A time tag is added to each user message.</p>
+
+<h2>Phases</h2>
+<div class="phase"><div class="num">1</div><div><strong>Rollover for Claude and Codex.</strong> Label, trigger, the assembler's compaction item, pane recycle, CLI auto-compaction off. <span class="muted">Proof: fill past the threshold → a compaction item is written and the pane relaunches; streaming on every turn; the codeword survives through the summary or recent messages.</span></div></div>
+<div class="phase"><div class="num">2</div><div><strong>Recall tool.</strong> <code>session_history</code>: read, search, status. <span class="muted">Proof: after a rollover, "what was my first message?" is answered word for word through the tool.</span></div></div>
+<div class="phase"><div class="num">3</div><div><strong>Pi.</strong> Compaction in <code>resume.py</code>, rebuild on rollover, token estimate. <span class="muted">Proof: phases 1 and 2 pass on pi-native.</span></div></div>
+<div class="phase"><div class="num">4</div><div><strong>Memory.</strong> Store, tools, injection, time tag. <span class="muted">Proof: a fact from session A is known in a new session.</span></div></div>
+<div class="phase"><div class="num">5</div><div><strong>Polish.</strong> Background pre-summary, per-turn recall permission, the web UI switch. <span class="muted">Proof: a rollover turn takes about as long as a normal one.</span></div></div>
+
+<h2>Open questions</h2>
+<ul>
+<li><strong>Threshold:</strong> 45% of the window (Muse), or a message count (Rakazo: 50 recent, compacting 50 at a time)? Proposal: tokens, with a message cap as a backstop.</li>
+<li><strong>Summarizer model:</strong> the session's own, or a cheap fixed one? Proposal: a cheap one, on the runner's credentials.</li>
+<li><strong>Blindfold:</strong> keep it as the strict mode with no new work? Proposal: yes.</li>
+</ul>
+</main>
+</body>
+</html>
