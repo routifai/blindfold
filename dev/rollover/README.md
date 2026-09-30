@@ -1,9 +1,7 @@
 # Rollover E2E proof
 
-Live end-to-end proof for the rollover super chat (`rollover/DESIGN.md`),
-driven through the real web UI + a Docker runner
-container, the same shape as `dev/blindfold/blindfold_e2e.py` (see
-`rollover-muse:dev/blindfold/README.md` for that pattern).
+Live end-to-end proof for the rollover super chat (`rollover/README.md`),
+driven through the real web UI and a Docker runner container.
 
 Own stack, own ports — never touches `:8780` / `omnigent-runner-test` or
 `:8791`-`:8794`.
@@ -39,16 +37,18 @@ dirs, never committed).
 
 ## Runner container
 
-Provider config (models pinned per the task: `claude-haiku-4-5-20251001`,
-`gpt-5-nano`):
-
 ```bash
 cp dev/rollover/runner-config.example.yaml .local-test-ro/runner-config.yaml
 ```
 
+Fill in each `default:` model id in that copy — the example ships with
+`<your-default-model>` placeholders (`dev/lint/lint_no_hardcoded_models.py`
+rejects real model ids committed to the repo). The script below overrides
+the model per-harness anyway (see "Models"), so the config only matters as
+a fallback for a harness whose env var is unset.
+
 Env file: `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`, reused from
-`<path/to/runner.env>` (never print its
-values).
+`<path/to/runner.env>` (never print its values).
 
 ```bash
 docker build -t omnigent-runner-ro-e2e -f dev/rollover/runner.Dockerfile .
@@ -64,6 +64,30 @@ docker logs omnigent-runner-ro-e2e | tail -20                 # should show "Con
 curl -s http://127.0.0.1:8795/v1/hosts | python3 -m json.tool
 ```
 
+## Models
+
+No model id is hardcoded in `rollover_e2e.py` — the `no-hardcoded-models`
+pre-commit hook forbids that outside tests. Set per-harness env vars before
+running (any are optional; an unset one falls back to the runner config's
+`default:`):
+
+| Env var | Harness |
+|---|---|
+| `E2E_CLAUDE_MODEL` | claude-native |
+| `E2E_CODEX_MODEL` | codex-native |
+| `E2E_PI_MODEL` | pi-native |
+
+```bash
+export E2E_CLAUDE_MODEL=<claude model id>
+export E2E_CODEX_MODEL=<codex model id>
+```
+
+`ROLLOVER_E2E_AT_TOKENS` optionally overrides `omnigent.context.rollover_at_tokens`
+for every harness (still floored at 100k by `resolve_rollover_threshold`) —
+useful for forcing more than one compaction within the fixed filler below on
+a model with a very large context window, where the real 60%-of-window
+default wouldn't otherwise be crossed.
+
 ## Run the proof
 
 ```bash
@@ -73,64 +97,62 @@ python dev/rollover/rollover_e2e.py
 
 Env overrides: `ROLLOVER_BASE_URL` (default `http://127.0.0.1:8795`),
 `ROLLOVER_OUT_DIR` (default `rollover-e2e-out/`), `ROLLOVER_HOST_ID`,
-`ROLLOVER_RUNNER_CONTAINER` (default `omnigent-runner-ro-e2e`).
+`ROLLOVER_TURN_TIMEOUT_S` (default `240`).
 
 Writes screenshots + `rollover-e2e-out/results.json`, and prints a
-PASS/FAIL table for every case × harness at the end.
+PASS/FAIL table for every case × harness at the end. A harness with no
+matching agent registered on the server is skipped (so pi-native runs only
+if a `pi-native-ui` agent exists).
 
 ## What it exercises
 
-For claude-native and codex-native, one continuous session with
-`omnigent.context.mode=rollover` and a deliberately tiny
-`omnigent.context.rollover_at_tokens=3000`:
+For each harness, one continuous session with `omnigent.context.mode=rollover`:
+a codeword turn, then 11 dense filler turns (~100k tokens total — enough to
+cross the real threshold, no artificially tiny threshold), then three probe
+turns.
 
-1. **rollover_happens** — send a codeword, then filler turns (each asking
-   for a ~150-word answer) until a `compaction` item appears. Checked: the
-   fixed checkpoint header, the `## Context checkpoint — <date>` title, a
-   `Current position / next step` closing section, the runner's
-   `rollover applied ... pane_reaped=True` log line, and a pane-relaunch log
-   line on the next turn.
-2. **works_after_rollover** — the very next turn succeeds and streams
-   (`first_output_s` measured from the DOM, like blindfold's).
-3. **recall_verbatim** — "what was my first message, quote it exactly" —
-   expects a `session_history` `function_call` item in the record and the
-   exact original text in the answer.
-4. **codeword_survives** — "what's my codeword" — answer must contain it
-   (notes whether a `session_history` call fired, i.e. summary vs. recall).
-5. **no_double_rollover** — the turn right after a rollover must not add a
-   second `compaction` item.
-6. **baseline** — same conversation shape, `omnigent.context.mode` unset:
-   no `compaction` items, no `session_history` tool calls anywhere.
-7. **side_chat** (claude-native only) — fork the rolled-over session with
-   `side_chat: true`; the fork keeps the rollover label and must answer the
-   codeword question from its seeded checkpoint.
+| Case | What it checks |
+|---|---|
+| `compacts` | ≥1 `compaction` item appeared during the fill |
+| `no_loop` | compaction count ≤ `len(fill turns) / 2`, and no two consecutive fill turns each added one (the old design's failure mode: too low a threshold recompacts every turn) |
+| `continues` | the turn right after the first compaction still replies and streams |
+| `sees_tool` | asked "do you see a tool called session_history?" — answer starts with yes |
+| `recall_verbatim` | a `mcp__omnigent__session_history` function_call item appears after the compaction, and the answer contains the exact first message |
+| `summary_recorded` | every `compaction` item has a non-empty `summary`; a count of fallback placeholder summaries (`"[Claude Code compaction — …]"`, the hook-only path with no transcript text) is reported as a warning, not a failure |
+| `baseline` | a separate, cheap (3-turn) session with the mode label unset: no `compaction` items, no `session_history` calls — see "Cost note" for why this isn't a full-scale replica |
+| `side_chat` (claude-native only) | fork the rolled-over session with `side_chat: true`; the fork keeps the rollover label and answers the codeword question from its Omnigent-seeded checkpoint |
 
-It also runs a self-compaction audit: every `compaction` item in a rollover
-session must have a matching `rollover applied ... pane_reaped=True` log
-line; an extra item with no matching line would mean the CLI compacted on
-its own.
+## Cost note
 
-## Auto-approving `session_history`
+The main suite's 11-turn fill is ~100k input tokens per harness, plus three
+follow-up turns and the summarization call(s) the CLI's own compaction
+triggers. `baseline` is deliberately 3 short turns, not a full replica of the
+fill — rollover is opt-in purely via the mode label, so re-running the same
+~100k-token fill with the label unset would double each harness's spend to
+re-prove the same on/off switch.
 
-Claude Code's own interactive permission prompt would otherwise block the
-first `session_history` tool call. The mechanism used here is the
-documented, already-supported one — **not** tmux send-keys: session-create's
-`terminal_launch_args` (the web UI's permission-mode / allowlist selector,
-`omnigent/server/schemas.py`), merged into the CLI's own argv
-(`_merge_allowed_tools` in `omnigent/harnesses/claude_native/bridge.py`):
+## Dropped from the old design
 
-- claude-native: `["--allowedTools", "mcp__omnigent__session_history"]`
-  (the MCP server name is `omnigent`, so the relayed tool is
-  `mcp__omnigent__session_history` — see `_MCP_SERVER_NAME` in
-  `omnigent/harnesses/claude_native/bridge.py`).
-- codex-native: `["--ask-for-approval", "never"]` (no narrower per-tool
-  allowlist exists for codex-native today).
+The previous version of this script tested checkpoint-restart rollover:
+Omnigent wrote the checkpoint text itself, reaped the CLI pane, and relaunched
+it. That design is gone (see `rollover/README.md`) — each CLI now compacts
+itself in place. Removed along with it:
 
-Omnigent's own policy engine (`omnigent/native/native_policy_hook.py`)
-deliberately does **not** auto-approve a harness's own permission prompt —
-by design, `POLICY_ACTION_ALLOW` (including the engine's no-policy default)
-returns "no opinion" so the harness's native consent gate still runs; only
-`terminal_launch_args` pre-arms it.
+- Runner-log grepping for `rollover applied ... pane_reaped=True` and pane
+  relaunch markers (no pane restart happens anymore).
+- The self-compaction audit (there's no longer an Omnigent-only trigger to
+  audit against — the CLI's own compaction *is* the trigger).
+- A tiny (3000-token) threshold and its dedicated filler-until-rollover loop —
+  today's threshold is real (100k-200k) and can't be shrunk without looping.
+- Checkpoint header/title/"Current position" shape assertions for
+  claude-native and codex-native — their own CLI writes the compaction
+  summary now, not Omnigent. Only Pi and side-chat seeds still get Omnigent's
+  `CHECKPOINT_HEADER` (`build_side_chat_seed` in `omnigent/context/rollover.py`).
+- The `--allowedTools` / `--ask-for-approval never` auto-approve launch args —
+  `session_history` is pre-approved automatically for rollover sessions
+  (`_ROLLOVER_ALLOWED_TOOLS` in `omnigent/runner/native/orchestration.py`),
+  so no launch-arg workaround is needed; `terminal_launch_args` is used for
+  `--model` overrides instead (see "Models").
 
 ## Teardown
 

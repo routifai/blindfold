@@ -1,10 +1,19 @@
 """Rollover super-chat end-to-end proof, driven through the real web UI.
 
+Tests the current design (see rollover/README.md): Omnigent no longer writes
+a checkpoint and restarts the CLI pane. Each native CLI compacts itself at
+Omnigent's threshold, and the forwarder records the result as a `compaction`
+item. Recall is the `session_history` tool, relayed as
+`mcp__omnigent__session_history`.
+
 Not part of the pytest suite — a one-off proving script (mirrors
 dev/blindfold/blindfold_e2e.py from rollover-muse), run by hand against a
 live local server + docker runner per dev/rollover/README.md.
 
 Usage: source .venv/bin/activate && python dev/rollover/rollover_e2e.py
+
+Costs real API tokens: each harness's main suite pushes one session past its
+rollover threshold (~100k tokens of filler). See the README's cost note.
 """
 
 from __future__ import annotations
@@ -13,7 +22,6 @@ import asyncio
 import json
 import os
 import secrets
-import subprocess
 import time
 from pathlib import Path
 from typing import Any
@@ -21,10 +29,10 @@ from typing import Any
 import httpx
 from playwright.async_api import Page, async_playwright, expect
 
-CONTAINER = os.environ.get("ROLLOVER_RUNNER_CONTAINER", "omnigent-runner-ro-e2e")
 BASE_URL = os.environ.get("ROLLOVER_BASE_URL", "http://127.0.0.1:8795")
 OUT_DIR = Path(os.environ.get("ROLLOVER_OUT_DIR", "rollover-e2e-out"))
 RESULTS_PATH = OUT_DIR / "results.json"
+TURN_TIMEOUT_S = float(os.environ.get("ROLLOVER_TURN_TIMEOUT_S", "240"))
 
 AGENT_NAMES = {
     "claude-native": "claude-native-ui",
@@ -34,47 +42,53 @@ AGENT_NAMES = {
 AGENTS: dict[str, str] = {}
 HOST_ID = os.environ.get("ROLLOVER_HOST_ID", "")
 
-# terminal_launch_args merged into the CLI's own argv at create time (the
-# web UI's documented permission-mode/allowlist mechanism — see
-# omnigent/server/schemas.py's SessionCreateRequest.terminal_launch_args).
-# Auto-approves ONLY the read-only session_history recall tool so Claude
-# Code's own interactive permission prompt never blocks the run; codex's
-# approval gate is turned off entirely (no narrower per-tool allowlist
-# exists there today).
-AUTO_APPROVE_ARGS: dict[str, list[str]] = {
-    "claude-native": ["--allowedTools", "mcp__omnigent__session_history"],
-    "codex-native": ["--ask-for-approval", "never"],
+# No hardcoded model ids here (dev/lint/lint_no_hardcoded_models.py forbids
+# them outside tests) — each harness's model comes from its own env var, or
+# is left to the runner-config.yaml default when unset.
+MODEL_ENV_VARS = {
+    "claude-native": "E2E_CLAUDE_MODEL",
+    "codex-native": "E2E_CODEX_MODEL",
+    "pi-native": "E2E_PI_MODEL",
 }
 
-TURN_TIMEOUT_S = 150.0
-MAX_FILLER_TURNS = 8
+# Optional shared override for the rollover threshold (in tokens), still
+# floored at 100k by resolve_rollover_threshold. Useful for forcing more than
+# one compaction within one fill, as a big-context model otherwise wouldn't
+# cross its (window-derived) default threshold during the fill below.
+ROLLOVER_AT_TOKENS_ENV = "ROLLOVER_E2E_AT_TOKENS"
 
-FILLER_TOPICS = [
-    "the printing press",
-    "the telegraph",
-    "the steam engine",
-    "the compass",
-    "the abacus",
-    "the sextant",
-    "the lighthouse",
-    "the telephone",
-]
+SESSION_HISTORY_TOOL_NAME = "mcp__omnigent__session_history"
+# The claude-native forwarder's fallback text when a hook-only compaction
+# boundary has no transcript summary to carry (see forwarder.py). Not a
+# failure on its own, but worth surfacing separately.
+PLACEHOLDER_SUMMARY_PREFIX = "[Claude Code compaction — "
+
+# Eleven dense, non-boilerplate filler turns push a session past its rollover
+# threshold (~100k tokens total, floored per resolve_rollover_threshold).
+FILL_TAGS = [f"t{i:02d}" for i in range(1, 12)]
 
 results: list[dict[str, Any]] = []
 
 
-def rollover_labels(
-    *,
-    rollover_at_tokens: int = 3000,
-    keep_tokens: int | None = None,
-) -> dict[str, str]:
-    labels = {
-        "omnigent.context.mode": "rollover",
-        "omnigent.context.rollover_at_tokens": str(rollover_at_tokens),
-    }
-    if keep_tokens is not None:
-        labels["omnigent.context.rollover_keep_tokens"] = str(keep_tokens)
+def rollover_labels(*, rollover_at_tokens: int | None = None) -> dict[str, str]:
+    """``omnigent.context.mode=rollover``, optionally overriding the
+    threshold (still floored at 100k)."""
+    labels = {"omnigent.context.mode": "rollover"}
+    if rollover_at_tokens is not None:
+        labels["omnigent.context.rollover_at_tokens"] = str(rollover_at_tokens)
     return labels
+
+
+def _rollover_at_tokens_override() -> int | None:
+    raw = os.environ.get(ROLLOVER_AT_TOKENS_ENV)
+    return int(raw) if raw else None
+
+
+def launch_args_for(harness: str) -> list[str] | None:
+    """``--model`` override from this harness's env var, or ``None`` to use
+    the runner's configured default model."""
+    model = os.environ.get(MODEL_ENV_VARS[harness])
+    return ["--model", model] if model else None
 
 
 def resolve_agents_and_host() -> None:
@@ -83,7 +97,8 @@ def resolve_agents_and_host() -> None:
     agents = httpx.get(f"{BASE_URL}/v1/agents", params={"limit": 200}, timeout=30).json()["data"]
     by_name = {a.get("name"): a["id"] for a in agents}
     for harness, name in AGENT_NAMES.items():
-        AGENTS[harness] = by_name[name]
+        if name in by_name:
+            AGENTS[harness] = by_name[name]
     if not HOST_ID:
         body = httpx.get(f"{BASE_URL}/v1/hosts", timeout=30).json()
         hosts = body.get("hosts", body.get("data", []))
@@ -128,7 +143,9 @@ async def session_labels(client: httpx.AsyncClient, session_id: str) -> dict[str
     return resp.json().get("labels") or {}
 
 
-async def last_item_ids(client: httpx.AsyncClient, session_id: str, limit: int = 50) -> list[dict]:
+async def last_item_ids(
+    client: httpx.AsyncClient, session_id: str, limit: int = 400
+) -> list[dict]:
     resp = await client.get(
         f"{BASE_URL}/v1/sessions/{session_id}/items", params={"limit": limit, "order": "desc"}
     )
@@ -137,8 +154,16 @@ async def last_item_ids(client: httpx.AsyncClient, session_id: str, limit: int =
 
 
 async def compaction_items(client: httpx.AsyncClient, session_id: str) -> list[dict]:
-    items = await last_item_ids(client, session_id, limit=200)
+    items = await last_item_ids(client, session_id)
     return [i for i in items if i.get("type") == "compaction"]
+
+
+def _session_history_calls(items: list[dict]) -> list[dict]:
+    return [
+        i
+        for i in items
+        if i.get("type") == "function_call" and i.get("name") == SESSION_HISTORY_TOOL_NAME
+    ]
 
 
 def _assistant_text(item: dict) -> str:
@@ -184,7 +209,7 @@ async def send_message_and_wait(
     reply_item_id = None
     new_items: list[dict] = []
     while time.monotonic() < deadline:
-        items = await last_item_ids(client, session_id, limit=100)
+        items = await last_item_ids(client, session_id)
         new_items = [i for i in items if i["id"] not in seen_before]
         for item in new_items:
             if item.get("type") == "message" and item.get("role") == "assistant":
@@ -208,121 +233,79 @@ async def send_message_and_wait(
     }
 
 
-def _runner_log_text(session_id: str) -> str:
-    """Concatenate every runner log file this session ever wrote (across
-    container restarts — each restart rotates to a new timestamped file)."""
-    try:
-        proc = subprocess.run(
-            [
-                "docker",
-                "exec",
-                CONTAINER,
-                "sh",
-                "-c",
-                f"cat /root/.omnigent/logs/runner/runner-{session_id}-*.log 2>/dev/null",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-        return proc.stdout
-    except Exception as exc:  # noqa: BLE001 — best-effort evidence gathering
-        return f"<could not fetch runner log: {exc}>"
+def _ledger_doc(tag: str, n: int = 300) -> str:
+    """Dense, deterministic filler text (~5-6k tokens) — not compressible
+    boilerplate, so the transcript genuinely grows toward the threshold."""
+    return " ".join(
+        f"Sentence {i}: the {tag} ledger entry {i} records reference "
+        f"{tag}-{i:03d}-{(i * 7919) % 9973:04d} for cost centre {i % 17}."
+        for i in range(1, n + 1)
+    )
 
 
-def rollover_applied_log_lines(session_id: str) -> list[str]:
-    """Grep for this session's 'rollover applied ... pane_reaped=True' lines."""
-    text = _runner_log_text(session_id)
-    return [
-        line
-        for line in text.splitlines()
-        if f"rollover applied for {session_id}" in line and "pane_reaped=True" in line
-    ]
-
-
-def terminal_relaunch_log_lines(session_id: str) -> list[str]:
-    """Grep for pane (re)launch lines: terminal auto-create / launch markers."""
-    text = _runner_log_text(session_id)
-    markers = ("terminal auto-create starting", "Codex terminal launch:")
-    return [line for line in text.splitlines() if any(m in line for m in markers)]
-
-
-def self_compaction_audit(session_id: str, our_compaction_count: int) -> dict[str, Any]:
-    """Check for a compaction item NOT written by our own trigger.
-
-    Our trigger writes exactly one 'rollover applied ... pane_reaped=True'
-    log line per compaction item it creates. If the session holds more
-    compaction items than we have matching log lines for, something else
-    (a CLI's own self-compaction) wrote one.
-    """
-    our_log_lines = rollover_applied_log_lines(session_id)
-    suspect = our_compaction_count > len(our_log_lines)
-    return {
-        "compaction_item_count": our_compaction_count,
-        "rollover_applied_log_count": len(our_log_lines),
-        "self_compaction_suspected": suspect,
-    }
-
-
-CHECKPOINT_HEADER_START = "[Context checkpoint inserted by the system"
-
-
-def checkpoint_shape_ok(summary: str) -> dict[str, bool]:
-    return {
-        "starts_with_fixed_header": summary.startswith(CHECKPOINT_HEADER_START),
-        "has_checkpoint_title": "## Context checkpoint" in summary,
-        "ends_with_current_position": "Current position" in summary.splitlines()[-4:][0]
-        if len(summary.splitlines()) >= 1
-        else False,
-    }
-
-
-def _has_current_position_section(summary: str) -> bool:
-    return "Current position" in summary and "next step" in summary.lower()
-
-
-async def wait_for_rollover(
-    page: Page,
-    client: httpx.AsyncClient,
-    session_id: str,
-    *,
-    label_prefix: str,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Send filler turns until a compaction item appears (or the cap is hit).
-
-    :returns: (filler_turns, compaction_items_after)
-    """
-    filler_turns = []
-    for i in range(MAX_FILLER_TURNS):
-        topic = FILLER_TOPICS[i % len(FILLER_TOPICS)]
-        prompt = f"Please write a ~150 word answer about the history of {topic}."
+async def run_fill_turns(
+    page: Page, client: httpx.AsyncClient, session_id: str, *, label_prefix: str
+) -> tuple[list[dict[str, Any]], list[int]]:
+    """Send the fixed filler turns; return (turns, compaction-count delta per turn)."""
+    turns: list[dict[str, Any]] = []
+    deltas: list[int] = []
+    prev_count = len(await compaction_items(client, session_id))
+    for i, tag in enumerate(FILL_TAGS, start=1):
+        prompt = f"Document {tag}. Reply with just: received.\n\n" + _ledger_doc(tag)
         turn = await send_message_and_wait(
-            page, client, session_id, prompt, label=f"{label_prefix}_filler_{i + 1}"
+            page, client, session_id, prompt, label=f"{label_prefix}_fill_{i:02d}"
         )
-        filler_turns.append(turn)
-        comp = await compaction_items(client, session_id)
-        if comp:
-            return filler_turns, comp
-    comp = await compaction_items(client, session_id)
-    return filler_turns, comp
+        turns.append(turn)
+        count = len(await compaction_items(client, session_id))
+        deltas.append(count - prev_count)
+        prev_count = count
+    return turns, deltas
 
 
-def _session_history_calls(items: list[dict]) -> list[dict]:
-    return [
-        i for i in items if i.get("type") == "function_call" and i.get("name") == "session_history"
-    ]
+def _first_compaction_turn_index(deltas: list[int]) -> int | None:
+    for i, delta in enumerate(deltas):
+        if delta >= 1:
+            return i
+    return None
+
+
+def check_compacts_and_no_loop(deltas: list[int]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Case 1: at least one compaction happened. Case 1b: not a loop — a
+    bounded total, and no two consecutive fill turns each adding one."""
+    total = sum(deltas)
+    consecutive_pairs = any(deltas[i] >= 1 and deltas[i + 1] >= 1 for i in range(len(deltas) - 1))
+    bound = max(1, len(deltas) // 2)
+    compacts = {
+        "case": "compacts",
+        "pass": total >= 1,
+        "evidence": {"compaction_count": total, "per_turn_deltas": deltas},
+    }
+    no_loop = {
+        "case": "no_loop",
+        "pass": total <= bound and not consecutive_pairs,
+        "evidence": {
+            "compaction_count": total,
+            "bound": bound,
+            "consecutive_compacting_turns": consecutive_pairs,
+        },
+    }
+    return compacts, no_loop
+
+
+def _streamed(turn: dict[str, Any]) -> bool:
+    return bool(turn["reply"]) and turn["first_output_s"] is not None
 
 
 async def run_rollover_suite(context, client: httpx.AsyncClient, harness: str) -> dict[str, Any]:
-    """Cases 1-5 (+7 for claude-native), all against one long-running session."""
+    """Cases 1-6 (+ side_chat for claude-native), against one long-running session."""
     codeword = f"CW-{harness.upper().replace('-', '')}-{secrets.token_hex(3).upper()}"
-    first_message = f"My codeword is {codeword}. Remember it."
+    first_message = f"My codeword is {codeword}. Reply with just OK."
 
     sid = await create_session(
         client,
         AGENTS[harness],
-        labels=rollover_labels(rollover_at_tokens=3000),
-        terminal_launch_args=AUTO_APPROVE_ARGS[harness],
+        labels=rollover_labels(rollover_at_tokens=_rollover_at_tokens_override()),
+        terminal_launch_args=launch_args_for(harness),
     )
     page = await context.new_page()
     await page.goto(f"{BASE_URL}/c/{sid}")
@@ -331,110 +314,97 @@ async def run_rollover_suite(context, client: httpx.AsyncClient, harness: str) -
         page, client, sid, first_message, label=f"{harness}_t1_codeword"
     )
 
-    filler_turns, comp_items = await wait_for_rollover(page, client, sid, label_prefix=harness)
-    rollover_happened = bool(comp_items)
-    checkpoint = comp_items[-1] if comp_items else None
-    checkpoint_summary = checkpoint.get("summary", "") if checkpoint else ""
-    shape = checkpoint_shape_ok(checkpoint_summary) if checkpoint else {}
-    rollover_log = rollover_applied_log_lines(sid)
-    relaunch_log = terminal_relaunch_log_lines(sid)
+    fill_turns, deltas = await run_fill_turns(page, client, sid, label_prefix=harness)
+    compacts, no_loop = check_compacts_and_no_loop(deltas)
 
-    case1 = {
-        "case": "rollover_happens",
-        "pass": bool(
-            rollover_happened
-            and shape.get("starts_with_fixed_header")
-            and shape.get("has_checkpoint_title")
-            and _has_current_position_section(checkpoint_summary)
-            and rollover_log
-            and len(relaunch_log) >= 2
-        ),
-        "evidence": {
-            "compaction_item_id": checkpoint.get("id") if checkpoint else None,
-            "checkpoint_shape": shape,
-            "rollover_applied_log_line": rollover_log[0] if rollover_log else None,
-            "terminal_relaunch_log_line_count": len(relaunch_log),
-            "filler_turns_until_rollover": len(filler_turns),
-        },
-    }
+    idx = _first_compaction_turn_index(deltas)
+    remaining_fill = fill_turns[idx + 1 :] if idx is not None else []
 
-    # Case 2: the very next turn after the rollover must succeed and stream.
-    post_rollover_turn = await send_message_and_wait(
+    arithmetic_turn = await send_message_and_wait(
+        page, client, sid, "Quick one: what is 17 times 3?", label=f"{harness}_arithmetic"
+    )
+    tool_turn = await send_message_and_wait(
         page,
         client,
         sid,
-        "Please write a ~80 word fact about clocks.",
-        label=f"{harness}_post_rollover",
+        "Do you see a tool called session_history? Answer yes or no, then list "
+        "the names of all tools you have.",
+        label=f"{harness}_tool_visibility",
     )
-    case2 = {
-        "case": "works_after_rollover",
-        "pass": bool(
-            post_rollover_turn["reply"]
-            and post_rollover_turn["first_output_s"] is not None
-            and post_rollover_turn["first_output_s"] < post_rollover_turn["done_s"] + 0.01
-        ),
-        "evidence": {
-            "first_output_s": post_rollover_turn["first_output_s"],
-            "done_s": post_rollover_turn["done_s"],
-        },
-    }
-
-    # Case 5: that same turn must not have triggered a second rollover.
-    comp_after_post = await compaction_items(client, sid)
-    case5 = {
-        "case": "no_double_rollover",
-        "pass": len(comp_after_post) == len(comp_items),
-        "evidence": {
-            "compaction_count_before": len(comp_items),
-            "compaction_count_after_next_turn": len(comp_after_post),
-        },
-    }
-
-    # Case 3: recall the exact first message via session_history.
     recall_turn = await send_message_and_wait(
         page,
         client,
         sid,
-        "What was my very first message in this conversation? Quote it exactly.",
+        "What was my very first message in this conversation, word for word?",
         label=f"{harness}_recall",
     )
-    recall_calls = _session_history_calls(recall_turn["new_items"])
-    case3 = {
-        "case": "recall_verbatim",
-        "pass": bool(recall_calls) and first_message in recall_turn["reply"],
+
+    # Case 2: the turn right after the compaction must succeed and stream.
+    continues_turn = remaining_fill[0] if remaining_fill else arithmetic_turn
+    continues = {
+        "case": "continues",
+        "pass": _streamed(continues_turn),
         "evidence": {
-            "session_history_call_count": len(recall_calls),
+            "first_output_s": continues_turn["first_output_s"],
+            "done_s": continues_turn["done_s"],
+        },
+    }
+
+    # Case 3: the model reports seeing the recall tool.
+    sees_tool = {
+        "case": "sees_tool",
+        "pass": tool_turn["reply"].strip().lower().startswith("yes"),
+        "evidence": {"reply": tool_turn["reply"][:300]},
+    }
+
+    # Case 4: recall used AND the exact first message comes back.
+    post_compaction_new_items = [
+        item
+        for turn in (*remaining_fill, arithmetic_turn, tool_turn, recall_turn)
+        for item in turn["new_items"]
+    ]
+    sh_calls = _session_history_calls(post_compaction_new_items)
+    recall_verbatim = {
+        "case": "recall_verbatim",
+        "pass": bool(sh_calls) and first_message in recall_turn["reply"],
+        "evidence": {
+            "session_history_call_count": len(sh_calls),
             "reply": recall_turn["reply"][:300],
         },
     }
 
-    # Case 4: codeword survives the rollover (summary or recall).
-    cw_turn = await send_message_and_wait(
-        page, client, sid, "What's my codeword?", label=f"{harness}_codeword_check"
+    # Case 5: every compaction item recorded a real summary.
+    comp_items = await compaction_items(client, sid)
+    placeholder_count = sum(
+        1 for c in comp_items if str(c.get("summary", "")).startswith(PLACEHOLDER_SUMMARY_PREFIX)
     )
-    cw_calls = _session_history_calls(cw_turn["new_items"])
-    case4 = {
-        "case": "codeword_survives",
-        "pass": codeword in cw_turn["reply"],
+    summary_recorded = {
+        "case": "summary_recorded",
+        "pass": bool(comp_items) and all(str(c.get("summary", "")).strip() for c in comp_items),
         "evidence": {
-            "source": "recall" if cw_calls else "summary",
-            "reply": cw_turn["reply"][:200],
+            "compaction_count": len(comp_items),
+            "placeholder_summary_count": placeholder_count,
         },
+        "warning": (
+            f"{placeholder_count} compaction(s) recorded only the fallback placeholder summary"
+            if placeholder_count
+            else None
+        ),
     }
 
-    cases = [case1, case2, case3, case4, case5]
+    cases = [compacts, no_loop, continues, sees_tool, recall_verbatim, summary_recorded]
 
-    # Case 7: side chat forked after a rollover (claude-native only).
+    # Case 7 (claude-native only): a side chat forked after a compaction.
     if harness == "claude-native":
         fork = await fork_session(client, sid, side_chat=True)
         side_id = fork["id"]
-        side_labels = fork.get("labels") or {}
+        side_labels = await session_labels(client, side_id)
         side_page = await context.new_page()
         await side_page.goto(f"{BASE_URL}/c/{side_id}")
         side_turn = await send_message_and_wait(
             side_page, client, side_id, "What's my codeword?", label=f"{harness}_side_chat"
         )
-        case7 = {
+        side_chat = {
             "case": "side_chat",
             "pass": bool(
                 side_labels.get("omnigent.context.mode") == "rollover"
@@ -446,12 +416,8 @@ async def run_rollover_suite(context, client: httpx.AsyncClient, harness: str) -
                 "reply": side_turn["reply"][:200],
             },
         }
-        cases.append(case7)
+        cases.append(side_chat)
         await side_page.close()
-
-    audit = self_compaction_audit(
-        sid, len(comp_items) + (0 if len(comp_after_post) == len(comp_items) else 1)
-    )
 
     await page.close()
 
@@ -462,27 +428,33 @@ async def run_rollover_suite(context, client: httpx.AsyncClient, harness: str) -
         "cases": cases,
         "turns": {
             "t1_codeword": turn1,
-            "fillers": filler_turns,
-            "post_rollover": post_rollover_turn,
+            "fillers": fill_turns,
+            "arithmetic": arithmetic_turn,
+            "tool_visibility": tool_turn,
             "recall": recall_turn,
-            "codeword_check": cw_turn,
         },
-        "checkpoint_summary_full": checkpoint_summary,
-        "self_compaction_audit": audit,
     }
     results.append(record)
     print(f"[{harness}] session={sid} suite done", flush=True)
     for c in cases:
         print(f"    {c['case']}: {'PASS' if c['pass'] else 'FAIL'} {c['evidence']}", flush=True)
+        if c.get("warning"):
+            print(f"    {c['case']}: WARNING {c['warning']}", flush=True)
     return record
 
 
-async def run_baseline(
-    context, client: httpx.AsyncClient, harness: str, filler_count: int
-) -> dict[str, Any]:
-    """Case 6: mode unset — no compaction items, no session_history tool ever."""
+async def run_baseline(context, client: httpx.AsyncClient, harness: str) -> dict[str, Any]:
+    """Case 6: mode unset — no compaction items, no session_history calls.
+
+    Deliberately cheap (three short turns, not a ~100k-token replica of the
+    main suite): rollover is opt-in purely via the mode label, so a full-scale
+    fill here would double this harness's API spend to re-prove the same
+    on/off switch. See the README's cost note.
+    """
     codeword = f"CW-{harness.upper().replace('-', '')}-BASE-{secrets.token_hex(3).upper()}"
-    sid = await create_session(client, AGENTS[harness], labels={}, terminal_launch_args=None)
+    sid = await create_session(
+        client, AGENTS[harness], labels={}, terminal_launch_args=launch_args_for(harness)
+    )
     page = await context.new_page()
     await page.goto(f"{BASE_URL}/c/{sid}")
 
@@ -490,28 +462,27 @@ async def run_baseline(
         page,
         client,
         sid,
-        f"My codeword is {codeword}. Remember it.",
+        f"My codeword is {codeword}. Reply with just OK.",
         label=f"{harness}_baseline_t1",
     )
-    for i in range(filler_count):
-        topic = FILLER_TOPICS[i % len(FILLER_TOPICS)]
+    for i in range(2):
         await send_message_and_wait(
             page,
             client,
             sid,
-            f"Please write a ~150 word answer about the history of {topic}.",
-            label=f"{harness}_baseline_filler_{i + 1}",
+            f"Please write a ~100 word note about topic {i + 1}.",
+            label=f"{harness}_baseline_fill_{i + 1}",
         )
     cw_turn = await send_message_and_wait(
         page, client, sid, "What's my codeword?", label=f"{harness}_baseline_codeword_check"
     )
     await page.close()
 
-    all_items = await last_item_ids(client, sid, limit=200)
+    all_items = await last_item_ids(client, sid)
     comp = [i for i in all_items if i.get("type") == "compaction"]
     sh_calls = _session_history_calls(all_items)
 
-    case6 = {
+    case = {
         "case": "baseline",
         "pass": bool(codeword in cw_turn["reply"] and not comp and not sh_calls),
         "evidence": {
@@ -520,15 +491,10 @@ async def run_baseline(
             "reply": cw_turn["reply"][:200],
         },
     }
-    record = {
-        "harness": harness,
-        "session_id": sid,
-        "codeword": codeword,
-        "cases": [case6],
-    }
+    record = {"harness": harness, "session_id": sid, "codeword": codeword, "cases": [case]}
     results.append(record)
     print(
-        f"[{harness}] baseline session={sid} done: {'PASS' if case6['pass'] else 'FAIL'}",
+        f"[{harness}] baseline session={sid} done: {'PASS' if case['pass'] else 'FAIL'}",
         flush=True,
     )
     return record
@@ -541,12 +507,12 @@ async def main() -> None:
         browser = await pw.chromium.launch()
         context = await browser.new_context(viewport={"width": 1400, "height": 900})
 
-        harness_records: dict[str, dict[str, Any]] = {}
-        for harness in ("claude-native", "codex-native"):
-            record = await run_rollover_suite(context, client, harness)
-            harness_records[harness] = record
-            filler_count = len(record["turns"]["fillers"])
-            await run_baseline(context, client, harness, filler_count=max(filler_count, 1))
+        for harness in ("claude-native", "codex-native", "pi-native"):
+            if harness not in AGENTS:
+                print(f"[{harness}] no agent registered, skipping", flush=True)
+                continue
+            await run_rollover_suite(context, client, harness)
+            await run_baseline(context, client, harness)
 
         await browser.close()
 
