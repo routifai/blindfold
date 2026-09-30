@@ -42,6 +42,13 @@ _DEFAULT_THRESHOLD_WINDOW_FRACTION = 0.45
 # progressive-summarization check) so the rolling summary stays cumulative.
 _SUMMARY_REQUEST_TEXT = (
     "[This is an automatically generated summary of the prior conversation "
+    "context. The original messages are available but not included in this "
+    "prompt for brevity.]\n\nPlease provide a summary of our conversation so far."
+)
+# What the relaunched CLI sees in place of the request: the summarizer needs
+# the request wording above, but a model must never take this for the user.
+_CHECKPOINT_MARKER_TEXT = (
+    "[This is an automatically generated summary of the prior conversation "
     "context, inserted by the system. It is not a message from the user; the "
     "user's own earlier messages can be read with the session_history tool.]"
 )
@@ -253,13 +260,15 @@ def _items_for_summarizer(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return projected
 
 
-def _summary_exchange(summary_text: str) -> list[dict[str, Any]]:
+def _summary_exchange(
+    summary_text: str, request_text: str = _SUMMARY_REQUEST_TEXT
+) -> list[dict[str, Any]]:
     """Build the synthetic user/assistant pair standing in for a summary."""
     return [
         {
             "type": "message",
             "role": "user",
-            "content": [{"type": "input_text", "text": _SUMMARY_REQUEST_TEXT}],
+            "content": [{"type": "input_text", "text": request_text}],
         },
         {
             "type": "message",
@@ -343,7 +352,7 @@ async def build_rollover_item(
         model=model,
     )
     last_item_id = items_since_previous_compaction[-1]["id"]
-    compacted_messages = _summary_exchange(summary_text) + recent
+    compacted_messages = _summary_exchange(summary_text, _CHECKPOINT_MARKER_TEXT) + recent
     return CompactionData(
         summary=summary_text,
         last_item_id=last_item_id,

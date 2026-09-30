@@ -435,3 +435,24 @@ def test_items_for_summarizer_keeps_only_provider_schema_fields() -> None:
         {"type": "function_call", "call_id": "c1", "name": "t", "arguments": "{}"},
         {"type": "function_call_output", "call_id": "c1", "output": "ok"},
     ]
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_marker_differs_from_the_summarizer_request() -> None:
+    """The CLI must see a marker that's plainly not from the user, while the
+    summarizer keeps the request wording it expects for a previous summary."""
+    from omnigent.context.rollover import _CHECKPOINT_MARKER_TEXT, _SUMMARY_REQUEST_TEXT
+
+    client = _ReturnsTextClient("ROLLING SUMMARY")
+    data = await build_rollover_item(
+        _turn(1) + _turn(2),
+        previous_summary="OLD SUMMARY",
+        keep_messages=2,
+        keep_tokens=_HUGE_TOKENS,
+        model="gpt-4o",
+        llm_client=client,
+    )
+    marker = data.compacted_messages[0]["content"][0]["text"]
+    assert marker == _CHECKPOINT_MARKER_TEXT
+    assert "not a message from the user" in marker
+    assert _SUMMARY_REQUEST_TEXT != _CHECKPOINT_MARKER_TEXT
