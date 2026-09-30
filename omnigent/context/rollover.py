@@ -46,8 +46,9 @@ _SUMMARY_REQUEST_TEXT = (
 
 # Fixed, code-authored preface for every rollover summary: never written by
 # the LLM, so its wording can't drift.
+CHECKPOINT_MARKER = "[Context checkpoint inserted by the system, not a message from the user.]"
 CHECKPOINT_HEADER = (
-    "[Context checkpoint inserted by the system, not a message from the user.] "
+    f"{CHECKPOINT_MARKER} "
     "This conversation grew past its context limit and earlier turns were "
     "compacted into the summary below. The work in it is your own; build on "
     "it instead of redoing it. Files, processes and jobs your tools created "

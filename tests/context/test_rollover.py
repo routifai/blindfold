@@ -373,6 +373,9 @@ async def test_rollover_item_accepted_by_codex_native_resume_rebuild(tmp_path: P
     assert records[1]["payload"]["message"] == f"{CHECKPOINT_HEADER}\n\nROLLING SUMMARY"
     kept_ids = [m.get("id") for m in replacement_history if "id" in m]
     assert kept_ids == ["u4", "a4"]
+    # The system marker is re-roled to developer; real turns keep their roles.
+    assert replacement_history[0]["role"] == "developer"
+    assert [m["role"] for m in replacement_history if "id" in m] == ["user", "assistant"]
 
 
 def test_state_file_summarizer_instruction_defaults_to_utc_today() -> None:
@@ -495,3 +498,20 @@ async def test_previous_header_is_not_fed_back_so_it_never_nests() -> None:
     assert "OLD SUMMARY" in transcript
     assert CHECKPOINT_HEADER not in transcript
     assert data.summary.count(CHECKPOINT_HEADER) == 1
+
+
+def test_checkpoint_marker_as_developer_only_touches_the_marker() -> None:
+    """A user message that merely mentions the marker later is left alone."""
+    from omnigent.context.rollover import CHECKPOINT_MARKER
+
+    def msg(role: str, text: str) -> dict:
+        return {"type": "message", "role": role, "content": [{"type": "input_text", "text": text}]}
+
+    history = [
+        msg("user", f"{CHECKPOINT_MARKER} rest"),
+        msg("assistant", "summary"),
+        msg("user", f"please explain {CHECKPOINT_MARKER}"),
+    ]
+    out = codex_native._checkpoint_marker_as_developer(history)
+    assert [m["role"] for m in out] == ["developer", "assistant", "user"]
+    assert history[0]["role"] == "user"

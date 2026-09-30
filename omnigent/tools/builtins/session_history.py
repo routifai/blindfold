@@ -58,6 +58,8 @@ class SessionHistoryTool(Tool):
     def description(cls) -> str:
         """:returns: Human-readable description of the tool."""
         return (
+            "Call this before answering any question about earlier messages "
+            "(first message, exact wording, what was decided). "
             "Recall the exact record of THIS session — the summary shown in "
             "context is a pointer, not the truth, and may omit details. "
             "action='read': read earlier turns of this conversation to "

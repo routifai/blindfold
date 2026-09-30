@@ -71,7 +71,8 @@ ROLLOVER_CONTEXT_INSTRUCTION = (
     'say/decide" — recover it with the session_history tool (search, or '
     "read paging backward) before answering; it may be namespaced, e.g. "
     "mcp__omnigent__session_history. Messages visible to you may start after "
-    "a compaction, so the oldest one you can see is not the first. State "
+    "a compaction, so the oldest one you can see is not the first: never "
+    "answer a question about earlier messages from the visible ones alone. State "
     "plainly what you couldn't recover. Never present an inference as what "
     "happened."
 )

@@ -2165,6 +2165,27 @@ async def _fetch_all_session_items_for_codex_resume(
         after = last_id
 
 
+def _checkpoint_marker_as_developer(history: list[_JsonObject]) -> list[_JsonObject]:
+    """Re-role a rollover checkpoint's marker message from user to developer.
+
+    The marker is system text; as a user message the model can mistake it for
+    something the user said. Other messages pass through unchanged.
+    """
+    from omnigent.context.rollover import CHECKPOINT_MARKER
+
+    def is_marker(message: _JsonObject) -> bool:
+        content = message.get("content")
+        first = content[0] if isinstance(content, list) and content else None
+        return (
+            message.get("type") == "message"
+            and message.get("role") == "user"
+            and isinstance(first, dict)
+            and str(first.get("text", "")).startswith(CHECKPOINT_MARKER)
+        )
+
+    return [{**m, "role": "developer"} if is_marker(m) else m for m in history]
+
+
 def _codex_rollout_records_from_session_items(
     items: list[_JsonObject],
     *,
@@ -2260,6 +2281,7 @@ def _codex_rollout_records_from_session_items(
                     else message
                     for message in compacted_msgs
                 ]
+                replacement_history = _checkpoint_marker_as_developer(replacement_history)
                 replacement_call_ids = {
                     message.get("call_id")
                     for message in replacement_history
