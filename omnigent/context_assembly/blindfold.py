@@ -251,12 +251,25 @@ async def record_user_message(
     resp.raise_for_status()
 
 
+def _assistant_text(item: OneShotItem) -> str:
+    """The output_text of a parsed assistant message item, joined."""
+    content = item.item_data.get("content")
+    if not isinstance(content, list):
+        return ""
+    return "".join(
+        block.get("text", "")
+        for block in content
+        if isinstance(block, dict) and block.get("type") == "output_text"
+    )
+
+
 async def post_oneshot_items(
     server_client: httpx.AsyncClient,
     *,
     session_id: str,
     response_id: str,
     items: list[OneShotItem],
+    final_text: str | None,
 ) -> None:
     """Record a one-shot turn's tool calls (and any non-final assistant text)
     in the session, so the web UI shows what the disposable CLI actually did.
@@ -277,11 +290,19 @@ async def post_oneshot_items(
     :param response_id: Shared response id grouping this turn's items in the
         web UI — the blindfold turn's own ``turn_id`` works well here.
     :param items: Parsed items, in the order the one-shot CLI produced them.
+    :param final_text: The final answer the executor will return, or ``None``.
     """
+    # Skip the last assistant message only when it IS the final answer the
+    # executor returns; anything else (a partial or different message) is posted.
     final_message_index: int | None = None
     for index, item in enumerate(items):
         if item.item_type == "message" and item.item_data.get("role") == "assistant":
             final_message_index = index
+    if final_message_index is not None and (
+        final_text is None
+        or _assistant_text(items[final_message_index]).strip() != final_text.strip()
+    ):
+        final_message_index = None
     quoted_id = urllib.parse.quote(session_id, safe="")
     for index, item in enumerate(items):
         if index == final_message_index:

@@ -337,14 +337,19 @@ async def _run_one_shot(
                 stdout.decode("utf-8", errors="replace")
             )
             tool_call_count = sum(1 for item in items if item.item_type == "function_call")
+            try:
+                final_text: str | None = last_message_path.read_text(encoding="utf-8").strip()
+            except OSError:
+                final_text = parsed_final_text
             await post_oneshot_items(
-                client, session_id=session_id, response_id=turn_id, items=items
+                client,
+                session_id=session_id,
+                response_id=turn_id,
+                items=items,
+                final_text=final_text,
             )
             if proc.returncode == 0:
-                try:
-                    response_text = last_message_path.read_text(encoding="utf-8").strip()
-                except OSError:
-                    response_text = (parsed_final_text or "").strip()
+                response_text = (final_text or "").strip()
             else:
                 error = (
                     f"codex exec exited {proc.returncode}: "

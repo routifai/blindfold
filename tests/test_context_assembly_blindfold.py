@@ -331,7 +331,7 @@ class TestPostOneShotItems:
             base_url="http://server", transport=self._capturing_transport(posted)
         ) as client:
             await post_oneshot_items(
-                client, session_id="conv_1", response_id="turn_1", items=items
+                client, session_id="conv_1", response_id="turn_1", items=items, final_text="done"
             )
         posted_types = [entry["data"]["item_type"] for entry in posted]
         assert posted_types == ["reasoning", "function_call", "function_call_output"]
@@ -359,17 +359,45 @@ class TestPostOneShotItems:
             base_url="http://server", transport=self._capturing_transport(posted)
         ) as client:
             await post_oneshot_items(
-                client, session_id="conv_1", response_id="turn_1", items=[first, last]
+                client,
+                session_id="conv_1",
+                response_id="turn_1",
+                items=[first, last],
+                final_text="last",
             )
         assert len(posted) == 1
         assert posted[0]["data"]["item_data"]["content"][0]["text"] == "first"
+
+    async def test_a_last_message_that_is_not_the_final_answer_is_kept(self) -> None:
+        posted: list[dict[str, Any]] = []
+        last = OneShotItem(
+            "message",
+            {
+                "role": "assistant",
+                "agent": "X",
+                "content": [{"type": "output_text", "text": "partial"}],
+            },
+        )
+        async with httpx.AsyncClient(
+            base_url="http://server", transport=self._capturing_transport(posted)
+        ) as client:
+            await post_oneshot_items(
+                client,
+                session_id="conv_1",
+                response_id="turn_1",
+                items=[last],
+                final_text="something else",
+            )
+        assert len(posted) == 1
 
     async def test_no_items_posts_nothing(self) -> None:
         posted: list[dict[str, Any]] = []
         async with httpx.AsyncClient(
             base_url="http://server", transport=self._capturing_transport(posted)
         ) as client:
-            await post_oneshot_items(client, session_id="conv_1", response_id="turn_1", items=[])
+            await post_oneshot_items(
+                client, session_id="conv_1", response_id="turn_1", items=[], final_text=None
+            )
         assert posted == []
 
     async def test_a_post_failure_is_swallowed_and_does_not_block_later_items(self) -> None:
@@ -392,7 +420,7 @@ class TestPostOneShotItems:
             base_url="http://server", transport=httpx.MockTransport(_flaky_route)
         ) as client:
             await post_oneshot_items(
-                client, session_id="conv_1", response_id="turn_1", items=items
+                client, session_id="conv_1", response_id="turn_1", items=items, final_text=None
             )
         assert len(posted) == 1
         assert posted[0]["data"]["item_type"] == "function_call_output"

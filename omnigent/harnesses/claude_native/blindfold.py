@@ -343,7 +343,11 @@ async def _run_one_shot(
             items, final_text = parse_claude_stream_json(stdout.decode("utf-8", errors="replace"))
             tool_call_count = sum(1 for item in items if item.item_type == "function_call")
             await post_oneshot_items(
-                client, session_id=session_id, response_id=turn_id, items=items
+                client,
+                session_id=session_id,
+                response_id=turn_id,
+                items=items,
+                final_text=final_text,
             )
             if proc.returncode == 0:
                 # final_text is None only if the process exited 0 without ever
