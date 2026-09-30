@@ -24,6 +24,7 @@ import httpx
 
 from omnigent.context_assembly.labels import BLINDFOLD_LABEL
 from omnigent.context_assembly.models import AssembleResponse
+from omnigent.context_assembly.oneshot_events import OneShotItem
 
 _logger = logging.getLogger(__name__)
 
@@ -248,6 +249,57 @@ async def record_user_message(
         timeout=_REQUEST_TIMEOUT_SECONDS,
     )
     resp.raise_for_status()
+
+
+async def post_oneshot_items(
+    server_client: httpx.AsyncClient,
+    *,
+    session_id: str,
+    response_id: str,
+    items: list[OneShotItem],
+) -> None:
+    """Record a one-shot turn's tool calls (and any non-final assistant text)
+    in the session, so the web UI shows what the disposable CLI actually did.
+
+    Skips the turn's own last ``message``/assistant item: that text is the
+    turn's final answer, which the caller's executor already returns via
+    ``TurnComplete(response=...)`` for the Session layer to persist (see
+    e.g. ``omnigent.inner.claude_native_executor``) — posting it again here
+    would duplicate the answer in the record.
+
+    Every post is best-effort and independent: a mid-turn network hiccup
+    drops that one item from the record rather than raising, since the
+    turn's own outcome (the already-computed final answer) does not depend
+    on any of this having succeeded.
+
+    :param server_client: The runner's own Omnigent server client.
+    :param session_id: Omnigent conversation id.
+    :param response_id: Shared response id grouping this turn's items in the
+        web UI — the blindfold turn's own ``turn_id`` works well here.
+    :param items: Parsed items, in the order the one-shot CLI produced them.
+    """
+    final_message_index: int | None = None
+    for index, item in enumerate(items):
+        if item.item_type == "message" and item.item_data.get("role") == "assistant":
+            final_message_index = index
+    quoted_id = urllib.parse.quote(session_id, safe="")
+    for index, item in enumerate(items):
+        if index == final_message_index:
+            continue
+        with contextlib.suppress(httpx.HTTPError, ValueError):
+            resp = await server_client.post(
+                f"/v1/sessions/{quoted_id}/events",
+                json={
+                    "type": "external_conversation_item",
+                    "data": {
+                        "response_id": response_id,
+                        "item_type": item.item_type,
+                        "item_data": item.item_data,
+                    },
+                },
+                timeout=_REQUEST_TIMEOUT_SECONDS,
+            )
+            resp.raise_for_status()
 
 
 async def fetch_blindfold_turn_context(
