@@ -4,14 +4,18 @@ Covers the "surgical, guarded branch" contract for all three harnesses:
 - OFF (no connection file, or one marked not-blindfolded): handled=False,
   zero network calls, so the caller's existing turn path is untouched.
 - ON: a full one-shot turn runs end to end against a mock server, using a
-  harmless real binary (``echo``/``cat``) in place of claude/pi/codex so the
-  subprocess plumbing (env, args, transcript file, cleanup, observe) is
-  exercised without needing the real CLIs installed in this environment.
+  tiny fake CLI script in place of claude/pi/codex — printing that CLI's own
+  one-shot event-stream shape (stream-json / --mode json / exec --json) —
+  so both the subprocess plumbing (env, args, transcript file, cleanup,
+  observe) AND the event-stream-to-item parsing are exercised without
+  needing the real CLIs installed in this environment.
 """
 
 from __future__ import annotations
 
 import json
+import stat
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +26,30 @@ from omnigent.context_assembly.blindfold import write_server_connection
 from omnigent.harnesses.claude_native import blindfold as claude_blindfold
 from omnigent.harnesses.codex_native import blindfold as codex_blindfold
 from omnigent.harnesses.pi_native import blindfold as pi_blindfold
+
+
+def _write_fake_cli(tmp_path: Path, name: str, python_body: str) -> str:
+    """Write an executable stand-in CLI that echoes its own argv as JSON.
+
+    Using a real ``python3`` script (rather than ``echo``) lets the fake CLI
+    emit properly-escaped JSON while still reproducing every argv value
+    (the message, ``--setting-sources``, the appended system text, ...) in
+    its output, so assertions can check both "the args reached the process"
+    and "the new stream-json/json/exec-json parsing works" at once.
+
+    :param tmp_path: Per-test scratch directory to write the script into.
+    :param name: Script filename, e.g. ``"fake_claude"``.
+    :param python_body: The script's body; ``argv_text`` is pre-bound to
+        ``" ".join(sys.argv[1:])``.
+    :returns: The script's absolute path, executable.
+    """
+    path = tmp_path / name
+    path.write_text(
+        f'#!{sys.executable}\nimport json, sys\nargv_text = " ".join(sys.argv[1:])\n' + python_body
+    )
+    path.chmod(path.stat().st_mode | stat.S_IEXEC)
+    return str(path)
+
 
 # (module, harness_name) — same shape across all three; iterated for the
 # OFF-path tests that don't depend on harness-specific transcript rebuilding.
@@ -144,13 +172,22 @@ class TestOnPathRunsAOneShotProcess:
             model="claude-haiku-4-5-20251001", system_text="Rules.", history_items=[]
         )
         _patch_async_client(monkeypatch, transport)
-        # A shell-free stand-in for `claude -p <msg> ...`: echo prints its
-        # argv, proving the subprocess actually ran with the built args.
+        # A fake `claude -p ... --output-format stream-json --verbose ...`:
+        # one assistant text event (echoing argv, proving the built args
+        # reached the process) plus the `result` event blindfold.py reads
+        # the final answer from.
+        fake_claude = _write_fake_cli(
+            tmp_path,
+            "fake_claude",
+            "print(json.dumps({'type': 'assistant', "
+            "'message': {'content': [{'type': 'text', 'text': argv_text}]}}))\n"
+            "print(json.dumps({'type': 'result', 'subtype': 'success', 'result': argv_text}))\n",
+        )
         result = await claude_blindfold.maybe_run_blindfold_turn(
             bridge_dir=tmp_path,
             session_id="conv_1",
             new_message_text="what is my codeword?",
-            command="echo",
+            command=fake_claude,
         )
         assert result.handled is True
         assert result.error is None
@@ -173,20 +210,29 @@ class TestOnPathRunsAOneShotProcess:
             model="anthropic/claude-haiku-4.5", system_text="", history_items=[]
         )
         _patch_async_client(monkeypatch, transport)
+        # A fake `pi --print --no-context-files --mode json ...`: one
+        # message_end/assistant event echoing argv, matching the shape
+        # parse_pi_json_events reads the final answer from.
+        fake_pi = _write_fake_cli(
+            tmp_path,
+            "fake_pi",
+            "print(json.dumps({'type': 'message_end', 'message': {'role': 'assistant', "
+            "'content': [{'type': 'text', 'text': argv_text}]}}))\n",
+        )
         result = await pi_blindfold.maybe_run_blindfold_turn(
             bridge_dir=tmp_path,
             session_id="conv_1",
             new_message_text="hello",
-            command="echo",
+            command=fake_pi,
         )
         assert result.handled is True
         assert "--no-context-files" in (result.response_text or "")
 
-    async def test_codex_module_runs_echo_falls_back_to_stdout(
+    async def test_codex_module_runs_fake_cli_falls_back_to_parsed_stdout(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # echo never writes --output-last-message's file, so this exercises
-        # the stdout fallback path.
+        # The fake CLI never writes --output-last-message's file, so this
+        # exercises the parsed-stdout fallback path (see parse_codex_exec_json).
         write_server_connection(
             tmp_path,
             base_url="http://server",
@@ -197,11 +243,20 @@ class TestOnPathRunsAOneShotProcess:
             model="gpt-5-nano", system_text="Be terse.", history_items=[]
         )
         _patch_async_client(monkeypatch, transport)
+        # A fake `codex exec ... --json`: one item.completed/agent_message
+        # event echoing argv, matching the shape parse_codex_exec_json reads
+        # the fallback final answer from.
+        fake_codex = _write_fake_cli(
+            tmp_path,
+            "fake_codex",
+            "print(json.dumps({'type': 'item.completed', "
+            "'item': {'id': 'item_0', 'type': 'agent_message', 'text': argv_text}}))\n",
+        )
         result = await codex_blindfold.maybe_run_blindfold_turn(
             bridge_dir=tmp_path,
             session_id="conv_1",
             new_message_text="hello",
-            command="echo",
+            command=fake_codex,
         )
         assert result.handled is True
         assert "exec" in (result.response_text or "")
