@@ -168,11 +168,11 @@ async def test_no_trigger_when_label_unset(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 @pytest.mark.asyncio
-async def test_rolls_over_only_at_a_completed_idle_edge(
+async def test_rolls_over_only_at_an_idle_edge(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Native delivery returns once the prompt is typed, so only the CLI's
-    completed-idle edge may start a rollover; running or bare idle never do."""
+    """Native delivery returns once the prompt is typed, so only the CLI's idle
+    edge may start a rollover; a running edge never does."""
     conv_id = "conv_rollover_edge"
     items = [_msg(f"m{i}", "user" if i % 2 == 0 else "assistant", f"msg {i}") for i in range(10)]
     labels = {"omnigent.context.mode": "rollover", "omnigent.context.rollover_at_tokens": "1"}
@@ -198,10 +198,10 @@ async def test_rolls_over_only_at_a_completed_idle_edge(
             await asyncio.sleep(0.01)
 
     await post_status({"status": "running"})
-    await post_status({"status": "idle"})
+    await post_status({"status": "waiting"})
     assert fake_client.posted_events == []
 
-    await post_status({"status": "idle", "turn_completed": True})
+    await post_status({"status": "idle"})
     assert len(fake_client.posted_events) == 1
 
 

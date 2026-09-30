@@ -5210,6 +5210,8 @@ async def _auto_create_codex_terminal(
     # never by editing config.toml here.
     # Passed only for auto-harness sessions so a pinned or plain codex launch
     # keeps main's kwargs exactly.
+    from omnigent.runtime.prompt import ROLLOVER_CONTEXT_INSTRUCTION
+
     _codex_routing_note: str | None = None
     if launch_config.auto_harness:
         from omnigent.inner.hook_scripts.subagent_router import smart_routing_spawn_note
@@ -5221,6 +5223,7 @@ async def _auto_create_codex_terminal(
             for x in [
                 _native_startup_raw_instructions_from_spec(agent_spec),
                 _codex_routing_note,
+                ROLLOVER_CONTEXT_INSTRUCTION if launch_config.rollover else None,
             ]
             if x
         )
@@ -8121,6 +8124,8 @@ async def _auto_create_claude_terminal(
     # label reaches every relaunch through the session snapshot, including
     # the post-rollover pane recycle).
     rollover = is_rollover(session_init.snapshot.labels if session_init is not None else None)
+    from omnigent.runtime.prompt import ROLLOVER_CONTEXT_INSTRUCTION
+
     started_at = time.monotonic()
     _logger.info(
         "Claude terminal auto-create starting: session=%s workspace=%s bundle_dir=%s "
@@ -8758,7 +8763,11 @@ async def _auto_create_claude_terminal(
         subagent_router_dir=subagent_router_dir,
         append_system_prompt="\n\n".join(
             x
-            for x in [_native_startup_raw_instructions_from_spec(agent_spec), routed_spawn_note]
+            for x in [
+                _native_startup_raw_instructions_from_spec(agent_spec),
+                routed_spawn_note,
+                ROLLOVER_CONTEXT_INSTRUCTION if rollover else None,
+            ]
             if x
         )
         or None,

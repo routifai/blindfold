@@ -10762,9 +10762,9 @@ def create_runner_app(
                     allow_history_preview_fallback=False,
                 )
             turn_completed = data.get("turn_completed") if isinstance(data, dict) else None
-            # A native turn truly ends at the CLI's completed-idle edge (delivery
-            # returns as soon as the prompt is typed), so rollover starts here.
-            if status == "idle" and (turn_completed is True or terminal_status == "completed"):
+            # A native turn truly ends at the CLI's idle edge (delivery returns as
+            # soon as the prompt is typed); Codex's idle carries no completion flag.
+            if status == "idle":
                 _rollover_task = asyncio.create_task(_maybe_apply_rollover(conversation_id))
                 _background_tasks.add(_rollover_task)
                 _rollover_task.add_done_callback(_background_tasks.discard)
