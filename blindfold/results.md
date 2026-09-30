@@ -41,16 +41,36 @@ Notes:
 
 ## Latency
 
-Measured on the E2E stack after the no-resident-pane fix:
+The one-shot CLI turn itself (runner log `process_s`): Claude Code 3–4.4 s,
+Pi 1.3–3 s, Codex 2.6–5.5 s. CLI startup is only 5–22% of that: about 0.5 s
+for Claude, 0.15 s for Pi and 0.12–0.17 s for Codex. The model call dominates.
 
-| Harness | Turn 1 | Turns 2 and later |
-|---|---|---|
-| Claude Code | 3.0–4.4 s | 2.4–3.7 s |
-| Pi | 1.3–3.0 s | 1.3–3.0 s |
-| Codex | 2.6–5.5 s | 2.6–5.5 s |
+**Open issue: a ~60 s hold in the web UI on every turn after the first.**
 
-CLI startup is only 5–22% of a turn: about 0.5 s for Claude, 0.15 s for Pi
-and 0.12–0.17 s for Codex. The model call dominates.
+In run 5, turn 2 and later took 46–60 s end to end on all three CLIs. The
+unblindfolded baseline took 2.6–7.7 s. A probe reproduced it: turn 1 took
+3.2 s, turn 2 took 60.5 s.
+
+The server reports the session as `idle` the whole time, and the CLI answers
+in 3–4 s once the message arrives. The web UI holds the second message for
+about 55 s before posting it. The cause is in how the UI decides a native turn
+has finished, and it is not yet located. The earlier "turn-2 delay fixed"
+result was measured without the browser.
+
+## Direction
+
+The super chat is moving to a rollover design instead of blindfolding every
+turn:
+
+- one normal resident session (streaming, steering, prompt cache);
+- a rollover to a new session built by the assembler (summary, recent
+  messages, memory) when the context gets long;
+- a read-only recall tool over the full session record;
+- a memory store.
+
+Blindfold stays as an optional strict mode. The warm harness was built on
+branches `bf-warm-claude` and `bf-warm-pi` and not merged. It was correct
+(the window-slide discard was proven live), but saves about 0.3 s per turn.
 
 ## Known limits
 
@@ -68,7 +88,7 @@ and 0.12–0.17 s for Codex. The model call dominates.
 
 ## Next
 
-- **Warm harness.** Keep a CLI process between turns, but only when it is
+- **Warm harness** (built, not merged; see Direction). Keep a CLI process between turns, but only when it is
   provably safe: the system and memory digests are unchanged, and the history
   has only grown at the end. Any slide of the window means discard and start
   cold. Given the startup share above, it is opt-in and must earn its place
