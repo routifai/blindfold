@@ -62,8 +62,18 @@ os.environ.setdefault("OMNIGENT_AUTH_PROVIDER", "header")
 os.environ.setdefault("OMNIGENT_LOCAL_SINGLE_USER", "1")
 
 from omnigent.db.utils import _engine_cache, _engine_lock, get_or_create_engine  # noqa: E402
+from omnigent.onboarding import ambient, harness_install  # noqa: E402
+from omnigent.onboarding.providers import PROVIDER_ENV_VARS  # noqa: E402
 from omnigent.runtime.filesystem_registry import GitFilesystemRegistry  # noqa: E402
 from tests import _model_pools  # noqa: E402
+
+# Claude Code's Vertex AI routing is detected from these three GCP env vars,
+# which PROVIDER_ENV_VARS does not cover.
+_AMBIENT_VERTEX_ENV_VARS = (
+    "CLAUDE_CODE_USE_VERTEX",
+    "ANTHROPIC_VERTEX_PROJECT_ID",
+    "CLOUD_ML_REGION",
+)
 
 pytest_plugins = ["tests._token_usage"]
 
@@ -377,6 +387,43 @@ def _isolate_codex_native_state(
     """
     state_dir = tmp_path_factory.mktemp("codex-native-state")
     monkeypatch.setenv("OMNIGENT_CODEX_NATIVE_STATE_DIR", str(state_dir))
+
+
+@pytest.fixture(autouse=True)
+def _isolate_ambient_provider_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Generator[None, None, None]:
+    """
+    Keep the developer's real ambient credentials out of provider resolution.
+
+    ``_resolve_provider_for_build`` (omnigent/runtime/workflow.py) falls back
+    to :func:`omnigent.onboarding.detected.effective_config_with_detected`,
+    which merges in whatever :func:`omnigent.onboarding.ambient.detect_providers`
+    finds on the machine: vendor API keys (bare and ``OMNIGENT_``-prefixed,
+    plus the Claude-on-Vertex GCP triple), a live local Ollama, and — on
+    macOS — a Keychain-backed Claude Code login via ``claude auth status``.
+    A developer's shell exporting e.g. ``OPENROUTER_API_KEY`` silently
+    becomes the default "openai" family provider, changing the same test's
+    outcome versus a clean CI box. This was previously only guarded for
+    ``tests/runtime`` (see its ``conftest.py``); promoted here so the whole
+    suite is hermetic regardless of ambient host state.
+
+    :param monkeypatch: Pytest monkeypatch fixture; auto-restores state.
+    :returns: Iterator yielding once, with the login-probe cache cleared
+        around the test.
+    """
+    for env_var in (*PROVIDER_ENV_VARS.values(), *_AMBIENT_VERTEX_ENV_VARS):
+        monkeypatch.delenv(env_var, raising=False)
+        monkeypatch.delenv(f"OMNIGENT_{env_var}", raising=False)
+    monkeypatch.setattr(ambient, "_ollama_reachable", lambda: False)
+    monkeypatch.setattr(
+        ambient,
+        "_claude_login_detected",
+        lambda: ambient.claude_auth_has_credential(ambient._claude_credentials_path()),
+    )
+    harness_install._LOGIN_PROBE_CACHE.clear()
+    yield
+    harness_install._LOGIN_PROBE_CACHE.clear()
 
 
 @pytest.fixture()
