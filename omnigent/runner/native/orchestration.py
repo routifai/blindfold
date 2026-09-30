@@ -4799,14 +4799,20 @@ async def _auto_create_codex_terminal(
         # run as disposable one-shot processes from inside the codex-native
         # executor, a process that doesn't share this function's server
         # client. Persist how to reach the server into the bridge dir now.
+        # Best-effort: a test double server_client (no base_url/headers,
+        # e.g. NullServerClient) must never break the actual terminal launch
+        # over a side channel only blindfold-mode turns ever read.
         from omnigent.context_assembly.blindfold import write_server_connection
 
-        write_server_connection(
-            bridge_dir,
-            base_url=str(server_client.base_url),
-            headers=dict(server_client.headers),
-            labels=launch_config.labels,
-        )
+        try:
+            write_server_connection(
+                bridge_dir,
+                base_url=str(server_client.base_url),
+                headers=dict(server_client.headers),
+                labels=launch_config.labels,
+            )
+        except AttributeError:
+            pass
     socket_path = socket_path_for_bridge_dir(bridge_dir)
     codex_home = codex_home_for_bridge_dir(bridge_dir)
     app_server = _AUTO_CODEX_APP_SERVERS.get(session_id)
