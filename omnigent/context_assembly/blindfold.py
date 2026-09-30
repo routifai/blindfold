@@ -172,6 +172,53 @@ class BlindfoldTurnContext:
     fallback: bool = False
 
 
+async def record_user_message(
+    server_client: httpx.AsyncClient,
+    *,
+    session_id: str,
+    text: str,
+) -> None:
+    """Persist the new user message as a record item before assembling context.
+
+    Native-terminal harnesses normally record a turn's input as a side
+    effect of the forwarder mirroring it back out of the CLI's own
+    transcript (see e.g. ``claude_native/forwarder.py``'s
+    ``external_conversation_item`` posts) — there is no separate
+    "persist-then-forward" step upstream of the executor for these harnesses.
+    A blindfold turn never starts that forwarder (no live pane for it to
+    tail), so nothing else will ever record this message. Without this call,
+    the assembler's next call would anchor on the *previous* turn's last
+    item instead of this one, and this turn's own message would never enter
+    later history.
+
+    Uses the same ``external_conversation_item`` event the forwarders use,
+    so this is indistinguishable from a normal mirrored item and does not
+    trigger a new turn dispatch (unlike posting a plain ``"message"`` event,
+    which is the client-submission path).
+
+    :param server_client: The runner's own Omnigent server client.
+    :param session_id: Omnigent conversation id.
+    :param text: The user's message text.
+    :raises httpx.HTTPError: If the server rejects the append. Callers
+        should treat this as fatal to the turn (fail closed with the new
+        message's own text only) rather than proceeding to assemble against
+        a record that doesn't yet contain it.
+    """
+    quoted_id = urllib.parse.quote(session_id, safe="")
+    resp = await server_client.post(
+        f"/v1/sessions/{quoted_id}/events",
+        json={
+            "type": "external_conversation_item",
+            "data": {
+                "item_type": "message",
+                "item_data": {"role": "user", "content": [{"type": "input_text", "text": text}]},
+            },
+        },
+        timeout=_REQUEST_TIMEOUT_SECONDS,
+    )
+    resp.raise_for_status()
+
+
 async def fetch_blindfold_turn_context(
     server_client: httpx.AsyncClient,
     *,

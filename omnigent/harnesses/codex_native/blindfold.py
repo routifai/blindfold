@@ -52,12 +52,11 @@ from urllib.parse import quote as _url_quote
 import httpx
 
 from omnigent.context_assembly.blindfold import (
+    BlindfoldTurnContext,
     fetch_blindfold_turn_context,
     is_blindfolded,
     read_server_connection,
-)
-from omnigent.context_assembly.blindfold import (
-    write_server_connection as write_server_connection,  # re-exported
+    record_user_message,
 )
 
 _logger = logging.getLogger(__name__)
@@ -119,16 +118,36 @@ async def maybe_run_blindfold_turn(
         )
         labels_dict = labels if isinstance(labels, dict) else {}
 
-        ctx = await fetch_blindfold_turn_context(
-            client,
-            session_id=session_id,
-            labels=labels_dict,
-            harness_name="codex-native",
-            model=model,
-            context_window_tokens=200_000,
-            history_format=_HISTORY_FORMAT,
-            fallback_instructions=None,
-        )
+        # Must happen before assemble(): see record_user_message's docstring —
+        # native harnesses have no other path that ever persists this turn's
+        # input. A failure here means the record can't be trusted to anchor
+        # on this turn yet, so run with no history rather than risk assembling
+        # against the wrong (previous) turn's last item.
+        history_available = True
+        try:
+            await record_user_message(client, session_id=session_id, text=new_message_text)
+        except (httpx.HTTPError, ValueError):
+            _logger.warning(
+                "could not record new message for blindfolded session=%s; "
+                "running this turn with no history",
+                session_id,
+                exc_info=True,
+            )
+            history_available = False
+
+        if history_available:
+            ctx = await fetch_blindfold_turn_context(
+                client,
+                session_id=session_id,
+                labels=labels_dict,
+                harness_name="codex-native",
+                model=model,
+                context_window_tokens=200_000,
+                history_format=_HISTORY_FORMAT,
+                fallback_instructions=None,
+            )
+        else:
+            ctx = BlindfoldTurnContext(system_prompt="", prior_history_items=[], fallback=True)
 
         turn_id = f"turn_{uuid.uuid4().hex[:16]}"
         result = await _run_one_shot(
