@@ -269,3 +269,15 @@ def test_relay_schemas_no_spec_fallback_respects_rollover_gate() -> None:
     }
     assert "session_history" not in names_off
     assert "session_history" in names_on
+
+
+def test_relay_lists_session_history_as_always_loaded() -> None:
+    """Claude Code keeps MCP tools behind tool search unless the server marks
+    one always-loaded; recall must be in context right after a rollover."""
+    from omnigent.harnesses.claude_native.bridge import _mcp_tool_schema_from_spec
+
+    recall = _mcp_tool_schema_from_spec({"name": "session_history", "parameters": {}})
+    other = _mcp_tool_schema_from_spec({"name": "sys_session_get_info", "parameters": {}})
+
+    assert recall["_meta"] == {"anthropic/alwaysLoad": True}
+    assert "_meta" not in other

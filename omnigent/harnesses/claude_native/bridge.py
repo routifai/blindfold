@@ -7047,6 +7047,11 @@ def _mcp_tool_schema(tool: Tool) -> _JsonObject:
     }
 
 
+# Tools kept in the model's context instead of behind Claude Code's tool
+# search: recall must be at hand right after a rollover compacts history.
+_ALWAYS_LOADED_RELAY_TOOLS = frozenset({"session_history"})
+
+
 def _combined_mcp_tool_schemas(
     local_tools: dict[str, Tool],
     bridge_dir: Path,
@@ -7082,11 +7087,14 @@ def _mcp_tool_schema_from_spec(tool_spec: _JsonObject) -> _JsonObject:
     name = tool_spec.get("name")
     description = tool_spec.get("description")
     parameters = tool_spec.get("parameters")
-    return {
+    schema: _JsonObject = {
         "name": name if isinstance(name, str) else "",
         "description": description if isinstance(description, str) else "",
         "inputSchema": parameters if isinstance(parameters, dict) else _empty_object_schema(),
     }
+    if name in _ALWAYS_LOADED_RELAY_TOOLS:
+        schema["_meta"] = {"anthropic/alwaysLoad": True}
+    return schema
 
 
 def _call_mcp_tool(
