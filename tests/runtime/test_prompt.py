@@ -11,6 +11,7 @@ from omnigent.runner.app import _format_subagent_wake_notice
 from omnigent.runtime.mcp_tool_result import encode_mcp_image_result
 from omnigent.runtime.prompt import (
     EMBEDDED_BROWSER_PRIORITY_INSTRUCTION,
+    ROLLOVER_CONTEXT_INSTRUCTION,
     SUBAGENT_WAKE_NOTICE_INSTRUCTION,
     SUBAGENT_WAKE_NOTICE_SHAPE,
     append_framework_instructions,
@@ -427,6 +428,46 @@ def test_subagent_wake_notice_shape_matches_runner_notice() -> None:
 def test_raw_author_instructions_verbatim_and_none() -> None:
     present = cast(AgentSpec, SimpleNamespace(instructions="  Keep this exact.  "))
     assert raw_author_instructions(present) == "  Keep this exact.  "
+
+
+# ── Rollover context instruction (session-scoped, not spec-scoped) ──
+
+
+def test_rollover_instruction_absent_when_labels_unset() -> None:
+    """Label unset (the default, no ``labels=`` kwarg at all) is byte-for-byte
+    upstream: no caller that doesn't opt in ever sees this text."""
+    spec = _spec("Agent prompt")
+    assert ROLLOVER_CONTEXT_INSTRUCTION not in build_instructions(spec, None, [])
+
+
+def test_rollover_instruction_absent_for_non_rollover_labels() -> None:
+    spec = _spec("Agent prompt")
+    out = build_instructions(spec, None, [], labels={"some.other.label": "x"})
+    assert ROLLOVER_CONTEXT_INSTRUCTION not in out
+
+
+def test_rollover_instruction_present_for_rollover_session() -> None:
+    spec = _spec("Agent prompt")
+    out = build_instructions(spec, None, [], labels={"omnigent.context.mode": "rollover"})
+    assert ROLLOVER_CONTEXT_INSTRUCTION in out
+    # Appended after the author's own instructions and after the other
+    # unconditional framework instruction, per the framework-instructions
+    # ordering rule (CLAUDE.md).
+    assert out.index(EMBEDDED_BROWSER_PRIORITY_INSTRUCTION) < out.index(
+        ROLLOVER_CONTEXT_INSTRUCTION
+    )
+
+
+def test_rollover_instruction_present_in_nullable_variant() -> None:
+    spec = _spec(None)
+    out = build_instructions_nullable(spec, None, [], labels={"omnigent.context.mode": "rollover"})
+    assert out is not None
+    assert ROLLOVER_CONTEXT_INSTRUCTION in out
+
+
+def test_rollover_instruction_mentions_session_history_tool() -> None:
+    """The instruction must actually name the tool it tells the model to use."""
+    assert "session_history" in ROLLOVER_CONTEXT_INSTRUCTION
 
     absent = cast(AgentSpec, SimpleNamespace(instructions=None))
     assert raw_author_instructions(absent) is None

@@ -1,7 +1,6 @@
-"""The rollover super chat: labels and the compaction/threshold policy.
+"""Rollover context management: labels, token estimation, and selection.
 
-See ``rollover/DESIGN.md`` and ``rollover/PLAN.md`` for the design this
-package implements.
+See ``rollover/DESIGN.md`` and ``rollover/PLAN.md`` for the full design.
 """
 
 from __future__ import annotations
