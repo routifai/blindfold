@@ -1126,6 +1126,13 @@ async function postModelOptions(config, ctx) {
  * non-rollover session's config carries no ``rollover`` key, so this stays
  * false and the caller never registers the ``session_before_compact`` hook.
  */
+/** Whether a settled turn left the context at or over the rollover threshold. */
+function shouldRolloverAfterTurn(usage, rollover) {
+  const threshold = rollover && rollover.thresholdTokens;
+  if (!usage || typeof usage.tokens !== "number" || typeof threshold !== "number") return false;
+  return usage.tokens >= threshold;
+}
+
 function shouldHandleRolloverCompact(config) {
   return Boolean(config && config.rollover && config.rollover.checkpointHeader);
 }
@@ -2078,6 +2085,11 @@ module.exports = function (pi) {
   // rollover_extension_config): let Pi run its own compaction, but with
   // Omnigent's state-file summary instead of Pi's default narrative one.
   if (shouldHandleRolloverCompact(config)) {
+    // Omnigent's threshold, not Pi's window-relative one: compact once a
+    // settled turn leaves the context over it; the hook below writes the summary.
+    pi.on("agent_settled", async (_event, ctx) => {
+      if (shouldRolloverAfterTurn(ctx.getContextUsage?.(), config.rollover)) ctx.compact();
+    });
     pi.on("session_before_compact", async (event, ctx) => {
       rememberContext(ctx);
       return handleRolloverBeforeCompact(config, event, ctx);
@@ -2375,6 +2387,7 @@ module.exports = function (pi) {
 // only ever touches the default export above.
 module.exports.testHooks = {
   shouldHandleRolloverCompact,
+  shouldRolloverAfterTurn,
   buildRolloverCompactionResult,
   applyTodayPlaceholder,
   loadPiCompactionApi: _loadPiCompactionApi,

@@ -355,6 +355,7 @@ def rollover_extension_config(labels: Mapping[str, str] | None) -> _JsonObject |
     from omnigent.context.rollover import (
         CHECKPOINT_HEADER,
         SUMMARIZER_DATE_PLACEHOLDER,
+        resolve_rollover_threshold,
         state_file_summarizer_instruction,
     )
 
@@ -366,6 +367,7 @@ def rollover_extension_config(labels: Mapping[str, str] | None) -> _JsonObject |
             today=SUMMARIZER_DATE_PLACEHOLDER
         ),
         "datePlaceholder": SUMMARIZER_DATE_PLACEHOLDER,
+        "thresholdTokens": resolve_rollover_threshold(labels),
     }
 
 

@@ -570,8 +570,26 @@ function makeRolloverConfig() {
       checkpointHeader: "HEADER-TEXT",
       summarizerInstruction: "Write a state file for {today}.",
       datePlaceholder: "{today}",
+      thresholdTokens: 1000,
     },
   };
+}
+
+async function testRolloverCompactsOnceASettledTurnPassesTheThreshold() {
+  const h = makeHarness({ captureEvents: true, configOverrides: makeRolloverConfig() });
+  let compacts = 0;
+  const ctxAt = (tokens) => ({
+    getContextUsage: () => ({ tokens, contextWindow: 200000, percent: null }),
+    compact: () => {
+      compacts += 1;
+    },
+  });
+  await h.handlers.agent_settled({ type: "agent_settled" }, ctxAt(999));
+  assert("no compaction under the rollover threshold", compacts === 0);
+  await h.handlers.agent_settled({ type: "agent_settled" }, ctxAt(1000));
+  assert("compaction once a settled turn reaches the threshold", compacts === 1);
+  await h.handlers.agent_settled({ type: "agent_settled" }, ctxAt(null));
+  assert("unknown token count never compacts", compacts === 1);
 }
 
 function testRolloverHandlerNotRegisteredOutsideRolloverMode() {
@@ -699,6 +717,7 @@ async function testRolloverCompactionFailsOpenOnSummarizerError() {
     await testAgentStartClearsStaleWindow();
     testRolloverHandlerNotRegisteredOutsideRolloverMode();
     testRolloverHandlerRegisteredForRolloverSessions();
+    await testRolloverCompactsOnceASettledTurnPassesTheThreshold();
     await testRolloverCompactionReturnsHeaderSummaryAndFirstKeptEntryId();
     await testRolloverCompactionFailsOpenOnSummarizerError();
   } finally {
