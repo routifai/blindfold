@@ -31,6 +31,10 @@ _READ_BATCH_SIZE = 100
 _SEARCH_DEFAULT_LIMIT = 10
 _SEARCH_MAX_LIMIT = 20
 
+# Item kinds recall returns; everything else (notably reasoning) is hidden.
+_RECALL_ITEM_KINDS = frozenset({"message", "function_call", "function_call_output"})
+_HIDDEN_TYPE = "hidden"
+
 _ACTIONS = frozenset({"read", "search", "status"})
 
 
@@ -215,8 +219,10 @@ class TurnCollector:
     ) -> tuple[list[list[dict[str, Any]]], str | None] | None:
         """Add one newest-first page; return ``(turns, next_cursor)`` once done."""
         for idx, item in enumerate(items):
-            self._current.append(item)
             self._scanned += 1
+            if item.get("type") == _HIDDEN_TYPE:
+                continue
+            self._current.append(item)
             if item.get("type") == "text" and item.get("role") == "user":
                 self.turns.append(list(reversed(self._current)))
                 self._current = []
@@ -276,7 +282,8 @@ def _search(conv_store: Any, conversation_id: str, args: dict[str, Any]) -> str:
         return limit
 
     items = conv_store.search(query.strip(), conversation_id=conversation_id, limit=limit)
-    return json.dumps({"results": [_project_item(item) for item in items]})
+    results = [_project_item(item) for item in items]
+    return json.dumps({"results": [r for r in results if r["type"] != _HIDDEN_TYPE]})
 
 
 def _status(conv_store: Any, conversation_id: str) -> str:
@@ -344,6 +351,9 @@ def project_api_item(item: dict[str, Any]) -> dict[str, Any]:
     """
     base = {"id": item.get("id"), "created_at": item.get("created_at")}
     kind = item.get("type")
+    if kind not in _RECALL_ITEM_KINDS:
+        # Reasoning, errors, lifecycle and checkpoint items are not recalled.
+        return {**base, "type": _HIDDEN_TYPE}
     if kind == "function_call":
         return {
             **base,

@@ -6368,7 +6368,10 @@ async def _session_history_search_via_rest(
     except Exception as exc:  # noqa: BLE001
         return json.dumps({"error": f"session_history search failed: {exc}"})
     data: list[_JsonObject] = resp.json().get("data", [])
-    return json.dumps({"results": [_session_history.project_api_item(it) for it in data]})
+    results = [_session_history.project_api_item(it) for it in data]
+    return json.dumps(
+        {"results": [r for r in results if r["type"] != _session_history._HIDDEN_TYPE]}
+    )
 
 
 async def _session_history_status_via_rest(

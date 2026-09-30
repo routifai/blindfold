@@ -20,6 +20,7 @@ from omnigent.entities.conversation import (
     FunctionCallOutputData,
     MessageData,
     NewConversationItem,
+    ReasoningData,
 )
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
 from omnigent.tools.base import ToolContext
@@ -140,6 +141,49 @@ def test_read_groups_into_full_turns_newest_first(session_fixture: _Fixture) -> 
     assert [m["content"] for m in newest["messages"]] == ["second question", "second answer"]
     assert [m["content"] for m in oldest["messages"]] == ["first question", "first answer"]
     assert result["next_cursor"] is None
+
+
+def test_read_hides_reasoning_items(session_fixture: _Fixture) -> None:
+    """The model's reasoning never comes back through recall."""
+    reasoning = NewConversationItem(
+        type="reasoning",
+        response_id="resp_1",
+        data=ReasoningData(
+            agent="test-agent",
+            summary=[],
+            content=[{"type": "reasoning_text", "text": "SECRET-THOUGHT"}],
+        ),
+    )
+    session_fixture.conv_store.append(
+        session_fixture.conv_id,
+        [_user_msg("question"), reasoning, _assistant_msg("answer")],
+    )
+    raw = SessionHistoryTool().invoke(
+        json.dumps({"action": "read", "limit": 5}), session_fixture.ctx
+    )
+    assert "SECRET-THOUGHT" not in raw
+    (turn,) = json.loads(raw)["turns"]
+    assert [m["content"] for m in turn["messages"]] == ["question", "answer"]
+
+
+def test_group_into_turns_skips_hidden_items_without_losing_the_cursor() -> None:
+    """A page made only of hidden items still pages on to the older turns."""
+    desc = [
+        {"id": "4", "type": "hidden"},
+        {"id": "3", "type": "hidden"},
+        {"id": "2", "type": "text", "role": "assistant"},
+        {"id": "1", "type": "text", "role": "user"},
+    ]
+
+    def fetch_page(before: str | None) -> tuple[list[dict], bool]:
+        start = (
+            0 if before is None else next(i for i, it in enumerate(desc) if it["id"] == before) + 1
+        )
+        return desc[start : start + 2], (start + 2) < len(desc)
+
+    turns, next_cursor = group_into_turns(fetch_page, limit=5)
+    assert [[m["id"] for m in t] for t in turns] == [["1", "2"]]
+    assert next_cursor is None
 
 
 def test_read_pages_backward_with_cursor(session_fixture: _Fixture) -> None:
