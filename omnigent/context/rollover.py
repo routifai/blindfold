@@ -22,7 +22,7 @@ from omnigent.context.labels import (
     ROLLOVER_KEEP_MESSAGES_LABEL,
     ROLLOVER_KEEP_TOKENS_LABEL,
 )
-from omnigent.entities import CompactionData
+from omnigent.entities import NON_CONTENT_ITEM_TYPES, CompactionData
 from omnigent.runtime.compaction import count_tokens, summarize_history
 from omnigent.server.routes._sessions.common import (
     _LAST_CONTEXT_TOKENS_LABEL_KEY,
@@ -374,6 +374,13 @@ async def build_side_chat_seed(
         own ``compaction`` item.
     :raises ValueError: If *items* is empty.
     """
+    # Raw session items include lifecycle entries the model never saw; keep the
+    # parent's checkpoints, which the seed builds on.
+    items = [
+        item
+        for item in items
+        if item.get("type") == "compaction" or item.get("type") not in NON_CONTENT_ITEM_TYPES
+    ]
     if not items:
         raise ValueError("build_side_chat_seed requires a non-empty parent record")
 
