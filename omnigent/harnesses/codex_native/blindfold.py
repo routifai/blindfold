@@ -172,9 +172,28 @@ async def _run_one_shot(
     # table can tell "building the fresh config dir/history file" apart
     # from "the CLI process itself" (dominated by the model call).
     setup_started = time.monotonic()
-    fresh_codex_home = Path(tempfile.mkdtemp(prefix="omnigent-blindfold-codex-"))
+    # Codex refuses to create its helper binaries under the system tempdir
+    # ("Refusing to create helper binaries under temporary dir") — verified
+    # against the real CLI (0.159.2) — so the disposable CODEX_HOME lives
+    # under the process's own home instead of tempfile's default /tmp base.
+    _blindfold_tmp_root = Path.home() / ".omnigent-blindfold"
+    _blindfold_tmp_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fresh_codex_home = Path(
+        tempfile.mkdtemp(prefix="omnigent-blindfold-codex-", dir=str(_blindfold_tmp_root))
+    )
     workspace = Path.cwd().resolve()
     fresh_external_id = str(uuid.uuid4())
+
+    # Codex's own CLI-key auth reads CODEX_HOME/auth.json, not the
+    # OPENAI_API_KEY env var directly (verified against the real CLI: an
+    # inherited env var alone 401s) — mirrors what the resident app-server
+    # path's auth.json bridging does for a real login, but for the one-shot
+    # API-key case there is nothing to bridge from, so this writes it fresh.
+    _api_key = os.environ.get("OPENAI_API_KEY")
+    if _api_key:
+        (fresh_codex_home / "auth.json").write_text(
+            json.dumps({"OPENAI_API_KEY": _api_key}), encoding="utf-8"
+        )
 
     resumed = False
     if selected_items:
@@ -224,6 +243,10 @@ async def _run_one_shot(
         new_message_text,
     ]
     args += ["--output-last-message", str(last_message_path)]
+    # The one-shot workspace is whatever the executor's own cwd is, which is
+    # not necessarily a trusted git repo from Codex's point of view; skip
+    # that check rather than force every blindfolded workspace to be one.
+    args.append("--skip-git-repo-check")
     if model:
         args += ["--model", model]
 
@@ -243,6 +266,7 @@ async def _run_one_shot(
             env=env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            stdin=asyncio.subprocess.DEVNULL,
         )
         try:
             stdout, stderr = await asyncio.wait_for(

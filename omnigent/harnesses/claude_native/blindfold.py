@@ -268,6 +268,7 @@ async def _run_one_shot(
             env=env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            stdin=asyncio.subprocess.DEVNULL,
         )
         try:
             stdout, stderr = await asyncio.wait_for(
