@@ -7131,6 +7131,85 @@ def test_forwarder_drops_codex_image_generation_missing_status(
     assert "Codex imageGeneration missing status" in caplog.text
 
 
+def test_forwarder_posts_codex_mcp_tool_call() -> None:
+    """
+    A completed Codex ``mcpToolCall`` becomes a ``mcp__server__tool`` card.
+
+    Before this was handled, Codex's own MCP tool calls (e.g. the Omnigent
+    ``session_history`` relay tool) were silently dropped from the mirrored
+    transcript even though Codex genuinely ran them, unlike claude-native
+    which mirrors the equivalent call as ``mcp__omnigent__session_history``.
+    """
+    posted: list[dict[str, Any]] = []
+    asyncio.run(
+        _replay_completed_item(
+            {
+                "type": "mcpToolCall",
+                "id": "mcp_1",
+                "server": "omnigent",
+                "tool": "session_history",
+                "arguments": {"limit": 5},
+                "status": "completed",
+                "result": {"content": [{"type": "text", "text": "first message: hi"}]},
+            },
+            _capture_handler(posted),
+        )
+    )
+
+    assert [p["data"]["item_type"] for p in posted] == [
+        "function_call",
+        "function_call_output",
+    ]
+    call = posted[0]["data"]["item_data"]
+    assert call["name"] == "mcp__omnigent__session_history"
+    assert call["call_id"] == "mcp_1"
+    assert json.loads(call["arguments"]) == {"limit": 5}
+    assert posted[1]["data"]["item_data"]["output"] == "first message: hi"
+
+
+def test_forwarder_posts_codex_mcp_tool_call_error() -> None:
+    """A failed ``mcpToolCall`` surfaces its error message as the output."""
+    posted: list[dict[str, Any]] = []
+    asyncio.run(
+        _replay_completed_item(
+            {
+                "type": "mcpToolCall",
+                "id": "mcp_2",
+                "server": "omnigent",
+                "tool": "session_history",
+                "arguments": {},
+                "status": "failed",
+                "error": {"message": "relay unavailable"},
+            },
+            _capture_handler(posted),
+        )
+    )
+
+    assert posted[1]["data"]["item_data"]["output"] == "error: relay unavailable"
+
+
+def test_forwarder_drops_codex_mcp_tool_call_missing_server(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An ``mcpToolCall`` with no server/tool is dropped, not mirrored blank."""
+    posted: list[dict[str, Any]] = []
+    asyncio.run(
+        _replay_completed_item(
+            {
+                "type": "mcpToolCall",
+                "id": "mcp_bad",
+                "tool": "session_history",
+                "arguments": {},
+                "status": "completed",
+            },
+            _capture_handler(posted),
+        )
+    )
+
+    assert posted == []
+    assert "Codex mcpToolCall missing server/tool" in caplog.text
+
+
 def test_forwarder_posts_codex_entered_review_mode_marker() -> None:
     """
     Codex ``enteredReviewMode`` surfaces a visible review-mode marker.

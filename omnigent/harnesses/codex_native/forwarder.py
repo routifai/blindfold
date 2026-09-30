@@ -6582,16 +6582,73 @@ def _image_generation_tool_call(call_id: str, item: _JsonObject) -> _CodexToolCa
     )
 
 
+def _mcp_tool_call_result_text(result: object) -> str:
+    """
+    Render an MCP ``McpToolCallResult``'s text content blocks as plain text.
+
+    :param result: Codex ``mcpToolCall`` item ``result`` field, e.g.
+        ``{"content": [{"type": "text", "text": "..."}]}``.
+    :returns: Joined text content, or ``""`` when there is none.
+    """
+    if not isinstance(result, dict):
+        return ""
+    content = result.get("content")
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        text = block.get("text")
+        if isinstance(text, str) and text:
+            parts.append(text)
+    return "\n\n".join(parts)
+
+
+def _mcp_tool_call_tool_call(call_id: str, item: _JsonObject) -> _CodexToolCall | None:
+    """
+    Build a tool call from a Codex ``mcpToolCall`` item.
+
+    Named ``mcp__{server}__{tool}`` to match how claude-native mirrors the
+    same Omnigent MCP relay tool (e.g. ``mcp__omnigent__session_history``).
+
+    :param call_id: Codex item id, e.g. ``"mcp_abc"``.
+    :param item: Codex ``mcpToolCall`` item, e.g.
+        ``{"server": "omnigent", "tool": "session_history", "arguments": {},
+        "status": "completed",
+        "result": {"content": [{"type": "text", "text": "..."}]}}``.
+    :returns: Normalized tool call, or ``None`` when the server or tool
+        name is missing.
+    """
+    server = item.get("server")
+    tool = item.get("tool")
+    if not isinstance(server, str) or not server or not isinstance(tool, str) or not tool:
+        _logger.warning("Codex mcpToolCall missing server/tool: call_id=%s", call_id)
+        return None
+    arguments = item.get("arguments")
+    if not isinstance(arguments, dict):
+        arguments = {}
+    error = item.get("error")
+    if isinstance(error, dict) and isinstance(error.get("message"), str) and error["message"]:
+        output_text = f"error: {error['message']}"
+    else:
+        output_text = _mcp_tool_call_result_text(item.get("result"))
+    return _CodexToolCall(
+        call_id=call_id,
+        name=f"mcp__{server}__{tool}",
+        arguments=arguments,
+        output=output_text,
+    )
+
+
 # Codex built-in tool item types this forwarder mirrors into Omnigent history.
-# ``mcpToolCall`` is intentionally absent: its event shape has not been
-# verified, so it is logged-but-skipped rather than mirrored with guessed
-# fields. Add it here once its real shape is captured.
 _TOOL_ITEM_BUILDERS: dict[str, _ToolItemBuilder] = {
     "commandExecution": _command_execution_tool_call,
     "fileChange": _file_change_tool_call,
     "webSearch": _web_search_tool_call,
     "imageView": _image_view_tool_call,
     "imageGeneration": _image_generation_tool_call,
+    "mcpToolCall": _mcp_tool_call_tool_call,
 }
 _TOOL_ITEM_TYPES = frozenset(_TOOL_ITEM_BUILDERS)
 
