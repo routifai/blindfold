@@ -236,10 +236,13 @@ _CLAUDE_CODE_DISABLE_AGENT_VIEW_ENV = "CLAUDE_CODE_DISABLE_AGENT_VIEW"
 # only in the pane, so a web-driven session shows an unanswerable prompt —
 # often with nobody attached to the terminal at all.
 _CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY_ENV = "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY"
-# Rollover sessions rebuild the transcript themselves; Claude Code's own
-# auto-compaction must stay off so it never silently drops context Omnigent
-# still owns. Boolean env var, same family as DISABLE_AUTOUPDATER above.
-_CLAUDE_CODE_DISABLE_AUTO_COMPACT_ENV = "DISABLE_AUTO_COMPACT"
+# Rollover sessions move Claude Code's own auto-compaction to Omnigent's
+# threshold: it compacts at this percentage of this window (minus its summary
+# buffer). The window must be 100k-1M tokens.
+_CLAUDE_CODE_AUTO_COMPACT_WINDOW_ENV = "CLAUDE_CODE_AUTO_COMPACT_WINDOW"
+_CLAUDE_AUTOCOMPACT_PCT_OVERRIDE_ENV = "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"
+_CLAUDE_AUTO_COMPACT_WINDOW_BOUNDS = (100_000, 1_000_000)
+_CLAUDE_DEFAULT_AUTO_COMPACT_WINDOW = 200_000
 # Claude Code env vars that pin each model-tier alias to a provider-specific
 # model ID.  When set, the /model picker shows these IDs as options rather
 # than normalising to canonical Anthropic names (which the Databricks gateway
@@ -1502,10 +1505,21 @@ def claude_launch_catalog_is_stale(claude_config: ClaudeNativeUcodeConfig | None
     )
 
 
+def claude_auto_compact_env(compact_at_tokens: int) -> dict[str, str]:
+    """Env that makes Claude Code auto-compact at about *compact_at_tokens*."""
+    low, high = _CLAUDE_AUTO_COMPACT_WINDOW_BOUNDS
+    window = min(max(_CLAUDE_DEFAULT_AUTO_COMPACT_WINDOW, compact_at_tokens, low), high)
+    percent = min(max(-(-compact_at_tokens * 100 // window), 1), 100)
+    return {
+        _CLAUDE_CODE_AUTO_COMPACT_WINDOW_ENV: str(window),
+        _CLAUDE_AUTOCOMPACT_PCT_OVERRIDE_ENV: str(percent),
+    }
+
+
 def build_native_claude_terminal_env(
     claude_config: ClaudeNativeUcodeConfig | None,
     *,
-    rollover: bool = False,
+    compact_at_tokens: int | None = None,
 ) -> dict[str, str]:
     """
     Build env overrides for a native Claude Code terminal process.
@@ -1520,12 +1534,9 @@ def build_native_claude_terminal_env(
     :param claude_config: Optional provider/ucode launch config, e.g.
         one carrying ``{"ANTHROPIC_BASE_URL": "https://example.com"}``.
         ``None`` means use Claude Code's own native auth.
-    :param rollover: ``True`` for a rollover-mode session (see
-        ``omnigent.context.labels.is_rollover``): sets
-        :data:`_CLAUDE_CODE_DISABLE_AUTO_COMPACT_ENV` so Claude Code never
-        compacts its own context — Omnigent owns compaction and recycles
-        the pane instead. ``False`` (default) leaves Claude Code's own
-        auto-compaction untouched, byte-for-byte upstream behaviour.
+    :param compact_at_tokens: A rollover session's threshold: Claude Code's
+        own auto-compaction is set to fire there. ``None`` (default) leaves
+        it untouched, byte-for-byte upstream behaviour.
     :returns: Environment overrides for the terminal process, e.g.
         ``{"ENABLE_TOOL_SEARCH": "true"}``.
     """
@@ -1539,8 +1550,8 @@ def build_native_claude_terminal_env(
         terminal_env[_CLAUDE_CODE_ENABLE_TOOL_SEARCH_ENV] = "true"
         terminal_env[_CLAUDE_CODE_DISABLE_AGENT_VIEW_ENV] = "1"
         terminal_env[_CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY_ENV] = "1"
-    if rollover:
-        terminal_env[_CLAUDE_CODE_DISABLE_AUTO_COMPACT_ENV] = "1"
+    if compact_at_tokens is not None:
+        terminal_env.update(claude_auto_compact_env(compact_at_tokens))
     # On the apiKeyHelper path the credential reaches Claude Code via the
     # helper; a raw ANTHROPIC_API_KEY here re-triggers Claude Code's "Detected a
     # custom API key" menu, which hangs tmux delivery. Fail loud if one leaks.

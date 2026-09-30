@@ -2096,6 +2096,7 @@ def test_read_compacted_history_extracts_replacement_history_and_window_id(
     assert result["replacement_history"][0]["role"] == "user"
     assert result["replacement_history"][1]["type"] == "compaction"
     assert result["replacement_history"][1]["encrypted_content"] == "gAAAA_test_token"
+    assert result["summary"] == "summary"
 
 
 def test_read_compacted_history_returns_none_for_no_compacted_entry(

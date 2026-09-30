@@ -47,20 +47,13 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from omnigent._platform import normalize_interactive_shells
 from omnigent.acp_cli_harnesses import ACP_CLI_HARNESSES
-from omnigent.context.labels import CONTEXT_MODE_LABEL, is_rollover
-from omnigent.context.rollover import (
-    build_rollover_item,
-    estimate_context_tokens,
-    resolve_keep_tokens,
-    resolve_rollover_threshold,
-)
+from omnigent.context.labels import CONTEXT_MODE_LABEL
 from omnigent.debug_logging import (
     debug_event,
     phase_scope,
     runner_primary_session_id,
     set_current_session_id,
 )
-from omnigent.entities import NON_CONTENT_ITEM_TYPES
 from omnigent.entities.session_resources import (
     DEFAULT_ENVIRONMENT_ID,
     SessionResourceView,
@@ -92,7 +85,6 @@ from omnigent.llms.summarize import (
     build_summarization_prompt,
     extract_summary_text,
 )
-from omnigent.models.model_fallbacks import ROLLOVER_SUMMARY_FALLBACK_MODEL
 from omnigent.native.native_coding_agents import (
     native_coding_agent_for_agent_name,
     native_coding_agent_for_harness,
@@ -174,7 +166,6 @@ from omnigent.runner.resource_registry import (
     TerminalLifecycle,
     trim_terminal_output,
 )
-from omnigent.runner.rollover_gate import RolloverGate
 from omnigent.runner.session_init_protocol import (
     RunnerSessionInitEnvelope,
     parse_runner_session_init_envelope,
@@ -3153,9 +3144,6 @@ def create_runner_app(
     _repl_terminal_ensure_locks: dict[str, asyncio.Lock] = {}
     _active_turns: dict[str, asyncio.Task[None] | None] = {}
     app.state.active_turns = _active_turns
-    _rollover_gate = RolloverGate()
-    _ROLLOVER_FETCH_MAX_PAGES = 25
-    _DEFAULT_ROLLOVER_MODEL = ROLLOVER_SUMMARY_FALLBACK_MODEL
     # Conversations whose claude-sdk `/compact` published an up-front
     # `response.compaction.in_progress`. Used to (a) swallow the executor's own
     # later `in_progress` so the web shows a single spinner, and (b) publish a
@@ -7979,137 +7967,6 @@ def create_runner_app(
         except RuntimeError:
             pass
 
-    async def _maybe_apply_rollover(conv_id: str) -> None:
-        """Cheap no-op for every non-rollover turn; the label gates all I/O below."""
-        # pi-native rolls over through Pi's own compaction hook; recycling its
-        # pane too would double-compact. The gate opens before any await, so a
-        # turn arriving right now already waits.
-        if (
-            not _is_native_harness(conv_id)
-            or _session_harness_name(conv_id) == "pi-native"
-            or not _rollover_gate.try_open(conv_id)
-        ):
-            return
-        try:
-            # Durable per-session cache (see _rollover_labels_for_session) — no
-            # per-turn label round trip for the common case, unlike a TTL cache.
-            mode_labels = await _rollover_labels_for_session(conv_id)
-            if not is_rollover(mode_labels):
-                return
-            full_labels = await _session_labels_for_runner_spawn(
-                server_client=server_client, session_id=conv_id
-            )
-            await _apply_rollover_if_over_threshold(conv_id, dict(full_labels or {}))
-        except Exception:  # noqa: BLE001 — never break the chat over a rollover failure
-            _logger.warning(
-                "rollover check failed for %s; session continues un-rolled",
-                conv_id,
-                exc_info=True,
-                extra={"session_id": conv_id},
-            )
-        finally:
-            _rollover_gate.close(conv_id)
-
-    async def _fetch_rollover_window(
-        conv_id: str,
-    ) -> tuple[list[_JsonObject], str | None]:
-        """Page backward to the latest compaction item, or the session start.
-
-        :returns: Items strictly after that compaction item (chronological),
-            and its summary text — or ``None`` if the session never rolled
-            over yet.
-        """
-        collected: list[_JsonObject] = []
-        previous_summary: str | None = None
-        before: str | None = None
-        for _ in range(_ROLLOVER_FETCH_MAX_PAGES):
-            params: dict[str, Any] = {"limit": 200, "order": "desc"}
-            if before is not None:
-                params["before"] = before
-            resp = await server_client.get(f"/v1/sessions/{conv_id}/items", params=params)
-            resp.raise_for_status()
-            page = resp.json()
-            page_items = page.get("data") or []
-            if not page_items:
-                break
-            found_boundary = False
-            for item in page_items:
-                if item.get("type") == "compaction":
-                    previous_summary = item.get("summary")
-                    found_boundary = True
-                    break
-                # Lifecycle/metadata items (resource_event, routing_decision, …)
-                # were never part of the model's own context — the agent loop
-                # already excludes them (NON_CONTENT_ITEM_TYPES) — so they must
-                # not reach the summarizer's LLM input or the kept tail either.
-                if item.get("type") in NON_CONTENT_ITEM_TYPES:
-                    continue
-                collected.append(item)
-            if found_boundary or not page.get("has_more"):
-                break
-            before = page_items[-1].get("id")
-        collected.reverse()
-        return collected, previous_summary
-
-    async def _apply_rollover_if_over_threshold(conv_id: str, labels: dict[str, str]) -> None:
-        items, previous_summary = await _fetch_rollover_window(conv_id)
-        if not items:
-            return
-        spec = _unwrap_spec_entry(_session_spec_cache.get(conv_id))
-        model = (spec.executor.model if spec is not None else None) or _DEFAULT_ROLLOVER_MODEL
-        tokens_before = estimate_context_tokens(items, model=model, labels=labels)
-        threshold = resolve_rollover_threshold(labels)
-        if tokens_before < threshold:
-            return
-        connection = _resolve_summarize_connection(conv_id, model)
-        data = await build_rollover_item(
-            items,
-            previous_summary=previous_summary,
-            keep_tokens=resolve_keep_tokens(labels),
-            model=model,
-            llm_client=_get_runner_llm_client(),
-            connection=connection,
-        )
-        resp = await server_client.post(
-            f"/v1/sessions/{conv_id}/events",
-            json={"type": "compaction", "data": data.model_dump(exclude_none=True)},
-        )
-        resp.raise_for_status()
-        reaper = getattr(app.state, "native_pane_reaper", None)
-        reaped = await reaper.reap_now(conv_id) if reaper is not None else False
-        checkpoint_id = None
-        with contextlib.suppress(Exception):  # audit field only, never fail the rollover
-            checkpoint_id = resp.json().get("id")
-        # Refresh the reported-usage label to the real post-rollover figure
-        # right now, rather than leaving the pre-rollover number in place
-        # until the relaunched pane's forwarder posts its own first report —
-        # an unrefreshed label reads as still-over-threshold and would
-        # trigger a second rollover immediately after this one.
-        with contextlib.suppress(Exception):
-            await server_client.post(
-                f"/v1/sessions/{conv_id}/events",
-                json={
-                    "type": "external_session_usage",
-                    "data": {"context_tokens": data.token_count},
-                },
-            )
-        compacted = data.compacted_messages or []
-        first_kept_item_id = compacted[2].get("id") if len(compacted) > 2 else None
-        _logger.info(
-            "rollover applied for %s: trigger=threshold tokens_before=%s threshold=%s "
-            "tokens_after=%s checkpoint_item_id=%s first_kept_item_id=%s pane_reaped=%s",
-            conv_id,
-            tokens_before,
-            threshold,
-            data.token_count,
-            checkpoint_id,
-            first_kept_item_id,
-            reaped,
-            extra={"session_id": conv_id},
-        )
-
-    app.state.maybe_apply_rollover = _maybe_apply_rollover
-    app.state.rollover_gate = _rollover_gate
     app.state.session_init_envelopes = _session_init_envelopes
 
     async def _cancel_active_turn(
@@ -9022,7 +8879,6 @@ def create_runner_app(
         conv: str,
     ) -> None:
         _subagent_wake_pending.discard(conv)
-        await _rollover_gate.wait(conv)
         # Capture our own task so the finally floor can identity-compare before
         # clearing the slot (see below).
         _own_task = asyncio.current_task()
@@ -10753,12 +10609,6 @@ def create_runner_app(
                     allow_history_preview_fallback=False,
                 )
             turn_completed = data.get("turn_completed") if isinstance(data, dict) else None
-            # A native turn truly ends at the CLI's idle edge (delivery returns as
-            # soon as the prompt is typed); Codex's idle carries no completion flag.
-            if status == "idle":
-                _rollover_task = asyncio.create_task(_maybe_apply_rollover(conversation_id))
-                _background_tasks.add(_rollover_task)
-                _rollover_task.add_done_callback(_background_tasks.discard)
             interrupt_pending = False
             interrupt_work_id: str | None = None
             if status == "idle" and terminal_status is None and turn_completed is not True:

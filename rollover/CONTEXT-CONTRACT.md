@@ -10,8 +10,8 @@ it does not do yet. Code references are to this repository.
 | **Session** | One Omnigent conversation (main chat, side chat or sub-agent task). |
 | **Record** | Every item of a session, stored by the server. It is the visible thread and is never altered by context management. |
 | **Model context** | What the harness's model actually sees on a turn. Always a bounded view of the record. |
-| **Rollover** | Replacing old model context with a checkpoint once the context passes a token threshold. |
-| **Checkpoint** | A `compaction` item in the record: a summary plus the recent turns kept verbatim. |
+| **Rollover** | The harness compacting its own context once it passes Omnigent's token threshold. |
+| **Checkpoint** | A `compaction` item in the record: the summary plus what the harness kept verbatim. |
 | **Kept tail** | The recent whole turns kept verbatim in a checkpoint. |
 | **Recall** | Reading exact earlier items from the record with the `session_history` tool. |
 
@@ -24,7 +24,7 @@ labels **when the session is created**:
 |---|---|---|
 | `omnigent.context.mode` | `rollover` enables it | unset = upstream behaviour, unchanged |
 | `omnigent.context.rollover_at_tokens` | Token threshold that triggers a rollover | 45% of the model's context window; 90,000 when the window is unknown |
-| `omnigent.context.rollover_keep_tokens` | Budget for the kept tail | 16,000 |
+| `omnigent.context.rollover_keep_tokens` | Budget for the kept tail where Omnigent chooses it (pi-native, side-chat seeds) | 16,000 |
 
 Constants and helpers: `omnigent/context/labels.py`, `omnigent/context/rollover.py`.
 
@@ -32,49 +32,54 @@ Constants and helpers: `omnigent/context/labels.py`, `omnigent/context/rollover.
 
 1. **The record is never altered.** Users always see every message. A checkpoint
    is added to the record, and nothing is removed.
-2. **The model context is bounded.** It grows turn by turn until the threshold,
-   then a rollover replaces everything older than the kept tail with a summary.
-3. **Rollover happens between turns only.** It starts when the harness reports
-   its turn has finished. A message sent during a rollover waits (up to 120 s)
-   and is then answered from the new context.
-4. **The last turn is always kept verbatim.** Earlier whole turns are added
-   while they fit the kept-tail budget. A turn is never split, so a tool call
-   always keeps its result. Tool outputs in the kept tail are capped at 8,000
-   characters, with a note pointing to recall.
-5. **The summary is a state file, not a narrative.** Sections are grouped by
-   topic: who the user is and their constraints first, then active work with
-   exact identifiers, open requests and decisions, and "current position / next
-   step" last. Each summary is rewritten from the previous one plus the turns
-   since then.
-6. **Every checkpoint starts with a fixed header**, written by code:
-   `CHECKPOINT_HEADER` in `omnigent/context/rollover.py`. It states that the
-   checkpoint is not a message from the user, and that details must be
-   recovered with recall.
-7. **Exact earlier content stays reachable** through recall, whatever the
+2. **The model context is bounded.** Each native CLI compacts its own context
+   when it reaches the session's threshold: Claude Code through
+   `CLAUDE_CODE_AUTO_COMPACT_WINDOW` and `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`,
+   Codex through `model_auto_compact_token_limit`, and Pi through its
+   extension, which compacts at the threshold after a settled turn.
+3. **Compaction happens inside the harness, with no restart.** The CLI process
+   and its session continue. On Pi, a message sent while a compaction runs is
+   held (up to 120 s) and delivered when it finishes.
+4. **Every compaction is recorded** as a `compaction` item in the record, with
+   the harness's real summary text.
+5. **The rollover instruction is in the harness's system prompt**
+   (`ROLLOVER_CONTEXT_INSTRUCTION` in `omnigent/runtime/prompt.py`). It says
+   the summary is a pointer, not the truth, and that earlier details must be
+   recovered with recall before answering.
+6. **Exact earlier content stays reachable** through recall, whatever the
    summary dropped.
-8. **The harness's own compaction is off** for rollover sessions, so only one
-   component decides what the model keeps.
+
+Summary format and kept tail per harness:
+
+| Harness | Summary | Kept verbatim |
+|---|---|---|
+| claude-native | Claude Code's own compaction summary | Claude Code's own rule |
+| codex-native | Codex's own summary | Codex keeps the user's messages plus its summary |
+| pi-native | Omnigent's: the fixed header plus the state-file summary | Recent turns within `rollover_keep_tokens` |
+| Side-chat seed (any harness) | Omnigent's: the fixed header plus the state-file summary | The parent's recent whole turns within `rollover_keep_tokens` |
+
+Omnigent's state-file summary groups sections by topic: who the user is and
+their constraints first, then active work with exact identifiers, open
+requests and decisions, and "current position / next step" last. Its fixed
+header (`CHECKPOINT_HEADER` in `omnigent/context/rollover.py`) states that the
+checkpoint is not a message from the user.
 
 ## What the model sees after a rollover
 
-In order:
-1. The harness's own system prompt and tools, plus the agent's instructions,
-   plus the rollover instruction (`ROLLOVER_CONTEXT_INSTRUCTION` in
-   `omnigent/runtime/prompt.py`).
-2. The checkpoint: the fixed header, then the summary.
-3. The kept tail: recent whole turns, verbatim.
-4. Any turns since the checkpoint.
-5. The new message.
+The harness's own post-compaction context: its system prompt and tools
+(including the rollover instruction), the compaction summary, what it kept
+verbatim, then new turns.
 
 ## Checkpoint record
 
 A normal `compaction` item (`CompactionData`), posted to
-`POST /v1/sessions/{id}/events`:
+`POST /v1/sessions/{id}/events` by the harness forwarder (claude-native,
+codex-native), the Pi extension, or the side-chat fork:
 
 | Field | Content |
 |---|---|
-| `summary` | The fixed header, then the state-file summary |
-| `compacted_messages` | The summary exchange, then the kept tail (Omnigent item dicts) |
+| `summary` | The compaction summary (see the table above) |
+| `compacted_messages` | What the harness carries forward (Omnigent item dicts) |
 | `last_item_id` | The last record item the checkpoint covers |
 | `token_count` | Estimated tokens of `compacted_messages` |
 | `model` | Model used for the summary |
@@ -113,9 +118,9 @@ To manage a sub-agent's context too, create it with
 
 | Harness | Rollover mechanism | Recall |
 |---|---|---|
-| claude-native | Omnigent writes the checkpoint and restarts the CLI from it | Proven |
-| codex-native | Same as claude-native | Tool listed; model use not yet reliable |
-| pi-native | Pi's own compaction, triggered at our threshold, with Omnigent supplying the summary through the extension hook | Proven |
+| claude-native | Claude Code's own auto-compaction, set to the session's threshold | Tool always loaded; the model doesn't reliably call it on its own |
+| codex-native | Codex's own auto-compaction, set to the session's threshold | Tool listed; the model doesn't reliably call it on its own |
+| pi-native | Pi's own compaction, triggered at the threshold by the extension, with Omnigent's summary | Called on its own in live tests |
 | SDK harnesses | Not supported yet | — |
 
 ## Integration: long-term memory
@@ -164,7 +169,7 @@ and the memory tool returns what is **known about the user across sessions**.
 | Refresh after inactivity | Only the token threshold triggers a rollover |
 | Source links inside summaries | A checkpoint records the last item it covers, not a link per fact |
 | Pruning verbose material between rollovers | Only kept-tail tool outputs are capped |
-| Automatic per-turn retrieval | Recall is on demand; nothing is injected automatically each turn |
+| Automatic per-turn retrieval | Recall is on demand; nothing is injected automatically each turn. Needed, since models don't reliably call the recall tool by themselves |
 | Standing memory injected every turn | The extension point for long-term memory; not built |
 | A fixed "last N messages" per turn | Rollover bounds context by threshold instead |
 | SDK harnesses; pi-native side chats | Not supported yet |

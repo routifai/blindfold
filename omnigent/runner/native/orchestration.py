@@ -599,9 +599,9 @@ class _CodexNativeLaunchConfig:
         pinned into the private ``config.toml`` at launch so the thread (and
         the TUI footer) start at it instead of the shared config's default.
         ``None`` leaves Codex's configured effort in place.
-    :param rollover: ``True`` when the session's labels select rollover
-        (``omnigent.context.mode=rollover``): Codex's own auto-compaction
-        is overridden off at launch so Omnigent owns compaction.
+    :param compact_at_tokens: A rollover session's threshold
+        (``omnigent.context.mode=rollover``): Codex's own auto-compaction is
+        set to fire there. ``None`` leaves it untouched.
     """
 
     workspace: Path
@@ -617,7 +617,15 @@ class _CodexNativeLaunchConfig:
     routing_enabled: bool = False
     turn_routing: bool = False
     reasoning_effort: str | None = None
-    rollover: bool = False
+    compact_at_tokens: int | None = None
+
+
+def _rollover_compact_at(labels: Mapping[str, str] | None) -> int | None:
+    """A rollover session's compaction threshold, or ``None`` outside rollover."""
+    from omnigent.context.labels import is_rollover
+    from omnigent.context.rollover import resolve_rollover_threshold
+
+    return resolve_rollover_threshold(labels) if is_rollover(labels) else None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1338,9 +1346,7 @@ async def _codex_native_launch_config(
             fork_source_external_id = _fse
         fork_carry_history = labels.get(FORK_CARRY_HISTORY_LABEL_KEY) == "1"
         bypass_sandbox = labels.get(CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY) == "1"
-    from omnigent.context.labels import is_rollover
-
-    rollover = is_rollover(labels if isinstance(labels, dict) else None)
+    compact_at_tokens = _rollover_compact_at(labels if isinstance(labels, dict) else None)
     # One derivation of the session's Smart Routing class, shared with the SDK
     # codex path, so "pinned" and "auto-harness" mean the same on both.
     routing_class = routing_class_from_snapshot(
@@ -1362,7 +1368,7 @@ async def _codex_native_launch_config(
         routing_enabled=routing_class.routing_enabled,
         turn_routing=routing_class.turn_routing,
         reasoning_effort=reasoning_effort,
-        rollover=rollover,
+        compact_at_tokens=compact_at_tokens,
     )
 
 
@@ -5197,7 +5203,11 @@ async def _auto_create_codex_terminal(
 
     write_mcp_bridge_config(bridge_dir)
     mcp_overrides = codex_mcp_config_overrides(bridge_dir)
-    rollover_overrides = codex_rollover_config_overrides() if launch_config.rollover else []
+    rollover_overrides = (
+        codex_rollover_config_overrides(launch_config.compact_at_tokens)
+        if launch_config.compact_at_tokens is not None
+        else []
+    )
 
     # Omnigent coordinates for the codex-native policy hook. The hook runs as a
     # separate subprocess that POSTs tool calls to /policies/evaluate, so
@@ -5236,7 +5246,7 @@ async def _auto_create_codex_terminal(
             for x in [
                 _native_startup_raw_instructions_from_spec(agent_spec),
                 _codex_routing_note,
-                ROLLOVER_CONTEXT_INSTRUCTION if launch_config.rollover else None,
+                ROLLOVER_CONTEXT_INSTRUCTION if launch_config.compact_at_tokens else None,
             ]
             if x
         )
@@ -8117,7 +8127,6 @@ async def _auto_create_claude_terminal(
     """
     from pathlib import Path
 
-    from omnigent.context.labels import is_rollover
     from omnigent.harnesses.claude_native.bridge import (
         BRIDGE_ID_LABEL_KEY,
         augment_claude_args,
@@ -8136,7 +8145,10 @@ async def _auto_create_claude_terminal(
     # Omnigent, not Claude Code, owns compaction in a rollover session (the
     # label reaches every relaunch through the session snapshot, including
     # the post-rollover pane recycle).
-    rollover = is_rollover(session_init.snapshot.labels if session_init is not None else None)
+    compact_at_tokens = _rollover_compact_at(
+        session_init.snapshot.labels if session_init is not None else None
+    )
+    rollover = compact_at_tokens is not None
     from omnigent.runtime.prompt import ROLLOVER_CONTEXT_INSTRUCTION
 
     started_at = time.monotonic()
@@ -8835,7 +8847,7 @@ async def _auto_create_claude_terminal(
         # Tool Search env plus ucode gateway env (ANTHROPIC_BASE_URL
         # etc.) when derived. Empty provider config still forces
         # ENABLE_TOOL_SEARCH=true so MCP schemas are loaded on demand.
-        env=build_native_claude_terminal_env(claude_config, rollover=rollover),
+        env=build_native_claude_terminal_env(claude_config, compact_at_tokens=compact_at_tokens),
         # Names to strip (see ``_claude_terminal_env_unset``). Dropping
         # ``DATABRICKS_CONFIG_PROFILE`` matters because Claude's MCP servers
         # inherit this env and several build ``WorkspaceClient`` without pinning

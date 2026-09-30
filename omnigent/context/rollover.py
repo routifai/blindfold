@@ -1,12 +1,10 @@
-"""The rollover super chat: token estimate, recent-window selection, and
-the compaction item that recycles a resident native pane.
+"""Rollover: thresholds, the checkpoint header and summarizer instruction,
+and the Omnigent-written checkpoint used to seed side chats.
 
-A rollover session is one long-running native CLI session (claude-native /
-codex-native) that Omnigent, not the CLI, keeps bounded: once the estimated
-context fill crosses a threshold, a ``compaction`` item is written with a
-rolling summary plus the last few messages, and the native pane is recycled
-so the next turn's resume rebuilder relaunches the CLI from exactly that
-checkpoint (``rollover/DESIGN.md``).
+In a rollover session each native CLI compacts its own context at
+:func:`resolve_rollover_threshold` (see ``rollover/CONTEXT-CONTRACT.md``).
+:func:`build_side_chat_seed` is the one place Omnigent writes a checkpoint
+itself: a side chat starts from the parent's summary plus recent turns.
 """
 
 from __future__ import annotations
@@ -110,37 +108,6 @@ def reported_context_tokens(labels: Mapping[str, str] | None) -> int | None:
 def reported_context_window(labels: Mapping[str, str] | None) -> int | None:
     """The context window a native forwarder last reported, if any."""
     return _parse_positive_int((labels or {}).get(_LAST_CONTEXT_WINDOW_LABEL_KEY))
-
-
-def estimate_context_tokens(
-    items_since_last_compaction: list[dict[str, Any]],
-    *,
-    model: str,
-    labels: Mapping[str, str] | None = None,
-) -> int:
-    """
-    Estimate the model's current context-window fill, in tokens.
-
-    Prefers the last real usage a native forwarder reported
-    (:data:`_LAST_CONTEXT_TOKENS_LABEL_KEY`, set from the
-    ``external_session_usage`` event) since it reflects the CLI's own
-    tokenizer and system-prompt overhead. Falls back to a tiktoken estimate
-    over *items_since_last_compaction* when no real usage has been reported
-    yet (e.g. right after a rollover, or for a harness that reports none).
-
-    :param items_since_last_compaction: This session's items after the
-        latest ``compaction`` item (or the whole record when there is none),
-        as flat ``ConversationItem.to_api_dict()`` dicts.
-    :param model: LLM model string, used to pick a tokenizer for the
-        fallback estimate.
-    :param labels: The session's labels, or ``None``.
-    :returns: An approximate token count for the model's current context.
-    """
-    if labels is not None:
-        reported = _parse_positive_int(labels.get(_LAST_CONTEXT_TOKENS_LABEL_KEY))
-        if reported is not None:
-            return reported
-    return count_tokens(items_since_last_compaction, model)
 
 
 def resolve_rollover_threshold(labels: Mapping[str, str] | None) -> int:

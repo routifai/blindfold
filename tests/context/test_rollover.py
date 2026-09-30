@@ -12,7 +12,6 @@ from omnigent.context.rollover import (
     DEFAULT_ROLLOVER_THRESHOLD_TOKENS,
     SUMMARIZER_DATE_PLACEHOLDER,
     build_rollover_item,
-    estimate_context_tokens,
     resolve_keep_tokens,
     resolve_rollover_threshold,
     select_recent,
@@ -23,7 +22,6 @@ from omnigent.harnesses.codex_native import main as codex_native
 from omnigent.llms.types import MessageOutput, OutputText, Response
 from omnigent.runtime.compaction import count_tokens
 from omnigent.server.routes._sessions.common import (
-    _LAST_CONTEXT_TOKENS_LABEL_KEY,
     _LAST_CONTEXT_WINDOW_LABEL_KEY,
 )
 
@@ -178,28 +176,6 @@ def test_resolve_keep_tokens_default_and_override() -> None:
     assert resolve_keep_tokens(None) == 16_000
     assert resolve_keep_tokens({"omnigent.context.rollover_keep_tokens": "5000"}) == 5000
     assert resolve_keep_tokens({"omnigent.context.rollover_keep_tokens": "-1"}) == 16_000
-
-
-# ── estimate_context_tokens ──────────────────────────────────────────────
-
-
-def test_estimate_prefers_reported_usage_label() -> None:
-    items = [_msg("m1", "user", "hello world")]
-    labels = {_LAST_CONTEXT_TOKENS_LABEL_KEY: "4242"}
-    assert estimate_context_tokens(items, model="gpt-4o", labels=labels) == 4242
-
-
-def test_estimate_falls_back_to_count_tokens_without_label() -> None:
-    items = [_msg("m1", "user", "hello world")]
-    estimate = estimate_context_tokens(items, model="gpt-4o", labels=None)
-    assert estimate > 0
-
-
-def test_estimate_falls_back_when_label_invalid() -> None:
-    items = [_msg("m1", "user", "hello world")]
-    labels = {_LAST_CONTEXT_TOKENS_LABEL_KEY: "garbage"}
-    estimate = estimate_context_tokens(items, model="gpt-4o", labels=labels)
-    assert estimate > 0
 
 
 # ── build_rollover_item + resume-rebuilder acceptance ────────────────────

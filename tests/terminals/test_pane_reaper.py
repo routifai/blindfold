@@ -144,36 +144,6 @@ async def test_scan_recheck_spares_pane_that_became_busy() -> None:
     assert f.busy_calls == 2  # classify + re-check
 
 
-# ── reap_now: on-demand recycle (rollover) ───────────────────────────────────
-
-
-async def test_reap_now_reaps_a_live_pane_regardless_of_idle_clock() -> None:
-    f = _Fakes()
-    p = _pane("conv_a")
-    f.panes = [p]
-    r = _make(f, timeout=10.0)
-    # No idle-clock entry at all — reap_now must not wait for the idle window.
-    assert await r.reap_now("conv_a") is True
-    assert f.reaped == ["conv_a"]
-
-
-async def test_reap_now_returns_false_for_unknown_conversation() -> None:
-    f = _Fakes()
-    r = _make(f, timeout=10.0)
-    assert await r.reap_now("conv_missing") is False
-    assert f.reaped == []
-
-
-async def test_reap_now_clears_the_idle_clock_entry() -> None:
-    f = _Fakes()
-    p = _pane("conv_a")
-    f.panes = [p]
-    r = _make(f, timeout=10.0)
-    r._last_busy_at["conv_a"] = time.monotonic()
-    await r.reap_now("conv_a")
-    assert "conv_a" not in r._last_busy_at
-
-
 # ── Env resolver ────────────────────────────────────────────────────────────
 
 

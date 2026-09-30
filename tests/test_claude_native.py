@@ -3167,17 +3167,31 @@ async def test_ensure_local_claude_resume_transcript_rollover_rebuild(
     assert len(boundaries) == 1
 
 
-def test_build_native_claude_terminal_env_rollover_disables_auto_compact() -> None:
-    """A rollover session's terminal env turns off Claude Code's own auto-compact."""
-    env = claude_native.build_native_claude_terminal_env(None, rollover=True)
-    assert env["DISABLE_AUTO_COMPACT"] == "1"
+def test_build_native_claude_terminal_env_rollover_sets_the_compact_ceiling() -> None:
+    """A rollover session moves Claude Code's own auto-compact to its threshold."""
+    env = claude_native.build_native_claude_terminal_env(None, compact_at_tokens=90_000)
+    assert env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "200000"
+    assert env["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] == "45"
+    assert "DISABLE_AUTO_COMPACT" not in env
+
+
+def test_claude_auto_compact_env_keeps_the_window_in_claude_bounds() -> None:
+    """Claude Code accepts a 100k-1M window; the percentage absorbs the rest."""
+    low = claude_native.claude_auto_compact_env(20_000)
+    assert low == {
+        "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "200000",
+        "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "10",
+    }
+    high = claude_native.claude_auto_compact_env(800_000)
+    assert high["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "800000"
+    assert high["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] == "100"
 
 
 def test_build_native_claude_terminal_env_default_omits_auto_compact_flag() -> None:
     """Label unset (the default) is byte-for-byte upstream: no auto-compact override."""
     env = claude_native.build_native_claude_terminal_env(None)
-    assert "DISABLE_AUTO_COMPACT" not in env
-    assert env == claude_native.build_native_claude_terminal_env(None, rollover=False)
+    assert "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE" not in env
+    assert env == claude_native.build_native_claude_terminal_env(None, compact_at_tokens=None)
 
 
 @pytest.mark.asyncio

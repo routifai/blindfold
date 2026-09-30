@@ -6986,6 +6986,9 @@ async def _persist_codex_compaction_item(
         "token_count": 0,
     }
     if compacted is not None:
+        # Codex records its own summary text; keep it instead of the placeholder.
+        if compacted.get("summary"):
+            data["summary"] = compacted["summary"]
         if compacted.get("replacement_history"):
             data["compacted_messages"] = compacted["replacement_history"]
         if compacted.get("window_id") is not None:
@@ -7031,9 +7034,11 @@ def _read_compacted_history(rollout_path: Path) -> dict[str, object] | None:
     # in the conversation store, they are needed for rollout
     # reconstruction (e.g. sandbox recovery where the rollout file
     # is lost).
+    message = payload.get("message")
     return {
         "replacement_history": [item for item in history if isinstance(item, dict)],
         "window_id": payload.get("window_id"),
+        "summary": message if isinstance(message, str) and message.strip() else None,
     }
 
 

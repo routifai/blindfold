@@ -1227,9 +1227,8 @@ async function fetchLastConversationItemId(config) {
 
 /**
  * Report a Pi-driven rollover compaction to Omnigent as a ``compaction``
- * item (summary + boundary), the same item shape the pane-recycle path
- * writes for claude-native/codex-native — so recall (``session_history``)
- * and resume see one consistent checkpoint record regardless of harness.
+ * item (summary + boundary), the same item shape the other native CLIs'
+ * compactions are recorded with, so recall and resume see one record.
  */
 async function reportRolloverCompaction(config, { summary, model, tokensBefore }) {
   const lastItemId = (await fetchLastConversationItemId(config)) || `pi-compact-${Date.now()}`;
@@ -1247,7 +1246,7 @@ async function reportRolloverCompaction(config, { summary, model, tokensBefore }
 /**
  * Handle Pi's ``session_before_compact`` for a rollover session: build
  * Omnigent's state-file summary with Pi's own ``generateSummary`` and hand
- * it back so Pi records ITS OWN ``CompactionEntry`` (no pane recycle).
+ * it back so Pi records ITS OWN ``CompactionEntry``.
  * Fails open on any error so Pi's default compaction still runs rather than
  * stalling the session.
  */

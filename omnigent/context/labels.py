@@ -1,9 +1,9 @@
 """Session labels that switch context ownership between the CLI and Omnigent.
 
 ``omnigent.context.mode`` selects the lifecycle: unset means upstream
-behavior (the CLI owns its own context) untouched; ``"rollover"`` means
-Omnigent recycles the resident native pane from a summary + recent-messages
-checkpoint once the session's context gets long. See ``rollover/DESIGN.md``.
+behavior, untouched; ``"rollover"`` means each native CLI compacts its own
+context at Omnigent's threshold, and the session gets the recall tool and
+instruction. See ``rollover/CONTEXT-CONTRACT.md``.
 """
 
 from __future__ import annotations
