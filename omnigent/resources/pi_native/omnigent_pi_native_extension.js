@@ -1117,6 +1117,9 @@ async function postModelOptions(config, ctx) {
   });
 }
 
+// Longest a message waits for a rollover compaction before it is delivered anyway.
+const ROLLOVER_HOLD_MAX_MS = 120000;
+
 /** Whether a settled turn left the context at or over the rollover threshold. */
 function shouldRolloverAfterTurn(usage, rollover) {
   const threshold = rollover && rollover.thresholdTokens;
@@ -1306,6 +1309,7 @@ function startInboxPoller(
   handleModelChange,
   handleThinkingLevelChange,
   isTurnActive,
+  isCompactionHeld,
 ) {
   if (!config || !config.inboxDir || pi.__omnigentInboxPoller) return;
   // Bound the dedup set (FIFO eviction) — delivered files are unlinked, so a
@@ -1351,6 +1355,9 @@ function startInboxPoller(
         payload.type === "user_message" &&
         typeof payload.content === "string"
       ) {
+        // A message sent while a rollover compaction runs waits in the inbox
+        // (file kept) and is delivered on the tick after it finishes.
+        if (typeof isCompactionHeld === "function" && isCompactionHeld()) continue;
         // Mid-turn messages must STEER into the active turn: the Pi SDK
         // holds deliverAs "followUp" until the whole agent loop finishes, so
         // a web "Send now" delivered as a follow-up stays visibly queued in
@@ -1488,6 +1495,8 @@ module.exports = function (pi) {
   let agentRunning = false;
   let latestContext = null;
   let pendingInterruptUntil = 0;
+  // Until when inbox delivery is held for a rollover compaction (0 = not held).
+  let rolloverHoldUntil = 0;
   const postedToolCalls = new Set();
   const postedToolResults = new Set();
   const postedReasoning = new Set();
@@ -2056,6 +2065,7 @@ module.exports = function (pi) {
         const idle = safeIsIdle(latestContext);
         return idle === null ? agentRunning : !idle;
       },
+      () => Date.now() < rolloverHoldUntil,
     );
     markInputReady(config);
     const nativeSessionId =
@@ -2095,6 +2105,14 @@ module.exports = function (pi) {
     // settled turn leaves the context over it; the hook below writes the summary.
     // Disarmed after a trigger until a settled turn reads under the threshold,
     // so a kept tail that alone exceeds it can't compact on every turn.
+    const holdForRollover = () => {
+      rolloverHoldUntil = Date.now() + ROLLOVER_HOLD_MAX_MS;
+    };
+    const releaseRolloverHold = () => {
+      rolloverHoldUntil = 0;
+    };
+    pi.on("session_compact", releaseRolloverHold);
+    pi.on("session_compact_failed", releaseRolloverHold);
     let rolloverArmed = true;
     pi.on("agent_settled", async (_event, ctx) => {
       const usage = ctx.getContextUsage?.();
@@ -2104,8 +2122,10 @@ module.exports = function (pi) {
       }
       if (!rolloverArmed) return;
       rolloverArmed = false;
+      holdForRollover();
       ctx.compact({
         onError: (err) => {
+          releaseRolloverHold();
           rolloverArmed = true;
           console.error(`[omnigent] rollover compaction failed: ${err?.message ?? err}`);
         },
@@ -2113,6 +2133,7 @@ module.exports = function (pi) {
     });
     pi.on("session_before_compact", async (event, ctx) => {
       rememberContext(ctx);
+      holdForRollover();
       return handleRolloverBeforeCompact(config, event, ctx);
     });
   }

@@ -627,6 +627,67 @@ function testStripCheckpointHeaderUnnestsARolledUpSummary() {
   assert("undefined passes through", strip(undefined, "HEADER-TEXT") === undefined);
 }
 
+async function startRolloverSessionWithPoller() {
+  const h = makeHarness({ captureEvents: true, configOverrides: makeRolloverConfig() });
+  const sent = [];
+  h.pi.sendUserMessage = (content) => {
+    sent.push(content);
+  };
+  const ctx = {
+    ...makeCtx({ idle: true }),
+    sessionManager: { getSessionId: () => "hold-session" },
+    getContextUsage: () => ({ tokens: 5000, contextWindow: 200000, percent: null }),
+    compact: () => {},
+  };
+  await h.handlers.session_start({}, ctx);
+  return { h, ctx, sent };
+}
+
+function writeInboxMessage(h, id, content) {
+  const file = path.join(h.inboxDir, `${id}.json`);
+  fs.writeFileSync(file, JSON.stringify({ id, type: "user_message", content }));
+  return file;
+}
+
+async function testMessageDuringRolloverCompactionWaitsThenDelivers() {
+  const { h, ctx, sent } = await startRolloverSessionWithPoller();
+  await h.handlers.agent_settled({ type: "agent_settled" }, ctx);
+  const file = writeInboxMessage(h, "held-1", "hello during compaction");
+  await sleep(700);
+  assert(
+    "a message sent mid-compaction is held (not delivered, file kept)",
+    sent.length === 0 && fs.existsSync(file),
+  );
+  await h.handlers.session_compact({ type: "session_compact" }, ctx);
+  const deadline = Date.now() + 3000;
+  while (sent.length === 0 && Date.now() < deadline) await sleep(20);
+  assert(
+    "the held message is delivered once the compaction finishes",
+    sent.length === 1 && sent[0] === "hello during compaction" && !fs.existsSync(file),
+    JSON.stringify(sent),
+  );
+}
+
+async function testFailedCompactionAlsoReleasesHeldMessage() {
+  const { h, ctx, sent } = await startRolloverSessionWithPoller();
+  await h.handlers.session_before_compact({ preparation: null }, ctx);
+  writeInboxMessage(h, "held-2", "after a failed compaction");
+  await sleep(500);
+  assert("held while Pi's own compaction runs", sent.length === 0);
+  await h.handlers.session_compact_failed({ type: "session_compact_failed" }, ctx);
+  const deadline = Date.now() + 3000;
+  while (sent.length === 0 && Date.now() < deadline) await sleep(20);
+  assert("a failed compaction releases the held message", sent.length === 1);
+}
+
+async function testMessageIsNotHeldOutsideCompaction() {
+  const { h, sent } = await startRolloverSessionWithPoller();
+  writeInboxMessage(h, "free-1", "no compaction running");
+  const deadline = Date.now() + 3000;
+  while (sent.length === 0 && Date.now() < deadline) await sleep(20);
+  assert("a message is delivered normally when no compaction is running", sent.length === 1);
+}
+
 function testRolloverHandlerNotRegisteredOutsideRolloverMode() {
   const h = makeHarness({ captureEvents: true });
   assert(
@@ -763,6 +824,9 @@ async function testRolloverCompactionFailsOpenOnSummarizerError() {
     await testRolloverCompactsOnceASettledTurnPassesTheThreshold();
     await testRolloverDoesNotRecompactWhileStillOverTheThreshold();
     testStripCheckpointHeaderUnnestsARolledUpSummary();
+    await testMessageDuringRolloverCompactionWaitsThenDelivers();
+    await testFailedCompactionAlsoReleasesHeldMessage();
+    await testMessageIsNotHeldOutsideCompaction();
     await testRolloverCompactionReturnsHeaderSummaryAndFirstKeptEntryId();
     await testRolloverCompactionFailsOpenOnSummarizerError();
   } finally {
