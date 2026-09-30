@@ -11,7 +11,7 @@ Own stack, own ports — never touches `:8780` / `omnigent-runner-test` or
 ## One-time setup
 
 ```bash
-cd /Users/simo/pttx/omnigent-ro-e2e
+cd <repo>
 uv sync
 uv sync --group dev            # pytest, ruff (for the regular test suite)
 uv pip install playwright
@@ -21,10 +21,10 @@ uv run python -m playwright install chromium
 ## Server (host)
 
 ```bash
-cd /Users/simo/pttx/omnigent-ro-e2e
+cd <repo>
 mkdir -p .local-test-ro/data .local-test-ro/config .local-test-ro/logs
-export OMNIGENT_DATA_DIR=/Users/simo/pttx/omnigent-ro-e2e/.local-test-ro/data
-export OMNIGENT_CONFIG_HOME=/Users/simo/pttx/omnigent-ro-e2e/.local-test-ro/config
+export OMNIGENT_DATA_DIR=<repo>/.local-test-ro/data
+export OMNIGENT_CONFIG_HOME=<repo>/.local-test-ro/config
 export OMNIGENT_LOCAL_SINGLE_USER=1
 source .venv/bin/activate
 nohup omnigent server --host 0.0.0.0 --port 8795 --no-open \
@@ -47,14 +47,14 @@ cp dev/rollover/runner-config.example.yaml .local-test-ro/runner-config.yaml
 ```
 
 Env file: `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`, reused from
-`/Users/simo/pttx/omnigent-fresh/.local-test/runner.env` (never print its
+`<path/to/runner.env>` (never print its
 values).
 
 ```bash
 docker build -t omnigent-runner-ro-e2e -f dev/rollover/runner.Dockerfile .
 docker rm -f omnigent-runner-ro-e2e 2>/dev/null
 docker run -d --name omnigent-runner-ro-e2e \
-  --env-file /Users/simo/pttx/omnigent-fresh/.local-test/runner.env \
+  --env-file <path/to/runner.env> \
   -v "$(pwd)/.local-test-ro/runner-config.yaml:/root/.omnigent/config.yaml" \
   omnigent-runner-ro-e2e \
   omnigent host --server http://host.docker.internal:8795 --non-interactive --no-open
@@ -136,8 +136,8 @@ returns "no opinion" so the harness's native consent gate still runs; only
 
 ```bash
 docker rm -f omnigent-runner-ro-e2e
-kill "$(cat /Users/simo/pttx/omnigent-ro-e2e/.local-test-ro/logs/server.pid)" 2>/dev/null
+kill "$(cat <repo>/.local-test-ro/logs/server.pid)" 2>/dev/null
 docker rmi omnigent-runner-ro-e2e   # optional
-rm -rf /Users/simo/pttx/omnigent-ro-e2e/.local-test-ro/data \
-       /Users/simo/pttx/omnigent-ro-e2e/.local-test-ro/config
+rm -rf <repo>/.local-test-ro/data \
+       <repo>/.local-test-ro/config
 ```
