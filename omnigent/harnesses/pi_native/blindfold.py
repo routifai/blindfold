@@ -52,7 +52,9 @@ from omnigent.context_assembly.blindfold import (
     read_server_connection,
     record_user_message,
 )
+from omnigent.context_assembly.labels import LIFECYCLE_LABEL, LIFECYCLE_WARM_IF_VALID
 from omnigent.context_assembly.oneshot_events import parse_pi_json_events
+from omnigent.harnesses.pi_native.blindfold_warm import run_warm_or_cold
 
 _logger = logging.getLogger(__name__)
 
@@ -145,16 +147,34 @@ async def maybe_run_blindfold_turn(
             ctx = BlindfoldTurnContext(system_prompt="", prior_history_items=[], fallback=True)
 
         turn_id = f"turn_{uuid.uuid4().hex[:16]}"
-        result = await _run_one_shot(
-            session_id=session_id,
-            new_message_text=new_message_text,
-            system_text=ctx.system_prompt,
-            selected_items=ctx.prior_history_items,
-            model=model,
-            command=command,
-            turn_id=turn_id,
-            client=client,
-        )
+        if labels_dict.get(LIFECYCLE_LABEL) == LIFECYCLE_WARM_IF_VALID:
+            warm_result = await run_warm_or_cold(
+                session_id=session_id,
+                turn_id=turn_id,
+                new_message_text=new_message_text,
+                system_text=ctx.system_prompt,
+                selected_items=ctx.prior_history_items,
+                model=model,
+                command=command,
+                client=client,
+                workspace=Path.cwd().resolve(),
+            )
+            result = BlindfoldTurnResult(
+                handled=True,
+                response_text=warm_result.response_text,
+                error=warm_result.error,
+            )
+        else:
+            result = await _run_one_shot(
+                session_id=session_id,
+                new_message_text=new_message_text,
+                system_text=ctx.system_prompt,
+                selected_items=ctx.prior_history_items,
+                model=model,
+                command=command,
+                turn_id=turn_id,
+                client=client,
+            )
 
         with contextlib.suppress(httpx.HTTPError, ValueError):
             from omnigent.context_assembly.models import ObserveRequest, UsageInfo

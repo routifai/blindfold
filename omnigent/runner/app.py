@@ -5102,6 +5102,13 @@ def create_runner_app(
         await _cancel_auto_forwarder_task(session_id)
         # Close any OpenCode server that no forwarder adopted.
         await _native_runtime.teardown_opencode_native_server(session_id)
+        # Close any warm pi-native blindfold RPC process for this session
+        # (no-op for a session that never opted into warm_if_valid). Imported
+        # here, not at module scope, so pi-native's blindfold_warm module
+        # graph isn't pulled into every runner import.
+        from omnigent.harnesses.pi_native.blindfold_warm import close_warm_session
+
+        await close_warm_session(session_id)
 
         if process_manager is not None:
             await process_manager.forward_cancel(session_id)
