@@ -236,6 +236,10 @@ _CLAUDE_CODE_DISABLE_AGENT_VIEW_ENV = "CLAUDE_CODE_DISABLE_AGENT_VIEW"
 # only in the pane, so a web-driven session shows an unanswerable prompt —
 # often with nobody attached to the terminal at all.
 _CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY_ENV = "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY"
+# Rollover sessions rebuild the transcript themselves; Claude Code's own
+# auto-compaction must stay off so it never silently drops context Omnigent
+# still owns. Boolean env var, same family as DISABLE_AUTOUPDATER above.
+_CLAUDE_CODE_DISABLE_AUTO_COMPACT_ENV = "DISABLE_AUTO_COMPACT"
 # Claude Code env vars that pin each model-tier alias to a provider-specific
 # model ID.  When set, the /model picker shows these IDs as options rather
 # than normalising to canonical Anthropic names (which the Databricks gateway
@@ -1500,6 +1504,8 @@ def claude_launch_catalog_is_stale(claude_config: ClaudeNativeUcodeConfig | None
 
 def build_native_claude_terminal_env(
     claude_config: ClaudeNativeUcodeConfig | None,
+    *,
+    rollover: bool = False,
 ) -> dict[str, str]:
     """
     Build env overrides for a native Claude Code terminal process.
@@ -1514,6 +1520,12 @@ def build_native_claude_terminal_env(
     :param claude_config: Optional provider/ucode launch config, e.g.
         one carrying ``{"ANTHROPIC_BASE_URL": "https://example.com"}``.
         ``None`` means use Claude Code's own native auth.
+    :param rollover: ``True`` for a rollover-mode session (see
+        ``omnigent.context.labels.is_rollover``): sets
+        :data:`_CLAUDE_CODE_DISABLE_AUTO_COMPACT_ENV` so Claude Code never
+        compacts its own context — Omnigent owns compaction and recycles
+        the pane instead. ``False`` (default) leaves Claude Code's own
+        auto-compaction untouched, byte-for-byte upstream behaviour.
     :returns: Environment overrides for the terminal process, e.g.
         ``{"ENABLE_TOOL_SEARCH": "true"}``.
     """
@@ -1527,6 +1539,8 @@ def build_native_claude_terminal_env(
         terminal_env[_CLAUDE_CODE_ENABLE_TOOL_SEARCH_ENV] = "true"
         terminal_env[_CLAUDE_CODE_DISABLE_AGENT_VIEW_ENV] = "1"
         terminal_env[_CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY_ENV] = "1"
+    if rollover:
+        terminal_env[_CLAUDE_CODE_DISABLE_AUTO_COMPACT_ENV] = "1"
     # On the apiKeyHelper path the credential reaches Claude Code via the
     # helper; a raw ANTHROPIC_API_KEY here re-triggers Claude Code's "Detected a
     # custom API key" menu, which hangs tmux delivery. Fail loud if one leaks.
