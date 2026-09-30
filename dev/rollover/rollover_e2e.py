@@ -192,16 +192,20 @@ async def send_message_and_wait(
     await expect(composer).to_be_visible(timeout=30_000)
     await composer.fill(text)
     bubble_locator = page.locator('[data-testid="message-bubble"][data-role="assistant"]')
-    bubbles_before = await bubble_locator.count()
+    # The chat list is virtualized and replies can repeat, so mark the bubbles
+    # already shown and wait for an unmarked one.
+    await bubble_locator.evaluate_all("els => els.forEach(e => e.dataset.e2eSeen = '1')")
+    fresh_bubble = page.locator(
+        '[data-testid="message-bubble"][data-role="assistant"]:not([data-e2e-seen])'
+    )
     t0 = time.monotonic()
     await page.get_by_role("button", name="Send", exact=True).click()
 
     first_output_s: float | None = None
     deadline = time.monotonic() + TURN_TIMEOUT_S
     while time.monotonic() < deadline:
-        count = await bubble_locator.count()
-        if count > bubbles_before:
-            txt = await bubble_locator.last.inner_text()
+        if await fresh_bubble.count():
+            txt = await fresh_bubble.last.inner_text()
             if txt.strip():
                 first_output_s = time.monotonic() - t0
                 break
