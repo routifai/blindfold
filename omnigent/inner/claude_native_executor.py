@@ -128,6 +128,22 @@ class ClaudeNativeExecutor(Executor):
             return False
         return True
 
+    async def close_session(self, session_key: str) -> None:
+        """
+        Discard this session's warm blindfold process, if any.
+
+        A no-op for every session that isn't blindfolded with
+        ``omnigent.context.lifecycle=warm_if_valid`` (nothing was ever
+        started). The tmux pane itself is unaffected here — it's torn down
+        through its own path (see ``kill_session``); this only owns the
+        disposable-CLI-process side of blindfold mode.
+
+        :param session_key: Omnigent conversation id.
+        """
+        from omnigent.harnesses.claude_native.blindfold_warm import discard_warm_session
+
+        await discard_warm_session(session_key, reason="session_closed")
+
     async def _inject_prompt(self, text: str, notices: list[str]) -> None:
         """Inject user text with one-shot context while holding the injection lock."""
         context_path = self._bridge_dir / CLAUDE_FRAMEWORK_CONTEXT_FILE

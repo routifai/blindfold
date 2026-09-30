@@ -99,11 +99,20 @@ class BlindfoldTurnResult:
         one.
     :param error: A user-facing error message, when the turn could not be
         completed at all (e.g. the CLI process failed to start).
+    :param warm_reused: ``True`` when this turn reused a live warm process
+        (``omnigent.context.lifecycle=warm_if_valid`` sessions only —
+        see ``blindfold_warm.py``); ``False`` for every fresh-lifecycle
+        turn and for a warm-lifecycle turn that had to cold-start.
+    :param warm_reason: Why a warm-lifecycle turn did/didn't reuse its
+        process (e.g. ``"valid"``, ``"history_mismatch"``,
+        ``"no_warm_process"``); ``None`` under the fresh lifecycle.
     """
 
     handled: bool
     response_text: str | None = None
     error: str | None = None
+    warm_reused: bool = False
+    warm_reason: str | None = None
 
 
 async def maybe_run_blindfold_turn(
@@ -197,7 +206,13 @@ async def maybe_run_blindfold_turn(
             ctx = BlindfoldTurnContext(system_prompt="", prior_history_items=[], fallback=True)
 
         turn_id = f"turn_{uuid.uuid4().hex[:16]}"
-        result = await _run_one_shot(
+        from omnigent.harnesses.claude_native.blindfold_warm import (
+            is_warm_lifecycle,
+            run_warm_turn,
+        )
+
+        run_one_turn = run_warm_turn if is_warm_lifecycle(labels_dict) else _run_one_shot
+        result = await run_one_turn(
             bridge_dir=bridge_dir,
             session_id=session_id,
             turn_id=turn_id,
