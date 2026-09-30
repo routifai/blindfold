@@ -291,6 +291,10 @@ async def _run_one_shot(
 
     env = dict(os.environ)
     env["CLAUDE_CONFIG_DIR"] = str(fresh_config_dir)
+    # No CLAUDE.md files (including ones Claude Code attaches when a tool reads
+    # a nested directory) and no auto-memory: only the assembler's context.
+    env["CLAUDE_CODE_DISABLE_CLAUDE_MDS"] = "1"
+    env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
     resolved_command = shutil.which(command) or command
 
     response_text: str | None = None
