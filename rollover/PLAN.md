@@ -106,7 +106,10 @@ Worktree `omnigent-ro-harness`, branch `ro-harness`.
      `session_history` tool call must be in the record.
 - A baseline session (mode unset) behaves as upstream.
 
-Later: Pi (compaction in `resume.py`, a token estimate), memory, and the time tag.
+Later: Pi (compaction in `resume.py`, a token estimate); a permission-gated
+`session_history` read of the same user's other chats (the main chat pulls from
+side chats, nothing is pushed, as in Muse); memory with an hourly consolidation
+job that runs only when there are new turns; and the time tag.
 
 ## Rules for every agent
 
