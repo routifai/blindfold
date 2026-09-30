@@ -62,7 +62,6 @@ The memory item and `<long_term_memory>` block never appear in the session recor
 ## Known limits
 
 - Tool calls made inside a blindfolded one-shot are not yet written to the record (only the final answer), so the UI doesn't show them.
-- A second turn in a blindfolded session can wait about a minute before it starts (runner turn tracking), not yet root-caused.
 - No streaming: the answer arrives when the one-shot finishes.
 - Blindfold applies to runner-launched sessions (web UI, API); a `omnigent claude` launched by hand from a terminal is not blindfolded.
 - Without the probe's "do not run any tools" instruction, agentic models may search the disk (`env`, `find`, `grep`) and read files that exist in the workspace — that's tool access, not injected context.
