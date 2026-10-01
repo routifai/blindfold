@@ -593,3 +593,81 @@ def build_post_compaction_tail(
     if not recent:
         return None
     return _render_post_compaction_tail(recent)
+
+
+# session_id → id of the latest compaction item whose tail was already
+# delivered. Module-level, process-lifetime, shared by every delivery path
+# so a compaction is consumed once; a restart just re-delivers it once more.
+_post_compaction_tail_consumed: dict[str, str] = {}
+
+
+def consume_post_compaction_tail(
+    items: list[dict[str, Any]],
+    labels: Mapping[str, str] | None,
+    *,
+    session_id: str,
+    model: str,
+) -> str | None:
+    """
+    Build the post-compaction tail exactly once per compaction.
+
+    Thin wrapper around :func:`build_post_compaction_tail` adding the
+    once-per-compaction gate every delivery path shares: identifies the
+    latest ``compaction`` item in *items* and, when *session_id* already
+    consumed it, returns ``None`` without rebuilding or re-rendering.
+
+    :param items: The session's record, chronological, as flat item dicts.
+    :param labels: The session's labels.
+    :param session_id: Session id — the once-per-compaction tracking key.
+    :param model: LLM model string, used to pick a tokenizer for the budget.
+    :returns: The rendered block the first time a compaction is seen for
+        this session; ``None`` on a later call for the same compaction, or
+        for any reason :func:`build_post_compaction_tail` itself returns
+        ``None``.
+    """
+    compaction_id = next(
+        (item.get("id") for item in reversed(items) if item.get("type") == "compaction"),
+        None,
+    )
+    if not compaction_id or _post_compaction_tail_consumed.get(session_id) == compaction_id:
+        return None
+    _post_compaction_tail_consumed[session_id] = compaction_id
+    return build_post_compaction_tail(items, labels, model=model)
+
+
+def prefix_latest_user_item(items: list[dict[str, Any]], tail: str) -> list[dict[str, Any]]:
+    """
+    Prepend *tail* to the latest user message's text in raw session items.
+
+    For callers that must apply a tail to flat session-item dicts (``type:
+    "message"``, content blocks) rather than executor message shape — e.g.
+    codex-native's resume-rollout rebuild. Returns a new list; *items* and
+    its dicts are never mutated. A no-op when no user message is present.
+
+    :param items: Chronological flat item dicts.
+    :param tail: Text to prepend, e.g. a post-compaction tail block.
+    :returns: *items* with the tail prepended to the latest user message.
+    """
+    prefix = f"{tail}\n\n"
+    for i in range(len(items) - 1, -1, -1):
+        item = items[i]
+        if item.get("type") != "message" or item.get("role") != "user":
+            continue
+        content = item.get("content")
+        if isinstance(content, str):
+            new_content: Any = prefix + content
+        elif isinstance(content, list):
+            blocks = list(content)
+            for j, block in enumerate(blocks):
+                if isinstance(block, dict) and isinstance(block.get("text"), str):
+                    blocks[j] = {**block, "text": prefix + block["text"]}
+                    break
+            else:
+                blocks.insert(0, {"type": "input_text", "text": tail})
+            new_content = blocks
+        else:
+            return items
+        updated = list(items)
+        updated[i] = {**item, "content": new_content}
+        return updated
+    return items

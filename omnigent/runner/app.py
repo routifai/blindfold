@@ -3103,10 +3103,6 @@ def create_runner_app(
     # so tool-call-time gating (mcp_execute) never re-fetches it. Empty dict
     # means "resolved, not rollover" — distinct from "not yet resolved".
     _session_rollover_labels_cache: dict[str, dict[str, str]] = {}
-    # session_id → id of the latest ``compaction`` item whose post-compaction
-    # tail was already delivered. Runner-process lifetime, like the cache
-    # above: a restart re-delivers the tail once more, which is harmless.
-    _post_compaction_tail_consumed: dict[str, str] = {}
     _session_workspace_cache: dict[str, str | None] = {}  # session_id → workspace path
     _session_cursor_model_names: dict[str, dict[str, str]] = {}
     _session_claude_launch_configs: dict[str, ClaudeNativeUcodeConfig | None] = {}
@@ -8744,36 +8740,23 @@ def create_runner_app(
             page_items = resp.json().get("data", []) if resp.status_code == 200 else []
         except (httpx.HTTPError, ValueError):
             return body
-        compaction_index = next(
-            (i for i, item in enumerate(page_items) if item.get("type") == "compaction"),
-            None,
-        )
-        if compaction_index is None:
+        if not page_items:
             return body
-        compaction_id = page_items[compaction_index].get("id")
-        if not compaction_id or _post_compaction_tail_consumed.get(conv_id) == compaction_id:
-            return body
-        # Mark consumed up front: a build failure below must not retry this
-        # same compaction forever on later turns.
-        _post_compaction_tail_consumed[conv_id] = compaction_id
-        # page_items is newest-first; items older than the compaction item
-        # sit AFTER it in that list. Chronological order, compaction last —
-        # build_post_compaction_tail finds it and selects the tail before it.
-        chronological = [
-            *reversed(page_items[compaction_index + 1 :]),
-            page_items[compaction_index],
-        ]
         labels = await _session_labels_for_runner_spawn(
             server_client=server_client, session_id=conv_id
         )
-        from omnigent.context.rollover import build_post_compaction_tail
+        from omnigent.context.rollover import consume_post_compaction_tail
 
         model = (
             cast(str | None, body.get("model_override"))
             or cast(str | None, body.get("model"))
             or "gpt-4"
         )
-        tail = build_post_compaction_tail(chronological, labels, model=model)
+        # page_items is newest-first; consume_post_compaction_tail wants
+        # chronological order with the latest compaction item last.
+        tail = consume_post_compaction_tail(
+            list(reversed(page_items)), labels, session_id=conv_id, model=model
+        )
         if tail is None:
             return body
         new_body = dict(body)

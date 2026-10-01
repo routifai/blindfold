@@ -11623,6 +11623,71 @@ async def test_ensure_local_codex_resume_rollout_rollover_rebuild(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_ensure_local_codex_resume_rollout_applies_post_compaction_tail(
+    tmp_path: Path,
+) -> None:
+    """
+    A rollover session's cold resume gets the same verbatim post-compaction
+    tail the live ``proxy_stream`` turn delivery path adds — Codex reads
+    this rollout's own last (unanswered) user turn directly, never through
+    that path, so without this seam the tail never reaches it.
+    """
+    thread_id = "019e96aa-0be2-7343-8d3b-6f914d60936c"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    codex_home = tmp_path / "codex-home"
+    items = [
+        {
+            "id": "u1",
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "question before compaction"}],
+        },
+        {
+            "id": "a1",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "answer before compaction"}],
+        },
+        {
+            "id": "cmp_resume_1",
+            "type": "compaction",
+            "summary": "codex summary",
+            "last_item_id": "a1",
+        },
+        {
+            "id": "new_1",
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "pending message after restart"}],
+        },
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/labels"):
+            return httpx.Response(200, json={"labels": {"omnigent.context.mode": "rollover"}})
+        return httpx.Response(200, json={"data": items, "has_more": False})
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        rollout = await codex_native._ensure_local_codex_resume_rollout(
+            client,
+            session_id="conv_resume_tail",
+            external_session_id=thread_id,
+            codex_home=codex_home,
+            workspace=workspace.resolve(),
+            model_provider="omnigent_databricks",
+            codex_path=None,
+        )
+
+    text = rollout.read_text(encoding="utf-8")
+    assert "Recent conversation before the context was compacted" in text
+    assert "question before compaction" in text
+    assert "answer before compaction" in text
+    assert "pending message after restart" in text
+
+
+@pytest.mark.asyncio
 async def test_ensure_local_codex_resume_rollout_synthesizes_omnigent_history(
     tmp_path: Path,
 ) -> None:

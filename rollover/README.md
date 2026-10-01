@@ -73,9 +73,15 @@ claude-native or codex-native CLI gets a verbatim block of the whole turns
 Omnigent recorded immediately before that compaction (built by
 `build_post_compaction_tail`, `omnigent/context/rollover.py`), prepended
 only for that delivery — the persisted record and the user's own message are
-unchanged. One block per compaction; a later compaction re-arms it. Hooked in
-`omnigent/runner/app.py`'s `_apply_post_compaction_tail`, called from the
-shared `proxy_stream` turn-delivery path for both harnesses.
+unchanged. One block per compaction; a later compaction re-arms it (tracked
+by `consume_post_compaction_tail`, `omnigent/context/rollover.py`). Two
+delivery seams apply it: `omnigent/runner/app.py`'s
+`_apply_post_compaction_tail`, called from the shared `proxy_stream`
+turn-delivery path for both harnesses; and, for a codex-native session
+resumed after a runner restart, `_apply_post_compaction_tail_to_resume_items`
+in `omnigent/harnesses/codex_native/main.py` — Codex reads its own last
+unanswered turn straight out of the rebuilt resume rollout there, never
+through `proxy_stream`.
 
 ## Turning it on
 

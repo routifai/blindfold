@@ -652,3 +652,101 @@ def test_post_compaction_tail_ignores_items_after_the_latest_compaction() -> Non
     assert tail is not None
     assert "question 2" in tail
     assert "question 3" not in tail
+
+
+# ---------------------------------------------------------------------------
+# consume_post_compaction_tail / prefix_latest_user_item
+# ---------------------------------------------------------------------------
+
+
+def test_consume_post_compaction_tail_fires_once_per_compaction() -> None:
+    from omnigent.context.rollover import consume_post_compaction_tail
+
+    items = [*_turn(1), _compaction_item()]
+    first = consume_post_compaction_tail(
+        items, _rollover_labels(), session_id="consume-once", model="gpt-4o"
+    )
+    assert first is not None
+    assert "question 1" in first
+
+    second = consume_post_compaction_tail(
+        items, _rollover_labels(), session_id="consume-once", model="gpt-4o"
+    )
+    assert second is None
+
+
+def test_consume_post_compaction_tail_re_arms_on_a_later_compaction() -> None:
+    from omnigent.context.rollover import consume_post_compaction_tail
+
+    session_id = "consume-rearm"
+    first_items = [*_turn(1), _compaction_item("comp_a")]
+    assert (
+        consume_post_compaction_tail(
+            first_items, _rollover_labels(), session_id=session_id, model="gpt-4o"
+        )
+        is not None
+    )
+
+    later_items = [*first_items, *_turn(2), _compaction_item("comp_b")]
+    second = consume_post_compaction_tail(
+        later_items, _rollover_labels(), session_id=session_id, model="gpt-4o"
+    )
+    assert second is not None
+    assert "question 2" in second
+
+
+def test_consume_post_compaction_tail_scoped_per_session() -> None:
+    """Two sessions sharing the same compaction id each get the tail once."""
+    from omnigent.context.rollover import consume_post_compaction_tail
+
+    items = [*_turn(1), _compaction_item("shared_comp")]
+    for session_id in ("consume-session-a", "consume-session-b"):
+        tail = consume_post_compaction_tail(
+            items, _rollover_labels(), session_id=session_id, model="gpt-4o"
+        )
+        assert tail is not None
+
+
+def test_consume_post_compaction_tail_none_without_a_compaction() -> None:
+    from omnigent.context.rollover import consume_post_compaction_tail
+
+    assert (
+        consume_post_compaction_tail(
+            _turn(1), _rollover_labels(), session_id="consume-no-compaction", model="gpt-4o"
+        )
+        is None
+    )
+
+
+def test_prefix_latest_user_item_adds_to_existing_text_block() -> None:
+    from omnigent.context.rollover import prefix_latest_user_item
+
+    items = [*_turn(1), _msg("u2", "user", "pending question")]
+    updated = prefix_latest_user_item(items, "TAIL")
+    assert updated[-1]["content"][0]["text"] == "TAIL\n\npending question"
+    # Earlier items and the original list are untouched.
+    assert items[-1]["content"][0]["text"] == "pending question"
+    assert updated[0] is items[0]
+
+
+def test_prefix_latest_user_item_handles_string_content() -> None:
+    from omnigent.context.rollover import prefix_latest_user_item
+
+    items = [{"type": "message", "role": "user", "content": "pending question"}]
+    updated = prefix_latest_user_item(items, "TAIL")
+    assert updated[0]["content"] == "TAIL\n\npending question"
+
+
+def test_prefix_latest_user_item_inserts_block_when_text_blocks_absent() -> None:
+    from omnigent.context.rollover import prefix_latest_user_item
+
+    items = [{"type": "message", "role": "user", "content": [{"type": "input_image"}]}]
+    updated = prefix_latest_user_item(items, "TAIL")
+    assert updated[0]["content"][0] == {"type": "input_text", "text": "TAIL"}
+
+
+def test_prefix_latest_user_item_no_user_message_is_a_no_op() -> None:
+    from omnigent.context.rollover import prefix_latest_user_item
+
+    items = [_msg("a1", "assistant", "hello")]
+    assert prefix_latest_user_item(items, "TAIL") == items
