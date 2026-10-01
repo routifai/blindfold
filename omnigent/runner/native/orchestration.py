@@ -8298,6 +8298,10 @@ async def _auto_create_claude_terminal(
         workspace=Path(workspace),
         sandbox=(agent_os_env.sandbox if agent_os_env is not None else None),
     )
+    if rollover:
+        from omnigent.harnesses.claude_native.bridge import require_mcp_before_input
+
+        require_mcp_before_input(bridge_dir)
     # Cancel any surviving forwarder BEFORE wiping its cursor/seen state, else it
     # re-posts with fresh dedup state alongside the forwarder spawned below.
     await _cancel_auto_forwarder_task(session_id)

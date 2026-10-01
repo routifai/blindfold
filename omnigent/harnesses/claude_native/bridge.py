@@ -3950,6 +3950,37 @@ def write_tmux_target(
     _write_json_file(bridge_dir / _TMUX_FILE, payload)
 
 
+_MCP_TOOLS_LISTED_MARKER = "mcp_tools_listed"
+_AWAIT_MCP_MARKER = "await_mcp_before_input"
+_AWAIT_MCP_TIMEOUT_S = 30.0
+
+
+def mark_mcp_tools_listed(bridge_dir: Path) -> None:
+    """Record that Claude Code has listed this bridge's MCP tools."""
+    with contextlib.suppress(OSError):
+        (bridge_dir / _MCP_TOOLS_LISTED_MARKER).touch()
+
+
+def require_mcp_before_input(bridge_dir: Path) -> None:
+    """Make message delivery wait until Claude Code has the MCP tools."""
+    (bridge_dir / _AWAIT_MCP_MARKER).touch()
+    with contextlib.suppress(OSError):
+        (bridge_dir / _MCP_TOOLS_LISTED_MARKER).unlink()
+
+
+def _wait_for_mcp_tools(bridge_dir: Path, *, timeout_s: float = _AWAIT_MCP_TIMEOUT_S) -> None:
+    # Claude Code connects MCP servers in the background; a first message
+    # typed before then runs without Omnigent's tools.
+    if not (bridge_dir / _AWAIT_MCP_MARKER).exists():
+        return
+    deadline = time.monotonic() + timeout_s
+    while not (bridge_dir / _MCP_TOOLS_LISTED_MARKER).exists():
+        if time.monotonic() >= deadline:
+            _logger.warning("Claude Code had not listed MCP tools after %.0fs", timeout_s)
+            return
+        time.sleep(0.2)
+
+
 @_serialize_bridge_injection
 def inject_user_message(
     bridge_dir: Path,
@@ -4029,6 +4060,7 @@ def inject_user_message(
         timeout_s=timeout_s,
         bridge_dir=bridge_dir,
     )
+    _wait_for_mcp_tools(bridge_dir)
     # Escape unsupported slash commands (e.g. ``/help``, ``/exit``) so the
     # Claude Code TUI treats them as user text instead of invoking a state
     # that Omnigent cannot drive. Allowed commands (``/clear``,
@@ -7024,6 +7056,7 @@ def _handle_mcp_request(
             ),
         }
     if method == "tools/list":
+        mark_mcp_tools_listed(bridge_dir)
         return {"tools": _combined_mcp_tool_schemas(tools, bridge_dir)}
     if method == "tools/call":
         return _call_mcp_tool(params, tools, bridge_dir)
