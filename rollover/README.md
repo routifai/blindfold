@@ -135,6 +135,10 @@ What to do:
 - A new `compaction` item in a session's event stream means a rollover
   happened. `session_history` with `action: status` reports how close the
   session is to the next one.
+- The super chat reading a side chat (Muse's `chat.list` +
+  `chat.read_messages`) is built: `session_history`'s `list_chats` finds the
+  related side chats, then `read`/`search` take that id as `chat_id`. See
+  [Reading a side chat](#reading-a-side-chat-muse-parity) above.
 - Coordinator system prompt: a draft for a bank-employee work assistant is in
   [SUPER-CHAT-PROMPT.md](SUPER-CHAT-PROMPT.md). Its context-management section
   matches `ROLLOVER_CONTEXT_INSTRUCTION`; don't repeat that rule in agent
@@ -208,17 +212,37 @@ claims the user never explicitly asked to remember).
 ## Recall tool: `session_history`
 
 Present only in rollover sessions. Read-only. The session comes from the
-calling context, never from arguments, so it can't read another session.
+calling context, never from arguments, so it can't read another session on
+its own — `read`/`search` can look into a *related* side chat, but only one
+the context itself names (see below), never an arbitrary id.
 
 | Action | Arguments | Returns |
 |---|---|---|
-| `read` | `cursor?`, `limit?` (turns; default 5, max 20) | Full turns, newest first, with role, content, timestamps and item ids; `next_cursor` for older pages |
-| `search` | `query`, `limit?` (default 10, max 20) | Matching items from this session, full-text |
+| `read` | `cursor?`, `limit?` (turns; default 5, max 20), `chat_id?` | Full turns, newest first, with role, content, timestamps and item ids; `next_cursor` for older pages |
+| `search` | `query`, `limit?` (default 10, max 20), `chat_id?` | Matching items, full-text |
 | `status` | — | `rollover_trigger_tokens`, plus window, current tokens, tokens remaining and percent used when known |
+| `list_chats` | — | The side chats related to this session (forked from it, or its parent if this one IS a side chat): id, title, created/updated timestamps, a short last-message preview |
 
 It returns messages, tool calls and tool results only (each capped at 2,000
 characters); reasoning and lifecycle items are never returned. Code:
 `omnigent/tools/builtins/session_history.py`.
+
+### Reading a side chat (Muse parity)
+
+Muse's main chat can read a side chat (`chat.list` + `chat.read_messages`).
+Omnigent's `session_history` mirrors that: call `list_chats` to find the
+related side chats, then pass one of those ids as `chat_id` to `read` or
+`search` to look into it — same output shape, limits and caps as reading
+this session itself. `chat_id` is validated against the caller's own
+`list_chats` set (or the caller's own id) and must be owned by the same
+user; an unrelated or cross-owner id is a clear error, never a silent
+redirect. This is read-only in both directions — a side chat is never
+written to through this tool. Implemented at the Omnigent level only (no
+per-CLI code): `omnigent/context/rollover.py` (`list_related_chats`,
+`related_chat_ids`), `omnigent/tools/builtins/session_history.py` (the
+in-process tool), `omnigent/runner/tool_dispatch.py` (the native-relay REST
+dispatch), and `GET /v1/sessions/{id}/related_chats`
+(`omnigent/server/routes/sessions/routes_items.py`).
 
 ## Checkpoint record
 
@@ -290,8 +314,8 @@ Every file this work changes against upstream, and why.
 |---|---|
 | `omnigent/context/__init__.py` | New package |
 | `omnigent/context/labels.py` | Label names (`omnigent.context.*`) and `is_rollover` |
-| `omnigent/context/rollover.py` | Threshold (`resolve_rollover_threshold`), kept-tail budget, recent-turn selection, state-file summary for Pi and side-chat seeds, side-chat seed builder, recent-turns block after a compaction (`build_post_compaction_tail`, once per compaction) |
-| `omnigent/runtime/prompt.py` | `ROLLOVER_CONTEXT_INSTRUCTION`, added to every rollover session's system prompt |
+| `omnigent/context/rollover.py` | Threshold (`resolve_rollover_threshold`), kept-tail budget, recent-turn selection, state-file summary for Pi and side-chat seeds, side-chat seed builder, recent-turns block after a compaction (`build_post_compaction_tail`, once per compaction), related-side-chat discovery (`list_related_chats`, `related_chat_ids`) |
+| `omnigent/runtime/prompt.py` | `ROLLOVER_CONTEXT_INSTRUCTION`, added to every rollover session's system prompt; one sentence on using `list_chats`/`chat_id` for another chat |
 | `omnigent/llms/summarize.py`, `omnigent/runtime/compaction.py` | `extra_instructions` so Omnigent's summarizer can produce the state-file shape |
 | `omnigent/models/model_fallbacks.py` | Fallback model for side-chat seed summaries when the session names none |
 
@@ -299,11 +323,11 @@ Every file this work changes against upstream, and why.
 
 | File | Why |
 |---|---|
-| `omnigent/tools/builtins/session_history.py` | The `session_history` tool (read, search, status) |
+| `omnigent/tools/builtins/session_history.py` | The `session_history` tool (`read`, `search`, `status`, `list_chats`); `chat_id` on `read`/`search` to look into a related side chat, validated against the caller's own `list_chats`/id |
 | `omnigent/tools/builtins/__init__.py`, `omnigent/tools/manager.py` | Register it, only for rollover sessions |
-| `omnigent/runner/tool_dispatch.py` | Run it from native CLIs through the runner (over the server API) and include it in the relay tool list |
-| `omnigent/server/routes/sessions/routes_items.py` | `GET /v1/sessions/{id}/items/search`, scoped to one session |
-| `omnigent/stores/conversation_store/sqlalchemy_store.py` | Quote full-text terms so IDs with `-` or `:` don't crash search |
+| `omnigent/runner/tool_dispatch.py` | Run it from native CLIs through the runner (over the server API) and include it in the relay tool list; `list_chats`/`chat_id` dispatch over the same REST endpoints |
+| `omnigent/server/routes/sessions/routes_items.py` | `GET /v1/sessions/{id}/items/search`, scoped to one session; `GET /v1/sessions/{id}/related_chats` for `list_chats` |
+| `omnigent/stores/conversation_store/__init__.py`, `sqlalchemy_store.py` | Quote full-text terms so IDs with `-` or `:` don't crash search; `list_conversations(fork_source_id=...)` filter powering related-chat discovery |
 
 **Claude Code**
 
@@ -367,7 +391,12 @@ Every file this work changes against upstream, and why.
 - Unit tests: `tests/context`, `tests/tools/builtins/test_session_history.py`,
   `tests/test_claude_native.py`, `tests/test_codex_native*.py`,
   `tests/test_pi_native*.py`, `tests/runner/test_session_history_tool_dispatch.py`,
-  `tests/runner/test_post_compaction_tail_delivery.py`.
+  `tests/runner/test_post_compaction_tail_delivery.py`. Related-chat
+  discovery and `chat_id`: the same `test_session_history.py` and
+  `test_session_history_tool_dispatch.py`, plus
+  `tests/stores/test_conversation_store.py` (`fork_source_id` filter) and
+  `tests/server/integration/test_sessions_items_search.py`
+  (`GET .../related_chats`).
 - Long-term memory (Phase 1): `tests/stores/test_memory_store.py`, `tests/memory`
   (service + index, with a deterministic offline embeddings backend — no
   OpenAI calls), `tests/tools/builtins/test_memory.py`,

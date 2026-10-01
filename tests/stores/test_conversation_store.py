@@ -6591,6 +6591,28 @@ def test_list_conversations_filters_by_pinned_label(
     assert conversation_store.list_conversations(pinned=True, pinned_owner="alice").data == []
 
 
+def test_list_conversations_filters_by_fork_source_id(
+    conversation_store: SqlAlchemyConversationStore,
+) -> None:
+    """``list_conversations(fork_source_id=X)`` returns only sessions whose
+    ``FORK_SOURCE_LABEL_KEY`` label equals ``X`` — powers ``session_history``'s
+    ``list_chats`` side-chat discovery."""
+    from omnigent.stores.conversation_store import FORK_SOURCE_LABEL_KEY
+
+    source = conversation_store.create_conversation(title="source")
+    child = conversation_store.create_conversation(title="child")
+    other_child = conversation_store.create_conversation(title="other child")
+    unrelated = conversation_store.create_conversation(title="unrelated")
+    conversation_store.set_labels(child.id, {FORK_SOURCE_LABEL_KEY: source.id})
+    conversation_store.set_labels(other_child.id, {FORK_SOURCE_LABEL_KEY: "conv_someone_else"})
+
+    page = conversation_store.list_conversations(fork_source_id=source.id)
+    ids = {c.id for c in page.data}
+    assert ids == {child.id}
+    assert other_child.id not in ids
+    assert unrelated.id not in ids
+
+
 def test_pinned_label_key_fits_column_for_long_user_ids() -> None:
     """The per-user pin key must never overflow the ``String(128)`` label-key
     column. Short ids stay verbatim (DB-readable); an over-long id (e.g. a long

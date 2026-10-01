@@ -208,6 +208,178 @@ async def test_status_via_rest_reads_labels() -> None:
     assert result["context_window_tokens"] == 1000
 
 
+# ── list_chats ────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_list_chats_via_rest() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == f"/v1/sessions/{CONV}/related_chats"
+        return httpx.Response(
+            200,
+            json={"data": [{"id": "conv_side_1", "title": "Side chat"}]},
+        )
+
+    client = _client(handler)
+    try:
+        result = json.loads(
+            await _execute_session_history_tool(
+                {"action": "list_chats"}, conversation_id=CONV, server_client=client
+            )
+        )
+    finally:
+        await client.aclose()
+    assert result["chats"] == [{"id": "conv_side_1", "title": "Side chat"}]
+
+
+@pytest.mark.asyncio
+async def test_list_chats_via_rest_reports_http_errors() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500)
+
+    client = _client(handler)
+    try:
+        result = json.loads(
+            await _execute_session_history_tool(
+                {"action": "list_chats"}, conversation_id=CONV, server_client=client
+            )
+        )
+    finally:
+        await client.aclose()
+    assert "error" in result
+
+
+# ── read / search with chat_id ───────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_read_with_chat_id_targets_the_related_chat() -> None:
+    other_chat = "conv_side_1"
+    seen_paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_paths.append(request.url.path)
+        if request.url.path == f"/v1/sessions/{CONV}/related_chats":
+            return httpx.Response(200, json={"data": [{"id": other_chat}]})
+        assert request.url.path == f"/v1/sessions/{other_chat}/items"
+        return httpx.Response(
+            200, json={"data": [_item("1", "user", "side chat question")], "has_more": False}
+        )
+
+    client = _client(handler)
+    try:
+        result = json.loads(
+            await _execute_session_history_tool(
+                {"action": "read", "chat_id": other_chat},
+                conversation_id=CONV,
+                server_client=client,
+            )
+        )
+    finally:
+        await client.aclose()
+    assert [m["content"] for m in result["turns"][0]["messages"]] == ["side chat question"]
+    assert f"/v1/sessions/{CONV}/related_chats" in seen_paths
+
+
+@pytest.mark.asyncio
+async def test_read_with_own_id_as_chat_id_skips_the_related_chats_lookup() -> None:
+    """chat_id == conversation_id is a no-op; no related_chats round trip needed."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == f"/v1/sessions/{CONV}/items"
+        return httpx.Response(200, json={"data": [], "has_more": False})
+
+    client = _client(handler)
+    try:
+        result = json.loads(
+            await _execute_session_history_tool(
+                {"action": "read", "chat_id": CONV},
+                conversation_id=CONV,
+                server_client=client,
+            )
+        )
+    finally:
+        await client.aclose()
+    assert "error" not in result
+
+
+@pytest.mark.asyncio
+async def test_read_with_unrelated_chat_id_is_denied() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == f"/v1/sessions/{CONV}/related_chats"
+        return httpx.Response(200, json={"data": [{"id": "conv_side_1"}]})
+
+    client = _client(handler)
+    try:
+        result = json.loads(
+            await _execute_session_history_tool(
+                {"action": "read", "chat_id": "conv_not_related"},
+                conversation_id=CONV,
+                server_client=client,
+            )
+        )
+    finally:
+        await client.aclose()
+    assert "error" in result
+
+
+@pytest.mark.asyncio
+async def test_search_with_chat_id_targets_the_related_chat() -> None:
+    other_chat = "conv_side_1"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == f"/v1/sessions/{CONV}/related_chats":
+            return httpx.Response(200, json={"data": [{"id": other_chat}]})
+        assert request.url.path == f"/v1/sessions/{other_chat}/items/search"
+        return httpx.Response(200, json={"data": [_item("1", "user", "found it")]})
+
+    client = _client(handler)
+    try:
+        result = json.loads(
+            await _execute_session_history_tool(
+                {"action": "search", "query": "found", "chat_id": other_chat},
+                conversation_id=CONV,
+                server_client=client,
+            )
+        )
+    finally:
+        await client.aclose()
+    assert len(result["results"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_search_with_unrelated_chat_id_is_denied() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": []})
+
+    client = _client(handler)
+    try:
+        result = json.loads(
+            await _execute_session_history_tool(
+                {"action": "search", "query": "x", "chat_id": "conv_not_related"},
+                conversation_id=CONV,
+                server_client=client,
+            )
+        )
+    finally:
+        await client.aclose()
+    assert "error" in result
+
+
+@pytest.mark.asyncio
+async def test_read_rejects_non_string_chat_id() -> None:
+    client = httpx.AsyncClient(base_url="http://server")
+    try:
+        result = json.loads(
+            await _execute_session_history_tool(
+                {"action": "read", "chat_id": 123}, conversation_id=CONV, server_client=client
+            )
+        )
+    finally:
+        await client.aclose()
+    assert "error" in result
+
+
 # ── Grant gate: advertised only where actually callable ──────
 
 

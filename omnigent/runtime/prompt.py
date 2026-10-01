@@ -74,7 +74,9 @@ ROLLOVER_CONTEXT_INSTRUCTION = (
     "a compaction, so the oldest one you can see is not the first: never "
     "answer a question about earlier messages from the visible ones alone. State "
     "plainly what you couldn't recover. Never present an inference as what "
-    "happened."
+    "happened. When the user refers to work from another chat, call "
+    "session_history's list_chats action, then read or search with that "
+    "chat's id, and name the source chat in your answer."
 )
 
 # Long-term memory (rollover/MEMORY-PLAN.md Phase 1): what was said in THIS

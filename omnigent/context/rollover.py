@@ -19,11 +19,22 @@ from omnigent.context.labels import (
     ROLLOVER_KEEP_TOKENS_LABEL,
     is_rollover,
 )
-from omnigent.entities import NON_CONTENT_ITEM_TYPES, CompactionData
+from omnigent.entities import (
+    NON_CONTENT_ITEM_TYPES,
+    CompactionData,
+    Conversation,
+    ConversationItem,
+    MessageData,
+)
 from omnigent.runtime.compaction import count_tokens, summarize_history
 from omnigent.server.routes._sessions.common import (
     _LAST_CONTEXT_TOKENS_LABEL_KEY,
     _LAST_CONTEXT_WINDOW_LABEL_KEY,
+)
+from omnigent.stores.conversation_store import (
+    FORK_SOURCE_LABEL_KEY,
+    SIDE_CHAT_LABEL_KEY,
+    ConversationStore,
 )
 
 # Fallback threshold when no window is known for the session's model —
@@ -501,6 +512,119 @@ async def build_side_chat_seed(
         runner_client=runner_client,
         conversation_id=conversation_id,
     )
+
+
+# ---------------------------------------------------------------------------
+# Related chats: Muse-style chat.list for session_history's list_chats
+# ---------------------------------------------------------------------------
+
+_RELATED_CHATS_MAX = 20
+# Forks of one session that are NOT side chats are filtered out below, so
+# the raw fetch is capped higher than the returned limit.
+_RELATED_CHATS_FETCH_CAP = 50
+_RELATED_CHAT_PREVIEW_MAX_CHARS = 150
+
+
+def _related_chat_preview(items: list[ConversationItem]) -> str | None:
+    """Single-line text preview from newest-first message items of one chat.
+
+    Mirrors the sub-agent rail's ``_latest_message_preview`` but kept local
+    to this module — tools/builtins and the server route both need it and
+    neither should import the other's helpers.
+    """
+    for item in items:
+        if not isinstance(item.data, MessageData) or item.data.is_meta:
+            continue
+        parts = [
+            block.get("text")
+            for block in item.data.content
+            if isinstance(block, dict)
+            and block.get("type") in ("input_text", "output_text")
+            and isinstance(block.get("text"), str)
+        ]
+        collapsed = " ".join(" ".join(parts).split())
+        if not collapsed:
+            continue
+        if len(collapsed) <= _RELATED_CHAT_PREVIEW_MAX_CHARS:
+            return collapsed
+        return collapsed[: _RELATED_CHAT_PREVIEW_MAX_CHARS - 1].rstrip() + "…"
+    return None
+
+
+def _chat_summary(conversation: Conversation, preview: str | None) -> dict[str, Any]:
+    return {
+        "id": conversation.id,
+        "title": conversation.title,
+        "created_at": conversation.created_at,
+        "updated_at": conversation.updated_at,
+        "last_message_preview": preview,
+    }
+
+
+def list_related_chats(
+    conv_store: ConversationStore,
+    conversation_id: str,
+    *,
+    limit: int = _RELATED_CHATS_MAX,
+) -> list[dict[str, Any]]:
+    """
+    The side chats related to *conversation_id* — Muse's ``chat.list`` for
+    one session: side chats forked FROM it, plus its own parent when it is
+    itself a side chat.
+
+    Scoped to the SAME owner as *conversation_id*, resolved from the store
+    (never an argument) exactly like ``resolve_memory_user`` scopes memory —
+    a session merely shared with another user never surfaces as "related"
+    to them, and a side chat whose source lost its workspace-derived fork
+    label (see :data:`FORK_SOURCE_LABEL_KEY`) is simply not found, matching
+    that label's existing "not a complete fork index" caveat.
+
+    :param conv_store: Store to query.
+    :param conversation_id: The calling (source) session id.
+    :param limit: Maximum chats to return.
+    :returns: ``[{"id", "title", "created_at", "updated_at",
+        "last_message_preview"}, ...]``, newest-updated child first, parent
+        last; ``[]`` when *conversation_id* does not exist.
+    """
+    caller = conv_store.get_conversation(conversation_id)
+    if caller is None:
+        return []
+    owner_id = conv_store.get_session_owner(conversation_id)
+
+    def same_owner(other_id: str) -> bool:
+        return conv_store.get_session_owner(other_id) == owner_id
+
+    related: list[Conversation] = []
+    children = conv_store.list_conversations(
+        limit=_RELATED_CHATS_FETCH_CAP,
+        kind="default",
+        fork_source_id=conversation_id,
+        order="desc",
+        sort_by="updated_at",
+    )
+    for child in children.data:
+        if SIDE_CHAT_LABEL_KEY in child.labels and same_owner(child.id):
+            related.append(child)
+
+    if SIDE_CHAT_LABEL_KEY in caller.labels:
+        parent_id = caller.labels.get(FORK_SOURCE_LABEL_KEY)
+        if parent_id:
+            parent = conv_store.get_conversation(parent_id)
+            if parent is not None and same_owner(parent.id):
+                related.append(parent)
+
+    related = related[:limit]
+    ids = [conversation.id for conversation in related]
+    previews_by_id = conv_store.list_latest_message_items_for_conversations(ids, 10)
+    return [
+        _chat_summary(conversation, _related_chat_preview(previews_by_id.get(conversation.id, [])))
+        for conversation in related
+    ]
+
+
+def related_chat_ids(conv_store: ConversationStore, conversation_id: str) -> frozenset[str]:
+    """The ids ``list_related_chats`` would return, for a cheap membership check."""
+    return frozenset(chat["id"] for chat in list_related_chats(conv_store, conversation_id))
 
 
 # ---------------------------------------------------------------------------

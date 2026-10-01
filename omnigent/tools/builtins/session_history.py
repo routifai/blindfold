@@ -1,9 +1,11 @@
-"""Built-in tool: read-only recall over the calling session's own record.
+"""Built-in tool: read-only recall over the calling session and its chats.
 
 The rollover super chat compacts older messages into a summary — "the
 summary is a pointer, not the truth" (``rollover/README.md``). This tool
 lets the model page backward through, or full-text search, the exact items
-that summary was built from, and check how much context headroom is left.
+that summary was built from, check how much context headroom is left, and
+look into a related side chat (``list_chats``, then ``chat_id``) the same
+way Muse's main chat reads a side chat.
 """
 
 from __future__ import annotations
@@ -35,18 +37,22 @@ _SEARCH_MAX_LIMIT = 20
 _RECALL_ITEM_KINDS = frozenset({"message", "function_call", "function_call_output"})
 _HIDDEN_TYPE = "hidden"
 
-_ACTIONS = frozenset({"read", "search", "status"})
+_ACTIONS = frozenset({"list_chats", "read", "search", "status"})
 
 
 class SessionHistoryTool(Tool):
     """
-    Page, search, and check token headroom for the calling session only.
+    Page, search, and check token headroom for the calling session, and
+    look into one of its related side chats.
 
     Scoped by construction: the session id always comes from
     :attr:`ToolContext.conversation_id` (set by the runtime from the turn
-    that invoked the tool), never from the model-supplied arguments — so
-    there is no argument shape that reaches another session's record.
-    Read-only: no action writes or mutates anything.
+    that invoked the tool), never from the model-supplied arguments.
+    ``read``/``search`` accept a ``chat_id`` to target a different chat, but
+    it is validated against ``ctx.conversation_id``'s own ``list_chats`` set
+    before use (see :func:`_resolve_chat_target`) — there is still no
+    argument shape that reaches an unrelated session's record. Read-only:
+    no action writes or mutates anything, in this chat or any other.
     """
 
     @classmethod
@@ -70,7 +76,14 @@ class SessionHistoryTool(Tool):
             "never changes the chat. action='search' full-text searches "
             "this session's own items. action='status' reports tokens "
             "used, the context window, and tokens left before the next "
-            "rollover. Always scoped to the session that called this tool."
+            "rollover. Always scoped to the session that called this tool "
+            "by default. action='list_chats' lists the side chats related "
+            "to this one (forked from it, or its parent if this IS a side "
+            "chat) with a short preview of each. When the user refers to "
+            "work from another chat, call list_chats first, then pass that "
+            "chat's id as chat_id to read or search to look into it — name "
+            "the source chat in your answer. This tool is read-only: it "
+            "never writes into another chat, only this one's own turns do."
         )
 
     def get_schema(self) -> dict[str, Any]:
@@ -95,7 +108,8 @@ class SessionHistoryTool(Tool):
                                 "'read' returns full turns of this session, newest "
                                 "first; 'search' full-text searches its items; "
                                 "'status' reports token usage and headroom before "
-                                "the next rollover."
+                                "the next rollover; 'list_chats' lists the side "
+                                "chats related to this session."
                             ),
                         },
                         "cursor": {
@@ -119,6 +133,14 @@ class SessionHistoryTool(Tool):
                             "type": "string",
                             "description": "search only. The full-text search query.",
                         },
+                        "chat_id": {
+                            "type": "string",
+                            "description": (
+                                "read/search only. Look into another chat instead of "
+                                "this one — must be an id returned by list_chats (or "
+                                "this chat's own id). Omit to read/search this chat."
+                            ),
+                        },
                     },
                     "required": ["action"],
                     "additionalProperties": False,
@@ -133,8 +155,11 @@ class SessionHistoryTool(Tool):
         :param arguments: JSON-encoded arguments from the LLM, e.g.
             ``{"action": "read", "cursor": "item_abc123"}``.
         :param ctx: Server-side execution context. ``ctx.conversation_id``
-            is the ONLY source of the session to read — never taken from
-            *arguments*.
+            is the ONLY source of SCOPE — ``read``/``search`` may target a
+            different chat via ``chat_id``, but only one already in
+            ``ctx.conversation_id``'s own ``list_chats`` set (see
+            :func:`_resolve_chat_target`); never trusted from *arguments*
+            alone.
         :returns: JSON string result, or ``{"error": ...}`` on failure.
         """
         args, error = parse_json_object_arguments(arguments)
@@ -151,11 +176,55 @@ class SessionHistoryTool(Tool):
         from omnigent.runtime import get_conversation_store
 
         conv_store = get_conversation_store()
-        if action == "read":
-            return _read(conv_store, ctx.conversation_id, args)
-        if action == "search":
-            return _search(conv_store, ctx.conversation_id, args)
+        if action == "list_chats":
+            return _list_chats(conv_store, ctx.conversation_id)
+        if action in ("read", "search"):
+            target_id, error = _resolve_chat_target(conv_store, ctx.conversation_id, args)
+            if error is not None:
+                return error
+            assert target_id is not None
+            if action == "read":
+                return _read(conv_store, target_id, args)
+            return _search(conv_store, target_id, args)
         return _status(conv_store, ctx.conversation_id)
+
+
+def _list_chats(conv_store: Any, conversation_id: str) -> str:
+    """The ``list_chats`` action's JSON payload."""
+    from omnigent.context.rollover import list_related_chats
+
+    return json.dumps({"chats": list_related_chats(conv_store, conversation_id)})
+
+
+def _resolve_chat_target(
+    conv_store: Any, conversation_id: str, args: dict[str, Any]
+) -> tuple[str | None, str | None]:
+    """
+    Resolve the session ``read``/``search`` actually targets.
+
+    ``chat_id`` is optional and defaults to *conversation_id* (the calling
+    session itself). When set to something else, it must be one of
+    *conversation_id*'s own ``list_chats`` — never trusted on its own, the
+    same context-not-argument scoping the rest of this tool uses.
+
+    :returns: ``(target_conversation_id, None)`` on success, or
+        ``(None, json_error_string)``.
+    """
+    chat_id = args.get("chat_id")
+    if chat_id is None:
+        return conversation_id, None
+    if not isinstance(chat_id, str) or not chat_id:
+        return None, json.dumps({"error": "chat_id must be a non-empty string"})
+    if chat_id == conversation_id:
+        return chat_id, None
+
+    from omnigent.context.rollover import related_chat_ids
+
+    if chat_id not in related_chat_ids(conv_store, conversation_id):
+        return None, json.dumps(
+            {"error": "chat_id is not a related chat of this session", "chat_id": chat_id}
+        )
+    return chat_id, None
 
 
 def clamp_limit(raw: Any, *, default: int, maximum: int) -> int | str:

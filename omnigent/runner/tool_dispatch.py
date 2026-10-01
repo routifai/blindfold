@@ -6291,7 +6291,10 @@ async def _execute_session_history_tool(
     ``_execute_session_query_tool``), so every action dispatches to the
     Omnigent server's REST endpoints over ``server_client``:
     ``read``/``search`` → ``GET .../items`` / ``GET .../items/search``,
-    ``status`` → ``GET .../labels`` (fed through the same
+    optionally retargeted to a ``chat_id`` validated against ``GET
+    .../related_chats`` (see :func:`_resolve_chat_target_via_rest`);
+    ``list_chats`` → that same ``GET .../related_chats``; ``status`` →
+    ``GET .../labels`` (fed through the same
     :func:`~omnigent.tools.builtins.session_history.status_from_labels`
     the in-process tool uses). ``conversation_id`` is the runner's own
     dispatch context, never read from *args* — the same scoping guarantee
@@ -6308,13 +6311,71 @@ async def _execute_session_history_tool(
         return json.dumps({"error": "session_history requires a session id"})
 
     action = args.get("action")
+    if action == "list_chats":
+        return await _session_history_list_chats_via_rest(conversation_id, server_client)
     if action == "read":
         return await _session_history_read_via_rest(args, conversation_id, server_client)
     if action == "search":
         return await _session_history_search_via_rest(args, conversation_id, server_client)
     if action == "status":
         return await _session_history_status_via_rest(conversation_id, server_client)
-    return json.dumps({"error": "action must be one of ['read', 'search', 'status']"})
+    return json.dumps(
+        {"error": "action must be one of ['list_chats', 'read', 'search', 'status']"}
+    )
+
+
+async def _session_history_list_chats_via_rest(
+    conversation_id: str,
+    server_client: httpx.AsyncClient,
+) -> str:
+    """List related side chats via ``GET .../related_chats``."""
+    try:
+        resp = await server_client.get(
+            f"/v1/sessions/{conversation_id}/related_chats", timeout=30.0
+        )
+        resp.raise_for_status()
+    except Exception as exc:  # noqa: BLE001
+        return json.dumps({"error": f"session_history list_chats failed: {exc}"})
+    return json.dumps({"chats": resp.json().get("data", [])})
+
+
+async def _resolve_chat_target_via_rest(
+    args: _JsonObject,
+    conversation_id: str,
+    server_client: httpx.AsyncClient,
+) -> tuple[str | None, str | None]:
+    """
+    Resolve the session ``read``/``search`` actually targets (REST path).
+
+    Mirrors the in-process tool's ``_resolve_chat_target``: *conversation_id*
+    (the runner's own dispatch context) is the only trusted scope. An
+    explicit ``chat_id`` is only honored when it is *conversation_id* itself
+    or appears in its own ``related_chats`` — fetched fresh here, never
+    taken from *args*.
+
+    :returns: ``(target_conversation_id, None)`` on success, or
+        ``(None, json_error_string)``.
+    """
+    chat_id = args.get("chat_id")
+    if chat_id is None:
+        return conversation_id, None
+    if not isinstance(chat_id, str) or not chat_id:
+        return None, json.dumps({"error": "chat_id must be a non-empty string"})
+    if chat_id == conversation_id:
+        return chat_id, None
+    try:
+        resp = await server_client.get(
+            f"/v1/sessions/{conversation_id}/related_chats", timeout=30.0
+        )
+        resp.raise_for_status()
+    except Exception as exc:  # noqa: BLE001
+        return None, json.dumps({"error": f"session_history chat_id lookup failed: {exc}"})
+    related_ids = {chat.get("id") for chat in resp.json().get("data", [])}
+    if chat_id not in related_ids:
+        return None, json.dumps(
+            {"error": "chat_id is not a related chat of this session", "chat_id": chat_id}
+        )
+    return chat_id, None
 
 
 async def _session_history_read_via_rest(
@@ -6323,6 +6384,12 @@ async def _session_history_read_via_rest(
     server_client: httpx.AsyncClient,
 ) -> str:
     """Read full turns via ``GET .../items``, mirroring ``session_history.group_into_turns``."""
+    target_id, chat_error = await _resolve_chat_target_via_rest(
+        args, conversation_id, server_client
+    )
+    if chat_error is not None:
+        return chat_error
+    assert target_id is not None
     cursor = args.get("cursor")
     if cursor is not None and not isinstance(cursor, str):
         return json.dumps({"error": "cursor must be a string"})
@@ -6346,7 +6413,7 @@ async def _session_history_read_via_rest(
             # ConversationStore.list_items).
             params["after"] = cursor_item_id
         resp = await server_client.get(
-            f"/v1/sessions/{conversation_id}/items", params=params, timeout=30.0
+            f"/v1/sessions/{target_id}/items", params=params, timeout=30.0
         )
         resp.raise_for_status()
         body = resp.json()
@@ -6375,7 +6442,14 @@ async def _session_history_search_via_rest(
     conversation_id: str,
     server_client: httpx.AsyncClient,
 ) -> str:
-    """Full-text search via ``GET .../items/search``, scoped to *conversation_id*."""
+    """Full-text search via ``GET .../items/search``, scoped to *conversation_id*
+    (or its validated ``chat_id``)."""
+    target_id, chat_error = await _resolve_chat_target_via_rest(
+        args, conversation_id, server_client
+    )
+    if chat_error is not None:
+        return chat_error
+    assert target_id is not None
     query = args.get("query")
     if not isinstance(query, str) or not query.strip():
         return json.dumps({"error": "search requires a non-empty 'query' string"})
@@ -6388,7 +6462,7 @@ async def _session_history_search_via_rest(
         return limit
     try:
         resp = await server_client.get(
-            f"/v1/sessions/{conversation_id}/items/search",
+            f"/v1/sessions/{target_id}/items/search",
             params={"query": query.strip(), "limit": limit},
             timeout=30.0,
         )

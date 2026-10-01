@@ -50,9 +50,19 @@ session. It is read-only and scoped to the calling session:
 
 | Action | Use |
 |---|---|
-| `read` | Page full turns, newest first (`cursor`, `limit` ≤ 20) |
-| `search` | Full-text search of this session's items (`query`, `limit` ≤ 20) |
+| `read` | Page full turns, newest first (`cursor`, `limit` ≤ 20, `chat_id?`) |
+| `search` | Full-text search of this session's items (`query`, `limit` ≤ 20, `chat_id?`) |
 | `status` | Threshold, current tokens, tokens left before the next compaction |
+| `list_chats` | The side chats related to this session (its own side-chat forks, plus its parent when it is itself a side chat): id, title, timestamps, a short preview |
+
+`chat_id` (on `read`/`search`) looks into one of `list_chats`' results instead
+of this session — validated against that set (or the caller's own id) and the
+same owner, never trusted from arguments alone. This is Muse's main chat
+reading a side chat (`chat.list` + `chat.read_messages`), built at the
+Omnigent level only: `omnigent/context/rollover.py` (`list_related_chats`,
+`related_chat_ids`), the in-process tool, the runner's native-relay REST
+dispatch (`omnigent/runner/tool_dispatch.py`), and
+`GET /v1/sessions/{id}/related_chats`.
 
 On Claude Code it is always loaded (not behind tool search) and pre-approved.
 The rule given to every rollover session's model
@@ -124,6 +134,8 @@ exists — adopt it, extend it, or replace it behind the same tool contract:
   long-running sub-agent; short tasks can rely on the CLI's own compaction.
 - A new `compaction` item in a session's events means a rollover happened.
   `session_history` `status` tells you how close the next one is.
+- The super chat can read a side chat: `session_history`'s `list_chats` finds
+  it, then `read`/`search` take its id as `chat_id`.
 - A draft coordinator system prompt is in `rollover/SUPER-CHAT-PROMPT.md`.
 
 ## Pitfalls already hit (don't repeat them)
@@ -145,7 +157,10 @@ exists — adopt it, extend it, or replace it behind the same tool contract:
   `tests/stores/test_memory_store.py`,
   `tests/server/routes/test_session_memory_routes.py`,
   `tests/test_claude_native*.py`, `tests/test_codex_native*.py`,
-  `tests/test_pi_native*.py`, `tests/runner`.
+  `tests/test_pi_native*.py`, `tests/runner`. `list_chats`/`chat_id`:
+  `tests/stores/test_conversation_store.py` and
+  `tests/server/integration/test_sessions_items_search.py`
+  (`GET .../related_chats`) in addition to the above.
 - Live, on real CLIs: `dev/rollover/rollover_e2e.py` (see
   `dev/rollover/README.md`; ~100k tokens per CLI). It checks that each CLI
   compacts without looping, continues, sees and calls `session_history`,

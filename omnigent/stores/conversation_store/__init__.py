@@ -728,6 +728,7 @@ class ConversationStore(ABC):
         pinned: bool = False,
         pinned_owner: str | None = None,
         title: str | None = None,
+        fork_source_id: str | None = None,
     ) -> PagedList[Conversation]:
         """
         List conversations with cursor-based pagination.
@@ -839,6 +840,13 @@ class ConversationStore(ABC):
             Powers the ``(agent, title)`` child-session lookup in
             ``sys_session_send`` so the server can resolve the target
             in a single indexed query instead of fetching all children.
+        :param fork_source_id: When set, only return conversations whose
+            :data:`FORK_SOURCE_LABEL_KEY` label equals this value — forks
+            made from this session. ``None`` disables the filter. Powers
+            ``session_history``'s ``list_chats`` side-chat discovery; note
+            the label is only stamped when the fork source had a workspace
+            or bound native runner (see :data:`FORK_SOURCE_LABEL_KEY`), so
+            this is not a complete "every fork of X" index.
         :returns: A :class:`PagedList` of :class:`Conversation`
             objects.
         :raises omnigent.errors.StaleCursorError: If the ``after``/``before``

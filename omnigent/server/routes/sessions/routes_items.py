@@ -160,6 +160,46 @@ def register_items_routes(
         )
         return PaginatedList(data=[m.to_api_dict() for m in items])
 
+    # ── GET /sessions/{session_id}/related_chats ──────────────────
+    # Side chats related to session_id for ``session_history``'s
+    # ``list_chats`` action: forked FROM it (carrying the side-chat label),
+    # plus its own parent when session_id is itself a side chat. Owner-
+    # checked by ``list_related_chats`` itself (never trusts the caller's
+    # identity beyond the READ check below), the same scoping the runner's
+    # native-relay dispatch reaches over this route for.
+
+    @router.get(
+        "/sessions/{session_id}/related_chats",
+        response_model=None,
+        responses={200: {"model": PaginatedList}},
+    )
+    async def list_related_chats_route(
+        request: Request,
+        session_id: str,
+    ) -> PaginatedList:
+        """
+        List the side chats related to one session.
+
+        :param session_id: Session/conversation identifier,
+            e.g. ``"conv_abc123"``.
+        :returns: A :class:`PaginatedList` of chat summary dicts
+            (``id``, ``title``, ``created_at``, ``updated_at``,
+            ``last_message_preview``); not cursor-paginated.
+        :raises OmnigentError: 404 if no session exists.
+        """
+        user_id = _get_user_id(request, auth_provider)
+        access = await _require_access_and_level(
+            user_id, session_id, LEVEL_READ, permission_store, conversation_store
+        )
+        if access.conversation is None:
+            conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
+            if conv is None:
+                raise _session_not_found()
+        from omnigent.context.rollover import list_related_chats
+
+        chats = await asyncio.to_thread(list_related_chats, conversation_store, session_id)
+        return PaginatedList(data=chats)
+
     # ── GET /sessions/{session_id}/child_sessions ────────────────
 
     @router.get(

@@ -2682,6 +2682,7 @@ class SqlAlchemyConversationStore(ConversationStore):
         pinned: bool = False,
         pinned_owner: str | None = None,
         title: str | None = None,
+        fork_source_id: str | None = None,
     ) -> PagedList[Conversation]:
         """
         List conversations with cursor-based pagination.
@@ -2749,6 +2750,8 @@ class SqlAlchemyConversationStore(ConversationStore):
             can access but does NOT own — i.e. sessions shared with them
             by another user. Requires ``accessible_by`` to be set.
             ``False`` (default) disables the filter.
+        :param fork_source_id: When set, only return conversations whose
+            ``FORK_SOURCE_LABEL_KEY`` label equals this value.
         :returns: A :class:`PagedList` of :class:`Conversation`
             objects.
         """
@@ -3056,6 +3059,18 @@ class SqlAlchemyConversationStore(ConversationStore):
                         select(SqlConversationLabel.conversation_id).where(
                             SqlConversationLabel.workspace_id == current_workspace_id(),
                             SqlConversationLabel.key == pinned_label_key(pinned_owner),
+                        )
+                    )
+                )
+            if fork_source_id is not None:
+                # Colocated on the AP DB (fork labels, like pins, live there),
+                # so an inline IN-subquery is enough — no cross-DB prefetch.
+                stmt = stmt.where(
+                    SqlConversation.id.in_(
+                        select(SqlConversationLabel.conversation_id).where(
+                            SqlConversationLabel.workspace_id == current_workspace_id(),
+                            SqlConversationLabel.key == FORK_SOURCE_LABEL_KEY,
+                            SqlConversationLabel.value == fork_source_id,
                         )
                     )
                 )
