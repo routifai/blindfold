@@ -4,6 +4,9 @@ One document for the teams building on this layer: what it does, how to plug
 into it, the decisions behind it, and what went wrong along the way. Code
 references are to this repository.
 
+To brief a coding agent working on this layer, hand it
+[INTEGRATION.md](INTEGRATION.md).
+
 - **Super chat / orchestration team:** read [How it works](#how-it-works),
   [Turning it on](#turning-it-on) and [For the super chat and its sub-agents](#for-the-super-chat-and-its-sub-agents).
 - **Long-term memory team:** read [How it works](#how-it-works) and
