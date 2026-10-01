@@ -241,6 +241,7 @@ _CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY_ENV = "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY"
 # buffer). The window must be 100k-1M tokens.
 _CLAUDE_CODE_AUTO_COMPACT_WINDOW_ENV = "CLAUDE_CODE_AUTO_COMPACT_WINDOW"
 _CLAUDE_AUTOCOMPACT_PCT_OVERRIDE_ENV = "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"
+_CLAUDE_CODE_DISABLE_AUTO_MEMORY_ENV = "CLAUDE_CODE_DISABLE_AUTO_MEMORY"
 _CLAUDE_AUTO_COMPACT_WINDOW_BOUNDS = (100_000, 1_000_000)
 _CLAUDE_DEFAULT_AUTO_COMPACT_WINDOW = 200_000
 # Claude Code env vars that pin each model-tier alias to a provider-specific
@@ -1552,6 +1553,9 @@ def build_native_claude_terminal_env(
         terminal_env[_CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY_ENV] = "1"
     if compact_at_tokens is not None:
         terminal_env.update(claude_auto_compact_env(compact_at_tokens))
+        # Omnigent's memory tools are the only long-term memory in a rollover
+        # session; Claude Code's own file memory would split it per container.
+        terminal_env[_CLAUDE_CODE_DISABLE_AUTO_MEMORY_ENV] = "1"
     # On the apiKeyHelper path the credential reaches Claude Code via the
     # helper; a raw ANTHROPIC_API_KEY here re-triggers Claude Code's "Detected a
     # custom API key" menu, which hangs tmux delivery. Fail loud if one leaks.

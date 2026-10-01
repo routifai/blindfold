@@ -3172,6 +3172,7 @@ def test_build_native_claude_terminal_env_rollover_sets_the_compact_ceiling() ->
     env = claude_native.build_native_claude_terminal_env(None, compact_at_tokens=90_000)
     assert env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "200000"
     assert env["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] == "45"
+    assert env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1"
     assert "DISABLE_AUTO_COMPACT" not in env
 
 
