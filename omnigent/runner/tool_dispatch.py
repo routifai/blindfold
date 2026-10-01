@@ -6468,7 +6468,12 @@ async def _execute_memory_tool(
                 return json.dumps({"error": "text must be a non-empty string"})
             resp = await server_client.post(
                 f"{base}/remember",
-                json={"text": text.strip(), "kind": args.get("kind"), "quote": args.get("quote")},
+                json={
+                    "text": text.strip(),
+                    "kind": args.get("kind"),
+                    "quote": args.get("quote"),
+                    "replaces_claim_id": args.get("replaces_claim_id"),
+                },
                 timeout=30.0,
             )
         elif tool_name == "memory_search":

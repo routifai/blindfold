@@ -82,7 +82,12 @@ async def test_remember_posts_to_remember_endpoint() -> None:
         assert request.method == "POST"
         assert request.url.path == f"/v1/sessions/{CONV}/memory/remember"
         body = json.loads(request.content)
-        assert body == {"text": "Prefers CAD", "kind": "preference", "quote": None}
+        assert body == {
+            "text": "Prefers CAD",
+            "kind": "preference",
+            "quote": None,
+            "replaces_claim_id": None,
+        }
         return httpx.Response(
             200, json={"action": "added", "claim": {"claim_id": "c1", "text": "Prefers CAD"}}
         )

@@ -36,15 +36,11 @@ _INFERRED_CONFIDENCE = 0.4
 # --- remember()'s near-duplicate dedup rule (Phase 1; Phase 3's upkeep job
 # may refine this with a model call per the plan) ---
 #
-# A candidate is compared against the single best hybrid-search hit for the
-# same user (any kind). Below _DEDUP_SCORE_THRESHOLD the candidate is simply
-# a new claim. At or above it, the two claims are "about the same thing";
-# word-overlap (Jaccard over lowercased tokens) then decides whether they
-# say the SAME thing (reinforce) or a DIFFERENT thing about that topic
-# (supersede — a simple, documented stand-in for real contradiction
-# detection, which is deferred to Phase 3's model-assisted classification).
+# A near-duplicate (hybrid score and word overlap both high) is reinforced;
+# anything else is added. A claim is only superseded when the caller names it
+# (replaces_claim_id): the model reconciles conflicts explicitly, never by guess.
 _DEDUP_SCORE_THRESHOLD = 0.5
-_SAME_TEXT_JACCARD_THRESHOLD = 0.5
+_SAME_TEXT_JACCARD_THRESHOLD = 0.8
 _REINFORCE_CONFIDENCE_INCREMENT = 0.05
 
 # search()'s ranking: hybrid_score * confidence, plus a small recency boost
@@ -98,26 +94,22 @@ class MemoryService:
         quote: str | None = None,
         speaker: str | None = None,
         evidence: list[MemoryEvidenceLink] | None = None,
+        replaces_claim_id: str | None = None,
     ) -> dict[str, Any]:
-        """Write a ``stated`` claim, immediately indexed; reinforce or supersede a near-duplicate.
+        """Write a ``stated`` claim, immediately indexed; reinforce a near-duplicate.
+
+        Supersedes only the active claim named by ``replaces_claim_id``.
 
         :returns: ``{"action": "added"|"reinforced"|"superseded", "claim": {...}}``.
         """
         resolved_kind: str = (
             kind if isinstance(kind, str) and kind in VALID_KINDS else DEFAULT_KIND
         )
-        best = self._best_match(user_id, text)
-
-        if best is not None and best[1] >= _DEDUP_SCORE_THRESHOLD:
-            existing_id, _score, existing_text = best
-            if _jaccard(text, existing_text) >= _SAME_TEXT_JACCARD_THRESHOLD:
-                reinforced = self._store.reinforce(
-                    existing_id, user_id, confidence_increment=_REINFORCE_CONFIDENCE_INCREMENT
-                )
-                if reinforced is not None:
-                    self._index.upsert(reinforced)
-                    return {"action": "reinforced", "claim": _claim_to_dict(reinforced)}
-            # Same topic, different content: treat as a correction.
+        if replaces_claim_id:
+            old = self._store.get(replaces_claim_id, user_id)
+            if old is None or old.status != "active":
+                return {"error": f"no active claim {replaces_claim_id} to replace"}
+            existing_id = old.id
             new_claim = self._store.supersede(
                 existing_id,
                 user_id,
@@ -133,6 +125,19 @@ class MemoryService:
             self._index.delete(existing_id)
             self._index.upsert(new_claim)
             return {"action": "superseded", "claim": _claim_to_dict(new_claim)}
+
+        best = self._best_match(user_id, text)
+        if (
+            best is not None
+            and best[1] >= _DEDUP_SCORE_THRESHOLD
+            and _jaccard(text, best[2]) >= _SAME_TEXT_JACCARD_THRESHOLD
+        ):
+            reinforced = self._store.reinforce(
+                best[0], user_id, confidence_increment=_REINFORCE_CONFIDENCE_INCREMENT
+            )
+            if reinforced is not None:
+                self._index.upsert(reinforced)
+                return {"action": "reinforced", "claim": _claim_to_dict(reinforced)}
 
         new_claim = self._store.create(
             uuid.uuid4().hex,

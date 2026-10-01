@@ -443,6 +443,7 @@ class MemoryRememberRequest(BaseModel):
     text: str
     kind: str | None = None
     quote: str | None = None
+    replaces_claim_id: str | None = None
 
 
 class MemoryForgetRequest(BaseModel):

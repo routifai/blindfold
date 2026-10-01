@@ -71,8 +71,10 @@ user_id = :u and status = 'active'`. The index is rebuilt from
 **Fast path: `remember(text, kind?)`.** The model calls it when the employee
 states something durable, or asks to remember it. Saved immediately as
 `stated`, linked to the current message, indexed at once. Before saving, the
-tool searches for a near-duplicate: same meaning → reinforce; contradiction →
-supersede (the old claim is kept as `superseded`). The model says "I'll
+tool reinforces a near-identical restatement. A correction supersedes only the
+claim the model names (`replaces_claim_id`, found with `memory_search` first),
+following Muse's "find the conflicts, then update the old entries"; nothing
+is replaced by guess. Paraphrased duplicates are merged later by the upkeep job. The model says "I'll
 remember that" only after it succeeds (Muse's rule).
 
 **Slow path: the upkeep job (the self-improvement loop).**

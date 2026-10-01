@@ -48,21 +48,41 @@ def test_remember_adds_a_new_claim(service: MemoryService) -> None:
 
 def test_remember_reinforces_a_near_duplicate(service: MemoryService) -> None:
     first = service.remember("alice", "Prefers figures in CAD", kind="preference")
-    second = service.remember("alice", "Wants figures reported in CAD", kind="preference")
+    # A restatement reinforces; paraphrases are merged later by the upkeep job.
+    second = service.remember("alice", "prefers figures in CAD", kind="preference")
     assert second["action"] == "reinforced"
     assert second["claim"]["claim_id"] == first["claim"]["claim_id"]
     assert second["claim"]["confidence"] > first["claim"]["confidence"]
 
 
-def test_remember_supersedes_a_contradiction(service: MemoryService) -> None:
+def test_remember_supersedes_only_the_named_claim(service: MemoryService) -> None:
     first = service.remember("alice", "Prefers figures in CAD", kind="preference")
-    second = service.remember("alice", "Actually wants figures in USD now", kind="preference")
+    second = service.remember(
+        "alice",
+        "Actually wants figures in USD now",
+        kind="preference",
+        replaces_claim_id=first["claim"]["claim_id"],
+    )
     assert second["action"] == "superseded"
     assert second["claim"]["claim_id"] != first["claim"]["claim_id"]
 
     explanation = service.explain("alice", second["claim"]["claim_id"])
     assert explanation is not None
     assert explanation["supersedes"][0]["claim_id"] == first["claim"]["claim_id"]
+
+
+def test_remember_never_supersedes_a_related_claim_by_guess(service: MemoryService) -> None:
+    service.remember("alice", "Prefers figures in CAD", kind="preference")
+    other = service.remember("alice", "Prefers figures in a table", kind="preference")
+    assert other["action"] == "added"
+    assert len(service.search("alice", "figures")) == 2
+
+
+def test_remember_rejects_replacing_another_users_claim(service: MemoryService) -> None:
+    alice = service.remember("alice", "Prefers figures in CAD", kind="preference")
+    result = service.remember("bob", "Prefers USD", replaces_claim_id=alice["claim"]["claim_id"])
+    assert "error" in result
+    assert service.get("alice", alice["claim"]["claim_id"])["status"] == "active"
 
 
 def test_remember_is_isolated_per_user(service: MemoryService) -> None:
@@ -155,7 +175,12 @@ def test_explain_includes_quote_and_evidence(service: MemoryService) -> None:
 
 def test_explain_reports_what_superseded_a_claim(service: MemoryService) -> None:
     first = service.remember("alice", "Prefers figures in CAD", kind="preference")
-    second = service.remember("alice", "Actually wants figures in USD now", kind="preference")
+    second = service.remember(
+        "alice",
+        "Actually wants figures in USD now",
+        kind="preference",
+        replaces_claim_id=first["claim"]["claim_id"],
+    )
 
     explanation = service.explain("alice", first["claim"]["claim_id"])
     assert explanation is not None

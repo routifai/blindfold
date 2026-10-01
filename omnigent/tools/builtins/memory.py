@@ -103,6 +103,14 @@ class MemoryRememberTool(Tool):
                             "type": "string",
                             "description": "The user's exact words this claim is drawn from.",
                         },
+                        "replaces_claim_id": {
+                            "type": "string",
+                            "description": (
+                                "When this corrects or updates an existing memory, its claim_id "
+                                "(find it with memory_search first). The old claim is kept as "
+                                "superseded."
+                            ),
+                        },
                     },
                     "required": ["text"],
                     "additionalProperties": False,
@@ -135,6 +143,7 @@ class MemoryRememberTool(Tool):
             kind=args.get("kind"),
             quote=args.get("quote"),
             evidence=evidence,
+            replaces_claim_id=args.get("replaces_claim_id") or None,
         )
         return json.dumps(result)
 

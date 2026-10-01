@@ -78,7 +78,12 @@ def create_session_memory_router(
 
         evidence = [MemoryEvidenceLink(session_id=session_id, item_id="")]
         return memory_service.remember(
-            owner, body.text, kind=body.kind, quote=body.quote, evidence=evidence
+            owner,
+            body.text,
+            kind=body.kind,
+            quote=body.quote,
+            evidence=evidence,
+            replaces_claim_id=body.replaces_claim_id,
         )
 
     @router.get("/sessions/{session_id}/memory/search")
