@@ -96,6 +96,11 @@ MEMORY_INSTRUCTION = (
 )
 
 
+#: What a native CLI's system prompt gets in a rollover session: the
+#: context rule plus the memory rule, transported as one block.
+ROLLOVER_NATIVE_INSTRUCTIONS = ROLLOVER_CONTEXT_INSTRUCTION + "\n\n" + MEMORY_INSTRUCTION
+
+
 def _framework_instructions_for(
     spec: AgentSpec,
     labels: Mapping[str, str] | None = None,

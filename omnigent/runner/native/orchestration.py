@@ -2608,10 +2608,10 @@ async def _auto_create_pi_terminal(
         approve=await asyncio.to_thread(pi_supports_approve, pi_command),
     )
     from omnigent.context.labels import is_rollover
-    from omnigent.runtime.prompt import ROLLOVER_CONTEXT_INSTRUCTION
+    from omnigent.runtime.prompt import ROLLOVER_NATIVE_INSTRUCTIONS
 
     if is_rollover(launch_config.labels):
-        pi_args.extend(["--append-system-prompt", ROLLOVER_CONTEXT_INSTRUCTION])
+        pi_args.extend(["--append-system-prompt", ROLLOVER_NATIVE_INSTRUCTIONS])
     pi_env = {
         PI_NATIVE_CONFIG_ENV_VAR: str(config),
         "OMNIGENT_PI_NATIVE_BRIDGE_DIR": str(bridge_dir),
@@ -5292,7 +5292,7 @@ async def _auto_create_codex_terminal(
     # never by editing config.toml here.
     # Passed only for auto-harness sessions so a pinned or plain codex launch
     # keeps main's kwargs exactly.
-    from omnigent.runtime.prompt import ROLLOVER_CONTEXT_INSTRUCTION
+    from omnigent.runtime.prompt import ROLLOVER_NATIVE_INSTRUCTIONS
 
     _codex_routing_note: str | None = None
     if launch_config.auto_harness:
@@ -5305,7 +5305,7 @@ async def _auto_create_codex_terminal(
             for x in [
                 _native_startup_raw_instructions_from_spec(agent_spec),
                 _codex_routing_note,
-                ROLLOVER_CONTEXT_INSTRUCTION if launch_config.compact_at_tokens else None,
+                ROLLOVER_NATIVE_INSTRUCTIONS if launch_config.compact_at_tokens else None,
             ]
             if x
         )
@@ -8225,7 +8225,7 @@ async def _auto_create_claude_terminal(
             server_client=server_client, session_id=session_id
         )
     rollover = is_rollover(rollover_labels)
-    from omnigent.runtime.prompt import ROLLOVER_CONTEXT_INSTRUCTION
+    from omnigent.runtime.prompt import ROLLOVER_NATIVE_INSTRUCTIONS
 
     started_at = time.monotonic()
     _logger.info(
@@ -8869,7 +8869,7 @@ async def _auto_create_claude_terminal(
             for x in [
                 _native_startup_raw_instructions_from_spec(agent_spec),
                 routed_spawn_note,
-                ROLLOVER_CONTEXT_INSTRUCTION if rollover else None,
+                ROLLOVER_NATIVE_INSTRUCTIONS if rollover else None,
             ]
             if x
         )

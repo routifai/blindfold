@@ -415,7 +415,7 @@ async def test_auto_create_pi_terminal_rollover_gets_recall_tool_and_instruction
     import omnigent.harnesses.pi_native.bridge as pi_bridge
     import omnigent.harnesses.pi_native.credentials as creds
     from omnigent.context.labels import CONTEXT_MODE_LABEL, ROLLOVER_MODE_VALUE
-    from omnigent.runtime.prompt import ROLLOVER_CONTEXT_INSTRUCTION
+    from omnigent.runtime.prompt import ROLLOVER_NATIVE_INSTRUCTIONS
 
     session_id = "conv_pi_rollover_recall"
     workspace = tmp_path / "workspace"
@@ -480,7 +480,7 @@ async def test_auto_create_pi_terminal_rollover_gets_recall_tool_and_instruction
     )
 
     args = launched[0].args
-    assert args[args.index("--append-system-prompt") + 1] == ROLLOVER_CONTEXT_INSTRUCTION
+    assert args[args.index("--append-system-prompt") + 1] == ROLLOVER_NATIVE_INSTRUCTIONS
     config = json.loads(
         pi_bridge.config_path(pi_bridge.bridge_dir_for_session_id(session_id)).read_text(
             encoding="utf-8"
