@@ -7863,8 +7863,16 @@ _ROUTED_SPAWN_ALLOWED_TOOLS: tuple[str, ...] = (
     "mcp__omnigent__sys_read_inbox",
 )
 
-#: Recall must run without a permission prompt, or the model stalls on it.
-_ROLLOVER_ALLOWED_TOOLS: tuple[str, ...] = ("mcp__omnigent__session_history",)
+#: Recall and long-term memory must run without a permission prompt, or the
+#: model stalls on it (same "don't ask" denial session_history hit).
+_ROLLOVER_ALLOWED_TOOLS: tuple[str, ...] = (
+    "mcp__omnigent__session_history",
+    "mcp__omnigent__memory_remember",
+    "mcp__omnigent__memory_search",
+    "mcp__omnigent__memory_get",
+    "mcp__omnigent__memory_explain",
+    "mcp__omnigent__memory_forget",
+)
 
 _CLAUDE_LAUNCH_PERMISSION_MODES = frozenset(
     {"default", "auto", "acceptEdits", "plan", "dontAsk", "bypassPermissions"}

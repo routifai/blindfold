@@ -23,6 +23,11 @@ from omnigent.tools.base import Tool, ToolContext, is_valid_tool_name
 from omnigent.tools.builtins import (
     ListCommentsTool,
     LoadSkillTool,
+    MemoryExplainTool,
+    MemoryForgetTool,
+    MemoryGetTool,
+    MemoryRememberTool,
+    MemorySearchTool,
     ReadSkillFileTool,
     SessionHistoryTool,
     SysAdviseModelsTool,
@@ -201,6 +206,9 @@ class ToolManager:
         # session_history is auto-registered only for a rollover session
         # (label-driven, not a per-agent spec opt-in).
         self._register_session_history_tool()
+        # memory_* tools: same label gate as session_history — available in
+        # every rollover session regardless of which agent spec is bound.
+        self._register_memory_tools()
         # Policy tool is always auto-registered so agents can add
         # inline CEL policies at runtime without spec changes.
         self._register_policy_tools()
@@ -582,6 +590,29 @@ class ToolManager:
         """
         if is_rollover(self._labels):
             self._tools[SessionHistoryTool.name()] = SessionHistoryTool()
+
+    def _register_memory_tools(self) -> None:
+        """
+        Auto-register the ``memory_*`` family for a rollover session only.
+
+        Same gate as :meth:`_register_session_history_tool`: every rollover
+        session gets long-term memory regardless of which agent spec is
+        bound to it. The tools themselves fail with a clear error at
+        invocation if no :class:`~omnigent.memory.service.MemoryService` is
+        configured (see ``omnigent.tools.builtins.memory``), so registering
+        them unconditionally for rollover sessions is safe even when the
+        ``memory`` extra isn't installed.
+        """
+        if not is_rollover(self._labels):
+            return
+        for tool in (
+            MemoryRememberTool(),
+            MemorySearchTool(),
+            MemoryGetTool(),
+            MemoryExplainTool(),
+            MemoryForgetTool(),
+        ):
+            self._tools[tool.name()] = tool
 
     def _register_browser_tools(self) -> None:
         """

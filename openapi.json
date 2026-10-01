@@ -12778,6 +12778,74 @@
         ]
       }
     },
+    "/v1/sessions/{session_id}/items/search": {
+      "get": {
+        "description": "Full-text search over one session's own conversation items.\n\n**Returns:** A `PaginatedList` of matching item dicts, ranked by relevance (`first_id`/`last_id`/`has_more` unset \u2014 search results are not cursor-paginated).\n\n**Raises**\n\n- `OmnigentError` \u2014 404 if no session exists.",
+        "operationId": "search_session_items_v1_sessions__session_id__items_search_get",
+        "parameters": [
+          {
+            "description": "Session/conversation identifier, e.g. `\"conv_abc123\"`.",
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "The search query string.",
+            "in": "query",
+            "name": "query",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Query",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Maximum number of results (1-20, default 10).",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 10,
+              "maximum": 20,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedList"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Search Session Items",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
     "/v1/sessions/{session_id}/labels": {
       "get": {
         "description": "Return only the labels for a session.\n\nNative runner bridge setup needs labels during harness spawn,\nbut the full session snapshot also loads history, skills,\nrunner status, and agent metadata. This endpoint keeps that\nspawn-time dependency to one authorized conversation read.\n\n**Returns:** The session id and labels.\n\n**Raises**\n\n- `OmnigentError` \u2014 404 if no session exists.",

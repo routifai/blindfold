@@ -12,6 +12,7 @@ from omnigent.runtime import _globals
 from omnigent.runtime.caps import RuntimeCaps
 
 if TYPE_CHECKING:
+    from omnigent.memory.service import MemoryService
     from omnigent.runner.resource_registry import SessionResourceRegistry
     from omnigent.runner.routing import RunnerRouter
     from omnigent.runtime.agent_cache import AgentCache
@@ -37,6 +38,7 @@ def init(
     artifact_store: ArtifactStore | None = None,
     comment_store: CommentStore | None = None,
     policy_store: PolicyStore | None = None,
+    memory_service: MemoryService | None = None,
     caps: RuntimeCaps | None = None,
 ) -> None:
     """
@@ -61,6 +63,9 @@ def init(
     :param policy_store: The PolicyStore instance for
         session-scoped policies managed via the CRUD API.
         ``None`` when session policies are not configured.
+    :param memory_service: The MemoryService instance backing the
+        ``memory_*`` built-in tools. ``None`` when long-term memory
+        isn't configured.
     :param caps: Operator-configured execution ceiling.
         ``None`` uses :class:`RuntimeCaps` defaults.
     """
@@ -72,6 +77,7 @@ def init(
         artifact_store=artifact_store,
         comment_store=comment_store,
         policy_store=policy_store,
+        memory_service=memory_service,
         caps=caps,
     )
 
@@ -154,6 +160,20 @@ def get_policy_store() -> PolicyStore | None:
     :returns: The PolicyStore set during :func:`init`, or ``None``.
     """
     return _globals._policy_store
+
+
+def get_memory_service() -> MemoryService | None:
+    """
+    Return the MemoryService instance, or ``None`` if not configured.
+
+    Returns ``None`` (rather than raising) because long-term memory is
+    optional — the ``memory_*`` tools surface a clear error to the agent
+    when invoked without a configured service (e.g. the ``memory`` extra
+    isn't installed, or the server wasn't given a memory store).
+
+    :returns: The MemoryService set during :func:`init`, or ``None``.
+    """
+    return _globals._memory_service
 
 
 def get_agent_cache() -> AgentCache:

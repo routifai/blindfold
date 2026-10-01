@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 from omnigent.runtime.caps import RuntimeCaps
 
 if TYPE_CHECKING:
+    from omnigent.memory.service import MemoryService
     from omnigent.runner.resource_registry import SessionResourceRegistry
     from omnigent.runner.routing import RunnerRouter
     from omnigent.runtime.agent_cache import AgentCache
@@ -36,6 +37,7 @@ _file_store: FileStore | None = None
 _artifact_store: ArtifactStore | None = None
 _comment_store: CommentStore | None = None
 _policy_store: PolicyStore | None = None
+_memory_service: MemoryService | None = None
 _caps: RuntimeCaps = RuntimeCaps()
 
 # Server-resident tmux terminal registry. Initialized in
@@ -177,6 +179,7 @@ def init(
     artifact_store: ArtifactStore | None = None,
     comment_store: CommentStore | None = None,
     policy_store: PolicyStore | None = None,
+    memory_service: MemoryService | None = None,
     caps: RuntimeCaps | None = None,
 ) -> None:
     """
@@ -206,6 +209,10 @@ def init(
         ``None`` when session policies are not configured;
         the policy engine will only use spec-declared
         policies.
+    :param memory_service: The MemoryService instance backing the
+        ``memory_*`` built-in tools. ``None`` when the ``memory``
+        extra isn't installed or long-term memory isn't configured;
+        the tools then return a clear "not configured" error.
     :param caps: Operator-configured execution ceiling.
         ``None`` uses :class:`RuntimeCaps` defaults.
     """
@@ -213,7 +220,7 @@ def init(
 
     global _conversation_store, _agent_store
     global _agent_cache, _file_store, _artifact_store, _caps
-    global _terminal_registry, _comment_store, _policy_store
+    global _terminal_registry, _comment_store, _policy_store, _memory_service
     _conversation_store = conversation_store
     _agent_store = agent_store
     _agent_cache = agent_cache
@@ -221,6 +228,7 @@ def init(
     _artifact_store = artifact_store
     _comment_store = comment_store
     _policy_store = policy_store
+    _memory_service = memory_service
     _caps = caps if caps is not None else RuntimeCaps()
     # Tmux terminal registry: server-resident, conversation-scoped
     # ``inner.terminal.TerminalInstance`` map. See

@@ -441,6 +441,22 @@ def test_rollover_launch_preapproves_the_recall_tool(bridge_dir: Path) -> None:
     assert "mcp__omnigent__session_history" in allowed
 
 
+def test_rollover_launch_preapproves_the_memory_tools(bridge_dir: Path) -> None:
+    """Without the allowlist, don't-ask mode denies the memory_* tools outright."""
+    from omnigent.harnesses.claude_native.bridge import augment_claude_args
+
+    args = augment_claude_args(
+        ("--model", "databricks-claude-sonnet-5"),
+        bridge_dir=bridge_dir,
+        python_executable="/venv/bin/python",
+        allowed_tools=_ROLLOVER_ALLOWED_TOOLS,
+    )
+
+    allowed = args[args.index("--allowedTools") + 1].split(",")
+    for name in ("remember", "search", "get", "explain", "forget"):
+        assert f"mcp__omnigent__memory_{name}" in allowed
+
+
 def test_pinned_harness_launch_argv_is_unchanged(bridge_dir: Path) -> None:
     """A pinned session's argv must stay byte-identical to the pre-change one.
 

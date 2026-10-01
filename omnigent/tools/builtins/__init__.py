@@ -44,6 +44,13 @@ from omnigent.tools.builtins.load_skill import (
     format_skill_meta_text,
     list_skill_resources,
 )
+from omnigent.tools.builtins.memory import (
+    MemoryExplainTool,
+    MemoryForgetTool,
+    MemoryGetTool,
+    MemoryRememberTool,
+    MemorySearchTool,
+)
 from omnigent.tools.builtins.nimble_extract import NimbleExtractTool
 from omnigent.tools.builtins.nimble_research import NimbleResearchTool
 from omnigent.tools.builtins.read_skill_file import (
@@ -78,6 +85,11 @@ __all__ = [
     "INSTANTIABLE_BUILTINS",
     "ListCommentsTool",
     "LoadSkillTool",
+    "MemoryExplainTool",
+    "MemoryForgetTool",
+    "MemoryGetTool",
+    "MemoryRememberTool",
+    "MemorySearchTool",
     "NimbleExtractTool",
     "NimbleResearchTool",
     "ReadSkillFileTool",
@@ -274,6 +286,15 @@ _BUILTIN_REGISTRY: dict[str, _BuiltinFactory | None] = {
     # only (label-driven, see omnigent/context/labels.py). Reserved here so
     # user specs cannot shadow it.
     "session_history": None,
+    # The ``memory_*`` family is auto-registered by
+    # ``ToolManager._register_memory_tools`` for rollover sessions only,
+    # same label gate as ``session_history``. Reserved here so user specs
+    # cannot shadow them.
+    "memory_remember": None,
+    "memory_search": None,
+    "memory_get": None,
+    "memory_explain": None,
+    "memory_forget": None,
     # ``sys_list_models`` is auto-registered by
     # ``ToolManager._register_sub_agent_tools`` with the dispatch grant
     # and intercepted by name in the runner's tool dispatch — reserved

@@ -11,6 +11,7 @@ from omnigent.runner.app import _format_subagent_wake_notice
 from omnigent.runtime.mcp_tool_result import encode_mcp_image_result
 from omnigent.runtime.prompt import (
     EMBEDDED_BROWSER_PRIORITY_INSTRUCTION,
+    MEMORY_INSTRUCTION,
     ROLLOVER_CONTEXT_INSTRUCTION,
     SUBAGENT_WAKE_NOTICE_INSTRUCTION,
     SUBAGENT_WAKE_NOTICE_SHAPE,
@@ -463,6 +464,37 @@ def test_rollover_instruction_present_in_nullable_variant() -> None:
     out = build_instructions_nullable(spec, None, [], labels={"omnigent.context.mode": "rollover"})
     assert out is not None
     assert ROLLOVER_CONTEXT_INSTRUCTION in out
+
+
+def test_memory_instruction_absent_when_labels_unset() -> None:
+    spec = _spec("Agent prompt")
+    assert MEMORY_INSTRUCTION not in build_instructions(spec, None, [])
+
+
+def test_memory_instruction_absent_for_non_rollover_labels() -> None:
+    spec = _spec("Agent prompt")
+    out = build_instructions(spec, None, [], labels={"some.other.label": "x"})
+    assert MEMORY_INSTRUCTION not in out
+
+
+def test_memory_instruction_present_for_rollover_session() -> None:
+    spec = _spec("Agent prompt")
+    out = build_instructions(spec, None, [], labels={"omnigent.context.mode": "rollover"})
+    assert MEMORY_INSTRUCTION in out
+    # Appended after the rollover recall instruction, next to it in source.
+    assert out.index(ROLLOVER_CONTEXT_INSTRUCTION) < out.index(MEMORY_INSTRUCTION)
+
+
+def test_memory_instruction_present_in_nullable_variant() -> None:
+    spec = _spec(None)
+    out = build_instructions_nullable(spec, None, [], labels={"omnigent.context.mode": "rollover"})
+    assert out is not None
+    assert MEMORY_INSTRUCTION in out
+
+
+def test_memory_instruction_mentions_memory_tools() -> None:
+    assert "memory_search" in MEMORY_INSTRUCTION
+    assert "memory_remember" in MEMORY_INSTRUCTION
 
 
 def test_rollover_instruction_mentions_session_history_tool() -> None:

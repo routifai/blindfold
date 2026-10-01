@@ -7048,8 +7048,19 @@ def _mcp_tool_schema(tool: Tool) -> _JsonObject:
 
 
 # Tools kept in the model's context instead of behind Claude Code's tool
-# search: recall must be at hand right after a rollover compacts history.
-_ALWAYS_LOADED_RELAY_TOOLS = frozenset({"session_history"})
+# search: recall must be at hand right after a rollover compacts history,
+# and long-term memory must be checked before answering about prior work,
+# people, or preferences — a tool behind search is effectively absent.
+_ALWAYS_LOADED_RELAY_TOOLS = frozenset(
+    {
+        "session_history",
+        "memory_remember",
+        "memory_search",
+        "memory_get",
+        "memory_explain",
+        "memory_forget",
+    }
+)
 
 
 def _combined_mcp_tool_schemas(

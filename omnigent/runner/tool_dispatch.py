@@ -33,7 +33,7 @@ import weakref
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from omnigent.context.labels import is_rollover
 from omnigent.util.json_types import JsonObject as _JsonObject
@@ -315,6 +315,13 @@ _SESSION_SELF_WRITE_TOOLS = frozenset({SysSessionRenameTool.name()})
 # posture as _SESSION_QUERY_TOOLS), so it dispatches over server_client.
 _SESSION_HISTORY_TOOLS = frozenset({SessionHistoryTool.name()})
 
+# Long-term memory (rollover/MEMORY-PLAN.md Phase 1). Same REST posture as
+# _SESSION_HISTORY_TOOLS: the runner has no in-process MemoryService, so it
+# dispatches to the Omnigent server's /v1/sessions/{id}/memory/* endpoints.
+_MEMORY_TOOLS = frozenset(
+    {"memory_remember", "memory_search", "memory_get", "memory_explain", "memory_forget"}
+)
+
 # The title bound the rename tool advertises to the LLM — read once from the
 # tool schema so the dispatcher can never drift from the published contract.
 _SESSION_RENAME_TITLE_MAX_CHARS: int = SysSessionRenameTool().get_schema()["function"][
@@ -496,6 +503,9 @@ _NATIVE_RELAY_BUILTIN_TOOLS = (
     # rides the relay only when that gate passes, same as the spec-gated
     # tools above.
     | _SESSION_HISTORY_TOOLS
+    # memory_*: same rollover-only gate as session_history
+    # (ToolManager._register_memory_tools).
+    | _MEMORY_TOOLS
 )
 
 
@@ -610,9 +620,26 @@ def build_native_relay_tool_schemas(
             SysPolicyRegistryTool,
         )
         # No spec means no ToolManager, so the label gate is applied directly
-        # here — session_history's schema is spec-independent (static).
+        # here — session_history's and the memory_* tools' schemas are
+        # spec-independent (static).
         if is_rollover(labels):
-            fallback_classes = (*fallback_classes, SessionHistoryTool)
+            from omnigent.tools.builtins.memory import (
+                MemoryExplainTool,
+                MemoryForgetTool,
+                MemoryGetTool,
+                MemoryRememberTool,
+                MemorySearchTool,
+            )
+
+            fallback_classes = (
+                *fallback_classes,
+                SessionHistoryTool,
+                MemoryRememberTool,
+                MemorySearchTool,
+                MemoryGetTool,
+                MemoryExplainTool,
+                MemoryForgetTool,
+            )
         for _cls in fallback_classes:
             fallback_schema = _string_object_dict(_cls().get_schema())
             if fallback_schema is None:
@@ -886,6 +913,7 @@ _ALL_LOCAL_TOOLS = (
     | _SESSION_QUERY_TOOLS
     | _SESSION_SELF_WRITE_TOOLS
     | _SESSION_HISTORY_TOOLS
+    | _MEMORY_TOOLS
     | _WEB_FETCH_TOOLS
     | _WEB_SEARCH_TOOLS
     | _NIMBLE_RESEARCH_TOOLS
@@ -6390,6 +6418,99 @@ async def _session_history_status_via_rest(
     return json.dumps(status_from_labels({str(k): str(v) for k, v in labels.items()}))
 
 
+def _memory_error_body(resp: httpx.Response) -> str:
+    """Extract a readable message from a non-2xx memory-route response."""
+    try:
+        body = resp.json()
+    except Exception:  # noqa: BLE001
+        return resp.text or f"HTTP {resp.status_code}"
+    if isinstance(body, dict):
+        message = body.get("error") or body.get("detail") or body.get("message")
+        if isinstance(message, str) and message:
+            return message
+    return f"HTTP {resp.status_code}"
+
+
+async def _execute_memory_tool(
+    tool_name: str,
+    args: _JsonObject,
+    *,
+    conversation_id: str | None,
+    server_client: httpx.AsyncClient | None,
+) -> str:
+    """
+    Runner-local handler for the ``memory_*`` family (native-relay dispatch).
+
+    The runner has no in-process :class:`~omnigent.memory.service.MemoryService`
+    (same constraint as ``_execute_session_history_tool``), so every action
+    dispatches to the Omnigent server's ``/v1/sessions/{id}/memory/*``
+    endpoints over ``server_client``. ``conversation_id`` is the runner's own
+    dispatch context, never read from *args*; the server resolves the acting
+    user from that session's owner, never from the request body.
+
+    :param tool_name: One of ``memory_remember``/``memory_search``/
+        ``memory_get``/``memory_explain``/``memory_forget``.
+    :param args: Parsed tool arguments.
+    :param conversation_id: The calling session id.
+    :param server_client: HTTP client pointed at the Omnigent server.
+    :returns: JSON output matching the in-process tools' shape.
+    """
+    if server_client is None:
+        return json.dumps({"error": f"{tool_name} requires server access"})
+    if conversation_id is None:
+        return json.dumps({"error": f"{tool_name} requires a session id"})
+    base = f"/v1/sessions/{conversation_id}/memory"
+
+    try:
+        if tool_name == "memory_remember":
+            text = args.get("text")
+            if not isinstance(text, str) or not text.strip():
+                return json.dumps({"error": "text must be a non-empty string"})
+            resp = await server_client.post(
+                f"{base}/remember",
+                json={"text": text.strip(), "kind": args.get("kind"), "quote": args.get("quote")},
+                timeout=30.0,
+            )
+        elif tool_name == "memory_search":
+            query = args.get("query")
+            if not isinstance(query, str) or not query.strip():
+                return json.dumps({"error": "query must be a non-empty string"})
+            params: dict[str, Any] = {"query": query.strip()}
+            if args.get("kind") is not None:
+                params["kind"] = args["kind"]
+            if args.get("limit") is not None:
+                params["limit"] = args["limit"]
+            resp = await server_client.get(f"{base}/search", params=params, timeout=30.0)
+        elif tool_name == "memory_get":
+            claim_id = args.get("claim_id")
+            if not isinstance(claim_id, str) or not claim_id:
+                return json.dumps({"error": "claim_id must be a non-empty string"})
+            resp = await server_client.get(f"{base}/claims/{claim_id}", timeout=30.0)
+        elif tool_name == "memory_explain":
+            claim_id = args.get("claim_id")
+            if not isinstance(claim_id, str) or not claim_id:
+                return json.dumps({"error": "claim_id must be a non-empty string"})
+            resp = await server_client.get(f"{base}/claims/{claim_id}/explain", timeout=30.0)
+        else:  # memory_forget
+            if args.get("claim_id") is None and not args.get("query"):
+                return json.dumps({"error": "forget requires claim_id or query"})
+            resp = await server_client.post(
+                f"{base}/forget",
+                json={
+                    "claim_id": args.get("claim_id"),
+                    "query": args.get("query"),
+                    "confirm": bool(args.get("confirm", False)),
+                },
+                timeout=30.0,
+            )
+    except Exception as exc:  # noqa: BLE001 — a failed call is reported to the model
+        return json.dumps({"error": f"{tool_name} failed: {exc}"})
+
+    if resp.status_code >= 400:
+        return json.dumps({"error": f"{tool_name}: {_memory_error_body(resp)}"})
+    return json.dumps(resp.json())
+
+
 async def _close_tree_scope_error(
     target_snap: _JsonObject,
     caller_conversation_id: str,
@@ -6765,6 +6886,13 @@ async def execute_tool(
             )
         elif tool_name in _SESSION_HISTORY_TOOLS:
             output = await _execute_session_history_tool(
+                args,
+                conversation_id=conversation_id,
+                server_client=server_client,
+            )
+        elif tool_name in _MEMORY_TOOLS:
+            output = await _execute_memory_tool(
+                tool_name,
                 args,
                 conversation_id=conversation_id,
                 server_client=server_client,

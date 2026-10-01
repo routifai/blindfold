@@ -75,21 +75,41 @@ answering.*
 
 ## If you are building the long-term memory tool
 
-1. Implement it as an Omnigent built-in tool: subclass `Tool`
-   (`omnigent/tools/base.py`) and register it in
-   `omnigent/tools/builtins/__init__.py`. Native CLIs receive it through the
-   MCP relay as `mcp__omnigent__<name>`; SDK harnesses through `ToolManager`.
-2. Read-only, compact JSON: each result with its text, a stable id, its source,
+A reference implementation (Phase 1 of `rollover/MEMORY-PLAN.md`) already
+exists — adopt it, extend it, or replace it behind the same tool contract:
+
+1. Implemented as Omnigent built-in tools: `memory_remember`, `memory_search`,
+   `memory_get`, `memory_explain`, `memory_forget`
+   (`omnigent/tools/builtins/memory.py`), each a `Tool` subclass registered in
+   `omnigent/tools/builtins/__init__.py` (framework-owned, rollover-session
+   gated — see `ToolManager._register_memory_tools`). Native CLIs receive
+   them through the MCP relay as `mcp__omnigent__memory_*`; SDK harnesses
+   through `ToolManager`.
+2. Scoped from the context, never from arguments: the user is the calling
+   session's owner (`omnigent.tools.builtins.memory.resolve_memory_user`),
+   resolved via `ConversationStore.get_session_owner`, with the reserved
+   single-user identity as the fallback when no permission store is
+   configured.
+3. Read-only, compact JSON: each result with its text, a stable id, its source,
    and when it was learned or last confirmed.
-3. On Claude Code, add the tool name to `_ALWAYS_LOADED_RELAY_TOOLS`
-   (`omnigent/harnesses/claude_native/bridge.py`) and to the pre-approved
-   tools (`_ROLLOVER_ALLOWED_TOOLS`, `omnigent/runner/native/orchestration.py`,
-   or an equivalent list). Without pre-approval, Claude Code's permission
-   mode denies the call and the model appears to "refuse".
-4. Add one short instruction for when to use it, next to
-   `ROLLOVER_CONTEXT_INSTRUCTION`.
-5. Split of duties: `session_history` is what was said in this session; the
+4. On Claude Code, the tool names are in `_ALWAYS_LOADED_RELAY_TOOLS`
+   (`omnigent/harnesses/claude_native/bridge.py`) and the pre-approved tools
+   (`_ROLLOVER_ALLOWED_TOOLS`, `omnigent/runner/native/orchestration.py`).
+   Without pre-approval, Claude Code's permission mode denies the call and
+   the model appears to "refuse".
+5. One short instruction for when to use it, `MEMORY_INSTRUCTION` in
+   `omnigent/runtime/prompt.py`, next to `ROLLOVER_CONTEXT_INSTRUCTION`.
+6. Split of duties: `session_history` is what was said in this session; the
    memory tool is what is known about the user across sessions.
+7. Store: a `memory_claims` table (`omnigent/stores/memory_store/`) is the
+   source of truth; a txtai hybrid search index (`omnigent/memory/index.py`)
+   is rebuildable from it. Requires the optional `omnigent[memory]` extra
+   (txtai + litellm); `omnigent.memory.build_memory_service()` returns `None`
+   when it isn't installed, so the server mounts no memory routes and the
+   tools report a clear "not configured" error rather than failing opaquely.
+   Embeddings model: env `OMNIGENT_MEMORY_EMBEDDINGS_MODEL` (default
+   `openai/text-embedding-3-small`; the server needs `OPENAI_API_KEY` for
+   that default).
 
 ## If you are building the orchestrator, side chats or sub-agents
 
@@ -121,6 +141,9 @@ answering.*
 ## How to verify your change
 
 - Unit tests: `tests/context`, `tests/tools/builtins/test_session_history.py`,
+  `tests/tools/builtins/test_memory.py`, `tests/memory`,
+  `tests/stores/test_memory_store.py`,
+  `tests/server/routes/test_session_memory_routes.py`,
   `tests/test_claude_native*.py`, `tests/test_codex_native*.py`,
   `tests/test_pi_native*.py`, `tests/runner`.
 - Live, on real CLIs: `dev/rollover/rollover_e2e.py` (see

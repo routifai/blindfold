@@ -142,34 +142,68 @@ What to do:
 
 ## For the long-term memory team
 
-The memory lookup is exposed to agents as a tool, for example `recall_memory`.
+Phase 1 of a reference implementation now lives in this repository —
+[`MEMORY-PLAN.md`](MEMORY-PLAN.md) is the design; the memory team can adopt it
+as-is, extend it (Phases 2-4: work profile every turn, the upkeep job,
+colleagues/working-style synthesis), or replace it behind the same tool
+contract. The memory lookup is exposed to agents as the `memory_*` tools, not
+a single `recall_memory` tool:
 
-1. **Implement it as an Omnigent built-in tool.** Subclass `Tool`
-   (`omnigent/tools/base.py`) and register it in
-   `omnigent/tools/builtins/__init__.py`. Native CLIs then get it through the
-   existing MCP relay (tool name `mcp__omnigent__recall_memory`); SDK
-   harnesses through `ToolManager`. No per-harness code.
-2. **Scope from the context, never from arguments.** Read the user and session
-   from `ToolContext`, as `session_history` does.
-3. **Keep it read-only** and return compact JSON: each result with its text, a
-   stable id, where it came from, and when it was learned or last confirmed.
-   Cap the response size: a large tool result can push the CLI over its
-   threshold mid-answer.
-4. **Make it reachable on Claude Code:** add its name to
-   `_ALWAYS_LOADED_RELAY_TOOLS` (`harnesses/claude_native/bridge.py`) so it
-   isn't hidden behind tool search, and to the pre-approved tools
-   (`_ROLLOVER_ALLOWED_TOOLS`, `runner/native/orchestration.py`, or an
-   equivalent list for memory sessions). Without the pre-approval, Claude
-   Code's permission mode denies the call.
-5. **Tell the model when to use it** with one short framework instruction in
-   `omnigent/runtime/prompt.py`, next to `ROLLOVER_CONTEXT_INSTRUCTION`. Don't
-   put per-harness copies of the rule in harness code.
-6. **Memory never goes into a checkpoint.** A checkpoint holds conversation
-   state only. Standing memory must reach the model live on every turn,
-   otherwise it gets frozen into summaries.
+| Tool | What |
+|---|---|
+| `memory_remember(text, kind?, quote?)` | Write a `stated` claim, indexed immediately; reinforces or supersedes a near-duplicate |
+| `memory_search(query, kind?, limit?)` | Hybrid (BM25 + dense) search over the user's active claims, ranked by `score × confidence` with a recency boost |
+| `memory_get(claim_id)` | Fetch one claim |
+| `memory_explain(claim_id)` | Evidence quotes, source links, and the supersession chain |
+| `memory_forget(claim_id?, query?, confirm)` | Two-step: a plan, then `confirm=true` to execute |
+
+Reference implementation:
+
+1. **Built-in tools**, Muse-style naming: `omnigent/tools/builtins/memory.py`
+   (`MemoryRememberTool`, `MemorySearchTool`, `MemoryGetTool`,
+   `MemoryExplainTool`, `MemoryForgetTool`), each a `Tool` subclass registered
+   in `omnigent/tools/builtins/__init__.py`. Native CLIs reach them through
+   the MCP relay (`mcp__omnigent__memory_*`); SDK harnesses through
+   `ToolManager`.
+2. **Scoped from the context, never from arguments.** The user is resolved
+   from the calling session's owner
+   (`omnigent.tools.builtins.memory.resolve_memory_user`, mirroring
+   `session_history`'s session-from-context scoping) — never a value the
+   model supplies.
+3. **Read-only except `remember`/`forget`**, returning compact, capped JSON:
+   claim id, text, kind, explicitness, last confirmed, and source links. A
+   large tool result can push the CLI over its threshold mid-answer.
+4. **Reachable on Claude Code:** `memory_*` is in `_ALWAYS_LOADED_RELAY_TOOLS`
+   (`harnesses/claude_native/bridge.py`) so it isn't hidden behind tool
+   search, and in the pre-approved tools (`_ROLLOVER_ALLOWED_TOOLS`,
+   `runner/native/orchestration.py`). Without the pre-approval, Claude Code's
+   permission mode denies the call.
+5. **Told to the model** with one short framework instruction,
+   `MEMORY_INSTRUCTION` in `omnigent/runtime/prompt.py`, next to
+   `ROLLOVER_CONTEXT_INSTRUCTION` — appended only for a rollover session, same
+   gate, same file (no per-harness copies).
+6. **Never goes into a checkpoint.** A checkpoint holds conversation state
+   only. Standing memory reaches the model live, every turn, via the
+   instruction above plus on-demand `memory_search` calls (Phase 2's
+   always-injected work profile is not built yet).
+7. **Store and index**: a `memory_claims` table (source of truth,
+   `omnigent/stores/memory_store/`) plus a txtai hybrid search index
+   (`omnigent/memory/index.py`), rebuildable from the table via
+   `MemoryService.rebuild_index()`. Requires the optional `omnigent[memory]`
+   extra (txtai + litellm) — `omnigent/memory/build_memory_service()` returns
+   `None` when it isn't installed, so a server without it mounts no memory
+   routes and the tools return a clear "not configured" error instead of a
+   half-working feature. Embeddings model:
+   `OMNIGENT_MEMORY_EMBEDDINGS_MODEL` (default
+   `openai/text-embedding-3-small`, via litellm — the server needs
+   `OPENAI_API_KEY` for the default model).
 
 Division of work: `session_history` is what was **said in this session**;
-the memory tool is what is **known about the user across sessions**.
+the memory tool is what is **known about the user across sessions**. See
+`MEMORY-PLAN.md` for the reinforce/supersede rule, the ranking formula, and
+what's deferred to later phases (contradiction detection beyond a
+same-topic-different-text heuristic; the watermarked upkeep job that extracts
+claims the user never explicitly asked to remember).
 
 ## Recall tool: `session_history`
 
@@ -303,6 +337,23 @@ Every file this work changes against upstream, and why.
 | `omnigent/runner/app.py` | Labels cache for rollover checks, relay tools by label, local provider credentials for side-chat summaries, recent-turns block on the next message after a compaction |
 | `omnigent/server/routes/sessions/routes_core.py` | Seed a side chat forked from a rollover session with one checkpoint (summary plus recent turns) |
 
+**Long-term memory (Phase 1 of `MEMORY-PLAN.md`)**
+
+| File | Why |
+|---|---|
+| `omnigent/db/db_models.py`, `omnigent/db/migrations/versions/mm1a2b3c4d5e_add_memory_claims_table.py` | The `memory_claims` table (`SqlMemoryClaim`) |
+| `omnigent/entities/memory_claim.py` | `MemoryClaim` / `MemoryEvidenceLink` dataclasses |
+| `omnigent/stores/memory_store/__init__.py`, `.../sqlalchemy_store.py` | CRUD + per-user isolation + reinforce/supersede/forget |
+| `omnigent/memory/__init__.py`, `config.py`, `index.py`, `service.py` | txtai hybrid search index (lazy-imported, pure-numpy ANN backend), the `MemoryService` read/write paths (remember/search/get/explain/forget), and `build_memory_service()` (returns `None` when the `memory` extra isn't installed) |
+| `omnigent/tools/builtins/memory.py`, `omnigent/tools/builtins/__init__.py`, `omnigent/tools/manager.py` | The `memory_*` built-in tools; registered only for rollover sessions, same gate as `session_history` |
+| `omnigent/runner/tool_dispatch.py` | Native-relay dispatch of `memory_*` over the server's REST API |
+| `omnigent/server/routes/session_memory.py`, `omnigent/server/schemas.py`, `omnigent/server/app.py`, `omnigent/cli.py` | `/v1/sessions/{id}/memory/*` endpoints, mounted only when a `memory_service` is configured |
+| `omnigent/runtime/_globals.py`, `omnigent/runtime/__init__.py` | `get_memory_service()` runtime getter |
+| `omnigent/harnesses/claude_native/bridge.py` | `memory_*` in `_ALWAYS_LOADED_RELAY_TOOLS` |
+| `omnigent/runner/native/orchestration.py` | `memory_*` in `_ROLLOVER_ALLOWED_TOOLS` |
+| `omnigent/runtime/prompt.py` | `MEMORY_INSTRUCTION`, appended next to `ROLLOVER_CONTEXT_INSTRUCTION` |
+| `pyproject.toml`, `uv.lock` | The optional `memory` extra (txtai + litellm) |
+
 **Dev, docs and tests**
 
 | File | Why |
@@ -317,5 +368,13 @@ Every file this work changes against upstream, and why.
   `tests/test_claude_native.py`, `tests/test_codex_native*.py`,
   `tests/test_pi_native*.py`, `tests/runner/test_session_history_tool_dispatch.py`,
   `tests/runner/test_post_compaction_tail_delivery.py`.
+- Long-term memory (Phase 1): `tests/stores/test_memory_store.py`, `tests/memory`
+  (service + index, with a deterministic offline embeddings backend — no
+  OpenAI calls), `tests/tools/builtins/test_memory.py`,
+  `tests/runner/test_memory_tool_dispatch.py`,
+  `tests/server/routes/test_session_memory_routes.py`, plus the
+  `memory_remember`/`memory_search` assertions folded into
+  `tests/tools/test_manager.py`, `tests/runtime/test_prompt.py`, and
+  `tests/runner/test_app_claude_native_launch_args.py`.
 - Live end-to-end: [`dev/rollover/`](../dev/rollover/README.md) (real CLIs,
   costs ~100k tokens per harness).

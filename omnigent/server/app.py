@@ -64,6 +64,7 @@ from omnigent.harness_plugins import (
     NativeHarnessProvider,
     native_provider_for_key,
 )
+from omnigent.memory.service import MemoryService
 from omnigent.resources import examples as _examples_resources
 from omnigent.runtime import (
     get_terminal_registry,
@@ -107,6 +108,7 @@ from omnigent.server.routes.projects import create_projects_router
 from omnigent.server.routes.runner_tunnel import create_runner_tunnel_router
 from omnigent.server.routes.scheduled_tasks import create_scheduled_tasks_router
 from omnigent.server.routes.session_mcp_servers import create_session_mcp_servers_router
+from omnigent.server.routes.session_memory import create_session_memory_router
 from omnigent.server.routes.session_policies import create_session_policies_router
 from omnigent.server.routes.sessions import (
     SessionLiveness,
@@ -1304,6 +1306,7 @@ def create_app(
     policy_store: PolicyStore | None = None,
     permission_store: PermissionStore | None = None,
     scheduled_task_store: ScheduledTaskStore | None = None,
+    memory_service: MemoryService | None = None,
     project_store: ProjectStore | None = None,
     auth_provider: AuthProvider | None = None,
     host_store: HostStore | None = None,
@@ -1358,6 +1361,11 @@ def create_app(
         starts an :class:`ScheduledTaskScheduler` that arms a timer per
         active task and fires the injected ``on_fire`` callback on
         schedule. ``None`` disables the scheduler entirely.
+    :param memory_service: Service backing long-term memory (the
+        ``memory_*`` built-in tools and their native-relay dispatch).
+        ``None`` disables the ``/v1/sessions/{id}/memory`` endpoints; the
+        tools themselves still register in rollover sessions but return a
+        clear "not configured" error when invoked.
     :param project_store: Store for first-class projects (owner-private
         containers that group sessions). ``None`` disables the
         ``/v1/projects`` CRUD endpoints.
@@ -3242,6 +3250,17 @@ def create_app(
         prefix="/v1",
         tags=["policy_registry"],
     )
+    if memory_service is not None:
+        app.include_router(
+            create_session_memory_router(
+                memory_service,
+                conversation_store,
+                auth_provider=auth_provider,
+                permission_store=permission_store,
+            ),
+            prefix="/v1",
+            tags=["memory"],
+        )
     if scheduled_task_store is not None:
         app.include_router(
             create_scheduled_tasks_router(

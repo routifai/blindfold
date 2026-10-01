@@ -1721,3 +1721,107 @@ class SqlScheduledTaskRun(OmnigentBase):
             "conversation_id",
         ),
     )
+
+
+class SqlMemoryClaim(OmnigentBase):
+    """
+    SQLAlchemy model for the ``memory_claims`` table.
+
+    A claim is one durable fact, preference, instruction, or decision learned
+    about a user, written by the ``memory_remember`` tool (Phase 1) or a
+    future upkeep job (Phase 3). The table is the source of truth; the txtai
+    search index (``omnigent/memory/index.py``) is rebuilt from it on demand.
+    See ``rollover/MEMORY-PLAN.md`` section 3 for the field-by-field design.
+
+    :param id: UUID primary key stored as 16 raw bytes (see :class:`Uuid16`),
+        surfaced as a bare 32-char hex string (no dashes).
+    :param user_id: The user this claim is about. Every store query filters
+        on this column — claims never cross users.
+    :param kind: One of ``preference``, ``instruction``, ``fact``,
+        ``decision``, ``person``, ``project``, ``working_style``. Stored as
+        plain text (not a smallint-coded enum like other tables) since the
+        memory team may extend this set freely in a later phase.
+    :param claim_text: One self-contained sentence describing the claim.
+    :param quote: The exact words the evidence was drawn from, or ``None``.
+    :param speaker: Who said it (usually the user), or ``None``.
+    :param evidence: JSON-encoded list of ``{"session_id", "item_id"}``
+        source links.
+    :param explicitness: ``"stated"`` (the user said it) or ``"inferred"``
+        (deduced from behavior or a correction).
+    :param confidence: 0-1. Stated claims start at 0.9, inferred at 0.4.
+    :param first_seen: Unix epoch seconds the claim was first written.
+    :param reinforced_at: Unix epoch seconds of the most recent
+        reinforcement, or ``None`` if never reinforced.
+    :param reinforcement_count: Number of times a near-duplicate claim was
+        reinforced into this one. Starts at 0.
+    :param supersedes_claim_id: The claim this one replaced, or ``None``.
+        Relates to ``memory_claims.id``; no DB foreign key (Rule R032).
+    :param status: ``active``, ``superseded``, ``expired``, or ``forgotten``.
+        Plain text for the same reason as ``kind``.
+    :param valid_until: Unix epoch seconds after which the claim no longer
+        applies (e.g. "on leave until Nov 3"), or ``None``.
+    :param run_id: The upkeep run that wrote this claim, or ``None`` for a
+        claim written directly by ``memory_remember``.
+    :param created_at: Unix epoch seconds at row creation.
+    :param updated_at: Unix epoch seconds of the last write, or ``None`` if
+        the row has never been updated.
+    """
+
+    __tablename__ = "memory_claims"
+
+    # Tenant partition key: matches every other table after r1a2b3c4d5e6.
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        nullable=False,
+        server_default="0",
+        default=current_workspace_id,
+    )
+    id: Mapped[str] = mapped_column(Uuid16, primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    # Opaque free text, never SQL-filtered directly (the txtai index is the
+    # search path) — stored compressed like other large text columns.
+    claim_text: Mapped[str] = mapped_column(CompressedText, nullable=False)
+    quote: Mapped[str | None] = mapped_column(CompressedText, nullable=True)
+    speaker: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # JSON-encoded list of {"session_id", "item_id"} source links.
+    evidence: Mapped[str | None] = mapped_column(Text, nullable=True)
+    explicitness: Mapped[str] = mapped_column(String(16), nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    first_seen: Mapped[int] = mapped_column(Integer, nullable=False)
+    reinforced_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reinforcement_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    # Relates to memory_claims.id. No DB foreign key (Rule R032).
+    supersedes_claim_id: Mapped[str | None] = mapped_column(Uuid16, nullable=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="active")
+    valid_until: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[int] = mapped_column(Integer, nullable=False)
+    updated_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "kind IN ('preference', 'instruction', 'fact', 'decision', "
+            "'person', 'project', 'working_style')",
+            name="ck_memory_claims_kind",
+        ),
+        CheckConstraint(
+            "explicitness IN ('stated', 'inferred')",
+            name="ck_memory_claims_explicitness",
+        ),
+        CheckConstraint(
+            "status IN ('active', 'superseded', 'expired', 'forgotten')",
+            name="ck_memory_claims_status",
+        ),
+        # Covers "a user's active claims" (search/list) as a seek, same shape
+        # as ix_scheduled_tasks_user_scope.
+        Index(
+            "ix_memory_claims_user_scope",
+            "workspace_id",
+            "user_id",
+            "status",
+            "created_at",
+            "id",
+        ),
+    )

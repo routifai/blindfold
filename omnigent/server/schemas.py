@@ -424,6 +424,45 @@ class UpdateSessionPolicyRequest(BaseModel):
     enabled: bool | None = None
 
 
+# ── Long-term memory ────────────────────────────────────────────────
+
+
+class MemoryRememberRequest(BaseModel):
+    """
+    Request body for ``POST /v1/sessions/{session_id}/memory/remember``.
+
+    :param text: One self-contained sentence describing the claim.
+    :param kind: One of the memory claim kinds (see
+        ``omnigent.memory.service.VALID_KINDS``). Defaults to ``"fact"``
+        when omitted or unrecognized.
+    :param quote: The user's exact words this claim is drawn from.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    text: str
+    kind: str | None = None
+    quote: str | None = None
+
+
+class MemoryForgetRequest(BaseModel):
+    """
+    Request body for ``POST /v1/sessions/{session_id}/memory/forget``.
+
+    :param claim_id: Claim to forget, when known.
+    :param query: Search query identifying the claim, when ``claim_id``
+        isn't known.
+    :param confirm: ``False`` (default) returns a plan without mutating
+        anything; ``True`` executes it.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    claim_id: str | None = None
+    query: str | None = None
+    confirm: bool = False
+
+
 # ── Default Policies ──────────────────────────────────────────────
 
 

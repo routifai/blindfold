@@ -159,6 +159,13 @@ def test_builtin_names_size_matches_registry() -> None:
                 # a rollover session (label-driven, not a spec opt-in —
                 # see ToolManager._register_session_history_tool).
                 "session_history",
+                # memory_*: same rollover-only, label-driven gate as
+                # session_history (see ToolManager._register_memory_tools).
+                "memory_remember",
+                "memory_search",
+                "memory_get",
+                "memory_explain",
+                "memory_forget",
             }
         )
         == BUILTIN_NAMES

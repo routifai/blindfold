@@ -4467,6 +4467,13 @@ def server(
     project_store = SqlAlchemyProjectStore(db_uri)
     artifact_store = _create_artifact_store(art_loc)
 
+    # Long-term memory (optional `omnigent[memory]` extra). None when txtai
+    # isn't installed — the memory_* tools then surface a clear error
+    # instead of a half-working feature.
+    from omnigent.memory import build_memory_service
+
+    memory_service = build_memory_service(db_uri, Path(art_loc) / "memory_index")
+
     # Initialize the runtime with store references so workflow code
     # can access them via getter functions (get_agent_cache(), etc.).
     from omnigent.runtime import init as init_runtime
@@ -4506,6 +4513,7 @@ def server(
         artifact_store=artifact_store,
         comment_store=comment_store,
         policy_store=policy_store,
+        memory_service=memory_service,
         caps=caps,
     )
 
@@ -4650,6 +4658,7 @@ def server(
         runner_tunnel_tokens=_runner_tunnel_tokens,
         permission_store=permission_store,
         scheduled_task_store=scheduled_task_store,
+        memory_service=memory_service,
         project_store=project_store,
         auth_provider=auth_provider,
         host_store=host_store,

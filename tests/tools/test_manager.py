@@ -1687,3 +1687,44 @@ def test_session_history_registration_is_not_a_spec_opt_in() -> None:
     """Every agent spec gets it in a rollover session — no per-agent declaration."""
     mgr = ToolManager(_make_spec(local_tools=[]), labels={"omnigent.context.mode": "rollover"})
     assert "session_history" in mgr.get_tool_names()
+
+
+# ── memory_*: same label-gated, not spec-gated posture as session_history ──
+
+_MEMORY_TOOL_NAMES = (
+    "memory_remember",
+    "memory_search",
+    "memory_get",
+    "memory_explain",
+    "memory_forget",
+)
+
+
+def test_memory_tools_absent_without_labels() -> None:
+    """No ``labels=`` kwarg at all — the default — is byte-for-byte upstream."""
+    mgr = ToolManager(_make_spec())
+    names = mgr.get_tool_names()
+    for name in _MEMORY_TOOL_NAMES:
+        assert name not in names
+
+
+def test_memory_tools_absent_for_non_rollover_labels() -> None:
+    mgr = ToolManager(_make_spec(), labels={"omnigent.context.mode": "blindfold"})
+    names = mgr.get_tool_names()
+    for name in _MEMORY_TOOL_NAMES:
+        assert name not in names
+
+
+def test_memory_tools_present_for_rollover_session() -> None:
+    mgr = ToolManager(_make_spec(), labels={"omnigent.context.mode": "rollover"})
+    names = mgr.get_tool_names()
+    for name in _MEMORY_TOOL_NAMES:
+        assert name in names
+
+
+def test_memory_tools_registration_is_not_a_spec_opt_in() -> None:
+    """Every agent spec gets them in a rollover session — no per-agent declaration."""
+    mgr = ToolManager(_make_spec(local_tools=[]), labels={"omnigent.context.mode": "rollover"})
+    names = mgr.get_tool_names()
+    for name in _MEMORY_TOOL_NAMES:
+        assert name in names

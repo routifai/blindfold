@@ -264,6 +264,13 @@ cursor = ["cursor-sdk>=0.1.7"]
 # _reflect). The tools import the client lazily, so only users who enable a
 # Hindsight memory tool need this extra.
 hindsight = ["hindsight-client>=0.4.0"]
+# Omnigent's own long-term memory (the memory_* built-in tools backing
+# rollover/MEMORY-PLAN.md). txtai (hybrid BM25 + dense search) and litellm
+# (its embeddings backend) are imported lazily, so only servers that wire a
+# MemoryService need this extra — several GB (txtai pulls faiss-cpu and
+# transformers/torch, unused at runtime since the index uses the pure-numpy
+# ANN backend, but still a txtai import-time dependency).
+memory = ["txtai>=8,<9", "litellm>=1,<2"]
 # The Nimble builtins (`nimble_research`, `nimble_extract`). nimble_research
 # imports the nimble-python client lazily; nimble_extract talks raw httpx and
 # needs no client at runtime. Installing this extra is the opt-in signal that
