@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Main chat</title>
+<style>
+:root{
+  --bg:#fbfbfc; --rail:#fbfbfc; --side:#fafafa; --line:#ececef;
+  --ink:#1c1c1e; --ink-2:#6e6e73; --ink-3:#a1a1a6;
+  --bubble-ai:#ececee; --bubble-me:#dcc9f5; --select:#2563eb;
+  --card:#f4f4f6; --composer:#ffffff;
+  --font:-apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{font:400 17px/1.45 var(--font);color:var(--ink);background:var(--bg);display:grid;grid-template-columns:88px 336px minmax(0,1fr);overflow:hidden;-webkit-font-smoothing:antialiased}
+button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
+svg{display:block}
+
+/* icon rail */
+.rail{border-right:1px solid var(--line);display:flex;flex-direction:column;align-items:center;padding:160px 0 24px;gap:14px;background:var(--rail)}
+.rail button{width:60px;height:60px;border-radius:50%;display:grid;place-items:center;color:var(--ink)}
+.rail button:hover{background:#f0f0f2}
+.rail button.on{background:#eeeef0}
+.rail .menu{margin-top:auto;width:44px;height:44px}
+
+/* sidebar */
+.side{border-right:1px solid var(--line);background:var(--side);padding:14px 16px;display:flex;flex-direction:column;gap:4px}
+.side-top{display:flex;align-items:center;gap:12px;margin-bottom:16px}
+.search{flex:1;display:flex;align-items:center;gap:10px;height:50px;padding:0 16px;border:1px solid #dcdce0;border-radius:999px;background:#fff;color:var(--ink-2)}
+.search input{border:0;outline:0;background:transparent;font:inherit;color:var(--ink);width:100%}
+.search input::placeholder{color:var(--ink-2)}
+.more{width:36px;height:36px;display:grid;place-items:center;color:var(--ink-2);border-radius:50%}
+.more:hover{background:#efefF1}
+.chat{display:flex;align-items:center;justify-content:space-between;height:52px;padding:0 15px;border-radius:12px;text-align:left;width:100%}
+.chat:hover{background:#f0f0f2}
+.chat.on{box-shadow:inset 0 0 0 2.5px var(--select);background:#fff}
+.chat time{font-size:15px;color:var(--ink-2)}
+.section{display:flex;align-items:center;justify-content:space-between;padding:10px 12px 6px 15px;color:var(--ink-2)}
+.section button{width:28px;height:28px;display:grid;place-items:center;color:var(--ink-2);border-radius:50%}
+.section button:hover{background:#efeff1}
+
+/* main */
+.main{position:relative;display:flex;flex-direction:column;min-width:0;height:100vh}
+.thread{flex:1;overflow-y:auto;padding:24px 0 140px}
+.col{max-width:1030px;margin:0 auto;padding:0 32px;display:flex;flex-direction:column}
+.stamp{align-self:center;font-size:15px;color:var(--ink-3);margin:12px 0 22px}
+.msg{max-width:860px;padding:13px 21px;border-radius:26px;margin-bottom:24px;white-space:pre-wrap;word-wrap:break-word}
+.msg b{font-weight:600}
+.me{align-self:flex-end;background:var(--bubble-me);position:relative}
+.ai{align-self:flex-start;background:var(--bubble-ai)}
+.react{position:absolute;right:10px;bottom:-18px;width:44px;height:36px;border-radius:18px;background:#f2f2f4;border:3px solid var(--bg);display:grid;place-items:center;font-size:20px}
+.me.reacted{margin-bottom:40px}
+.ai.withfile{border-radius:26px 26px 26px 26px;margin-bottom:8px}
+.file{align-self:flex-start;width:448px;max-width:100%;background:var(--bubble-ai);border-radius:26px;padding:6px;margin-bottom:24px}
+.file .preview{height:246px;border-radius:22px;background:var(--card);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;color:var(--ink-2);font-size:19px}
+.file .meta{display:flex;align-items:center;gap:16px;padding:16px 18px 12px}
+.doc{width:44px;height:52px;flex:none;position:relative;border-radius:6px;background:#fff;border:1px solid #dcdce0;display:flex;align-items:flex-end;justify-content:center;padding-bottom:7px;font:700 11px/1 var(--font);letter-spacing:.04em;color:var(--ink-2)}
+.doc::after{content:"";position:absolute;right:-1px;top:-1px;width:13px;height:13px;background:linear-gradient(225deg,var(--bubble-ai) 50%,#e3e3e7 50%);border-bottom-left-radius:3px}
+.meta b{display:block;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:330px}
+.meta span{color:var(--ink-2)}
+
+/* composer */
+.dock{position:absolute;left:0;right:0;bottom:0;padding:0 32px 20px;background:linear-gradient(to bottom,transparent,var(--bg) 40%)}
+.composer{max-width:1076px;margin:0 auto;display:flex;align-items:center;gap:14px;height:80px;padding:0 28px;background:var(--composer);border-radius:40px;box-shadow:0 2px 14px rgba(0,0,0,.06),0 0 0 1px rgba(0,0,0,.03)}
+.composer input{flex:1;border:0;outline:0;font:inherit;font-size:20px;background:transparent;color:var(--ink)}
+.composer input::placeholder{color:var(--ink-3)}
+.composer button{width:36px;height:36px;display:grid;place-items:center;border-radius:50%}
+.composer button:hover{background:#f2f2f4}
+
+:focus-visible{outline:2px solid var(--select);outline-offset:2px}
+@media (max-width: 960px){ body{grid-template-columns:72px minmax(0,1fr)} .side{display:none} .rail{padding-top:80px} }
+@media (max-width: 560px){ body{grid-template-columns:minmax(0,1fr)} .rail{display:none} .col,.dock{padding-inline:16px} .file{width:100%} }
+</style>
+</head>
+<body>
+
+<nav class="rail" aria-label="Main">
+  <button class="on" aria-label="Chats"><svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M12 4c4.7 0 8.5 3.2 8.5 7.2s-3.8 7.2-8.5 7.2c-1 0-2-.15-2.9-.42L4.5 19.5l1.3-3.6C4.4 14.6 3.5 13 3.5 11.2 3.5 7.2 7.3 4 12 4z"/></svg></button>
+  <button aria-label="Search"><svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5l5 5"/></svg></button>
+  <button aria-label="Notebooks"><svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><rect x="6" y="3.5" width="13" height="17" rx="2.2"/><path d="M6 7H4.5M6 17H4.5M10 8h5M10 11.5h5"/></svg></button>
+  <button aria-label="Ideas"><svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5a6 6 0 0 0-3.6 10.8c.7.55 1.1 1.3 1.1 2.1v.6h5v-.6c0-.8.4-1.55 1.1-2.1A6 6 0 0 0 12 3.5zM10 20h4"/></svg></button>
+  <button aria-label="Tasks"><svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M8.5 12.3l2.4 2.4 4.8-5"/></svg></button>
+  <button aria-label="Apps"><svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><circle cx="7.5" cy="7.5" r="3.2"/><path d="M16.5 3.8l3.4 6h-6.8z"/><rect x="4.3" y="13.3" width="6.4" height="6.4" rx="1.4"/><circle cx="16.5" cy="16.5" r="3.2"/></svg></button>
+  <button class="menu" aria-label="Menu"><svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M4 9h16M4 15h16"/></svg></button>
+</nav>
+
+<aside class="side" aria-label="Chats">
+  <div class="side-top">
+    <label class="search"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5l5 5"/></svg><input placeholder="Search" aria-label="Search chats"></label>
+    <button class="more" aria-label="More"><svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg></button>
+  </div>
+  <button class="chat on"><span>Main chat</span><time>19h</time></button>
+  <div class="section"><span>Side chats</span><button aria-label="New side chat"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></button></div>
+  <button class="chat"><span>Current state of the world</span></button>
+</aside>
+
+<main class="main">
+  <div class="thread" id="thread">
+    <div class="col" id="col">
+      <div class="stamp">Sep 30, 9:41 p.m.</div>
+
+      <div class="msg me">For the avatar you create what is the type of file is it</div>
+
+      <div class="msg ai">Yours is two files: a <b>WebP</b> still image (that's the actual avatar) and an <b>MP4</b> animated version of it.</div>
+
+      <div class="msg me reacted">create a .md for all our conversation today<span class="react" aria-label="Thumbs up reaction">👍</span></div>
+
+      <div class="msg ai withfile">Done. The full day is in there — the morning reconstructed from the checkpoint summary (five compactions wiped the verbatim turns), and everything from ~10:38 onward word-for-word.</div>
+      <div class="file">
+        <div class="preview">
+          <svg width="30" height="30" viewBox="0 0 24 24"><circle cx="12" cy="12" r="11" fill="#5e5e63"/><rect x="11" y="10.5" width="2" height="7" rx="1" fill="#fff"/><circle cx="12" cy="7.4" r="1.25" fill="#fff"/></svg>
+          Not found
+        </div>
+        <div class="meta"><span class="doc">MD</span><div><b>Conversation transcript for September 30</b><span>MD</span></div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="dock">
+    <form class="composer" id="composer">
+      <button type="button" aria-label="Add"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></button>
+      <input id="msg" placeholder="Message" autocomplete="off" aria-label="Message">
+    </form>
+  </div>
+</main>
+
+<script>
+const col = document.getElementById('col'), thread = document.getElementById('thread'), msg = document.getElementById('msg');
+thread.scrollTop = thread.scrollHeight;
+document.getElementById('composer').addEventListener('submit', e => {
+  e.preventDefault();
+  const v = msg.value.trim(); if (!v) return;
+  const b = document.createElement('div'); b.className = 'msg me'; b.textContent = v;
+  col.appendChild(b); msg.value = '';
+  thread.scrollTop = thread.scrollHeight;
+});
+document.querySelectorAll('.chat').forEach(c => c.addEventListener('click', () => {
+  document.querySelectorAll('.chat').forEach(x => x.classList.toggle('on', x === c));
+}));
+</script>
+</body>
+</html>
