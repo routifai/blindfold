@@ -8,6 +8,8 @@ To brief a coding agent working on this layer, hand it
 [INTEGRATION.md](INTEGRATION.md).
 Side chats in detail (context, cross-chat reading, code map):
 [SIDE-CHAT.md](SIDE-CHAT.md).
+Agent memory, industry standard vs Muse (diagram, open in a browser):
+[memory-comparison.html](memory-comparison.html).
 
 - **Super chat / orchestration team:** read [How it works](#how-it-works),
   [Turning it on](#turning-it-on) and [For the super chat and its sub-agents](#for-the-super-chat-and-its-sub-agents).

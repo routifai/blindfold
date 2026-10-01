@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Memory: Standard vs Muse</title>
+<style>
+:root{
+  --paper:#f4f6f9; --panel:#ffffff; --ink:#162033; --muted:#5d6879; --line:#cfd7e3;
+  --st:#2c7a6b; --sem:#3659a6; --epi:#986812; --pro:#8b3d5c; --how:#4b5566;
+  --same:#9aa6b8; --plus:#c2410c; --plus-soft:#fde8dc;
+  color-scheme:light;
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --paper:#0f141d; --panel:#161d29; --ink:#e4e9f1; --muted:#9aa5b6; --line:#2c3748;
+    --st:#5fc7b2; --sem:#8fa9ec; --epi:#e2b05a; --pro:#e392b2; --how:#aab3c2;
+    --same:#56627a; --plus:#fb923c; --plus-soft:#3b2414;
+    color-scheme:dark;
+  }
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;padding:32px 20px 48px}
+main{max-width:1080px;margin:0 auto;display:flex;flex-direction:column;gap:20px}
+h1{margin:0;font-size:clamp(26px,4vw,36px);line-height:1.15}
+p{margin:0;max-width:72ch;color:var(--muted)}
+.wrap{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px;overflow-x:auto}
+svg{display:block;width:100%;min-width:900px;height:auto;color:var(--ink)}
+.legend{display:flex;flex-wrap:wrap;gap:18px;font-size:14px;color:var(--muted)}
+.legend span{display:inline-flex;align-items:center;gap:8px}
+.k{display:inline-block;width:26px;height:0;border-top:2px solid var(--same)}
+.k.plus{border-top:2px solid var(--plus)}
+.badge{display:inline-block;background:var(--plus-soft);color:var(--plus);border-radius:99px;padding:1px 8px;font-size:12px;font-weight:600}
+footer{font-size:13px;color:var(--muted)}
+</style>
+</head>
+<body>
+<main>
+  <h1>Agent memory: industry standard vs Muse</h1>
+  <p>Left: the standard model used by LangGraph, Letta (MemGPT), Mem0 and Zep. Right: how Meta's Muse implements each part. Grey links mean Muse does the standard thing; orange marks where Muse goes further or chooses differently.</p>
+
+  <div class="wrap">
+  <svg viewBox="0 0 1000 760" role="img" aria-label="Diagram mapping each standard memory layer and design choice to Muse. Muse matches every layer; it differs in keyword-only chat recall, markdown files as source of truth, a verification gate, a regenerated profile, specialised background jobs and measured self-improvement.">
+    <defs>
+      <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--same)"/></marker>
+      <marker id="b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--plus)"/></marker>
+    </defs>
+    <g font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif" fill="currentColor">
+
+      <!-- column headers -->
+      <text x="170" y="30" text-anchor="middle" font-size="15" font-weight="700">INDUSTRY STANDARD</text>
+      <text x="170" y="48" text-anchor="middle" font-size="12" fill="var(--muted)">LangGraph · Letta · Mem0 · Zep</text>
+      <text x="800" y="30" text-anchor="middle" font-size="15" font-weight="700">MUSE</text>
+      <text x="800" y="48" text-anchor="middle" font-size="12" fill="var(--muted)">observed in a real account</text>
+
+      <!-- group labels -->
+      <text x="20" y="80" font-size="11" letter-spacing="1.2" fill="var(--muted)">SHORT-TERM · THIS CONVERSATION</text>
+      <text x="20" y="250" font-size="11" letter-spacing="1.2" fill="var(--muted)">LONG-TERM · ACROSS CONVERSATIONS</text>
+      <text x="20" y="560" font-size="11" letter-spacing="1.2" fill="var(--muted)">HOW MEMORY IS WRITTEN AND UPDATED</text>
+
+      <!-- ===== rows: left boxes x=20 w=300 ; right boxes x=640 w=340 ===== -->
+
+      <!-- 1 working memory -->
+      <rect x="20" y="92" width="300" height="58" rx="8" fill="none" stroke="var(--st)" stroke-width="2"/>
+      <text x="36" y="116" font-size="14" font-weight="700" fill="var(--st)">Working memory</text>
+      <text x="36" y="136" font-size="12.5">Context window; trim or summarize when full</text>
+      <rect x="640" y="92" width="340" height="58" rx="8" fill="none" stroke="var(--st)" stroke-width="2"/>
+      <text x="656" y="116" font-size="14" font-weight="700" fill="var(--st)">Context window 350k</text>
+      <text x="656" y="136" font-size="12.5">Compacts at ~150k: summary + recent whole turns</text>
+      <line x1="320" y1="121" x2="638" y2="121" stroke="var(--same)" stroke-width="2" marker-end="url(#a)"/>
+      <text x="479" y="114" text-anchor="middle" font-size="12" fill="var(--muted)">same</text>
+
+      <!-- 2 recall -->
+      <rect x="20" y="162" width="300" height="58" rx="8" fill="none" stroke="var(--st)" stroke-width="2"/>
+      <text x="36" y="186" font-size="14" font-weight="700" fill="var(--st)">Recall</text>
+      <text x="36" y="206" font-size="12.5">Old messages searchable outside the window</text>
+      <rect x="640" y="162" width="340" height="58" rx="8" fill="none" stroke="var(--st)" stroke-width="2"/>
+      <text x="656" y="186" font-size="14" font-weight="700" fill="var(--st)">chat.read_messages + keyword search</text>
+      <text x="656" y="206" font-size="12.5">Paging and full-text only</text>
+      <line x1="320" y1="191" x2="638" y2="191" stroke="var(--plus)" stroke-width="2" marker-end="url(#b)"/>
+      <text x="479" y="184" text-anchor="middle" font-size="12" fill="var(--plus)" font-weight="600">chat never embedded</text>
+
+      <!-- 3 core facts -->
+      <rect x="20" y="262" width="300" height="58" rx="8" fill="none" stroke="var(--sem)" stroke-width="2"/>
+      <text x="36" y="286" font-size="14" font-weight="700" fill="var(--sem)">Semantic: core</text>
+      <text x="36" y="306" font-size="12.5">Small profile shown every turn</text>
+      <rect x="640" y="262" width="340" height="58" rx="8" fill="none" stroke="var(--sem)" stroke-width="2"/>
+      <text x="656" y="286" font-size="14" font-weight="700" fill="var(--sem)">MEMORY.md + USER.md, injected</text>
+      <text x="656" y="306" font-size="12.5">USER.md regenerated from claims when stale</text>
+      <line x1="320" y1="291" x2="638" y2="291" stroke="var(--plus)" stroke-width="2" marker-end="url(#b)"/>
+      <text x="479" y="284" text-anchor="middle" font-size="12" fill="var(--plus)" font-weight="600">profile rebuilt, not edited</text>
+
+      <!-- 4 searched facts -->
+      <rect x="20" y="332" width="300" height="58" rx="8" fill="none" stroke="var(--sem)" stroke-width="2"/>
+      <text x="36" y="356" font-size="14" font-weight="700" fill="var(--sem)">Semantic: searched</text>
+      <text x="36" y="376" font-size="12.5">Vector or graph store, queried by a tool</text>
+      <rect x="640" y="332" width="340" height="58" rx="8" fill="none" stroke="var(--sem)" stroke-width="2"/>
+      <text x="656" y="356" font-size="14" font-weight="700" fill="var(--sem)">memory.claims + vector(384) + tsvector</text>
+      <text x="656" y="376" font-size="12.5">Read with memory_search</text>
+      <line x1="320" y1="361" x2="638" y2="361" stroke="var(--same)" stroke-width="2" marker-end="url(#a)"/>
+      <text x="479" y="354" text-anchor="middle" font-size="12" fill="var(--muted)">same</text>
+
+      <!-- 5 episodic -->
+      <rect x="20" y="402" width="300" height="58" rx="8" fill="none" stroke="var(--epi)" stroke-width="2"/>
+      <text x="36" y="426" font-size="14" font-weight="700" fill="var(--epi)">Episodic</text>
+      <text x="36" y="446" font-size="12.5">Past interactions, retrieved when similar</text>
+      <rect x="640" y="402" width="340" height="58" rx="8" fill="none" stroke="var(--epi)" stroke-width="2"/>
+      <text x="656" y="426" font-size="14" font-weight="700" fill="var(--epi)">Daily logs, experience.md, people pages</text>
+      <text x="656" y="446" font-size="12.5">Markdown files, indexed line by line</text>
+      <line x1="320" y1="431" x2="638" y2="431" stroke="var(--same)" stroke-width="2" marker-end="url(#a)"/>
+      <text x="479" y="424" text-anchor="middle" font-size="12" fill="var(--muted)">same</text>
+
+      <!-- 6 procedural -->
+      <rect x="20" y="472" width="300" height="58" rx="8" fill="none" stroke="var(--pro)" stroke-width="2"/>
+      <text x="36" y="496" font-size="14" font-weight="700" fill="var(--pro)">Procedural</text>
+      <text x="36" y="516" font-size="12.5">Instructions or skills refined by experience</text>
+      <rect x="640" y="472" width="340" height="58" rx="8" fill="none" stroke="var(--pro)" stroke-width="2"/>
+      <text x="656" y="496" font-size="14" font-weight="700" fill="var(--pro)">AGENTS.md, skills, nightly "Dreaming"</text>
+      <text x="656" y="516" font-size="12.5">Changes scored; ones that don't help are retired</text>
+      <line x1="320" y1="501" x2="638" y2="501" stroke="var(--plus)" stroke-width="2" marker-end="url(#b)"/>
+      <text x="479" y="494" text-anchor="middle" font-size="12" fill="var(--plus)" font-weight="600">measured self-improvement</text>
+
+      <!-- 7 write timing -->
+      <rect x="20" y="572" width="300" height="58" rx="8" fill="none" stroke="var(--how)" stroke-width="2"/>
+      <text x="36" y="596" font-size="14" font-weight="700" fill="var(--how)">When written</text>
+      <text x="36" y="616" font-size="12.5">Hot path (tool in the turn) or background</text>
+      <rect x="640" y="572" width="340" height="58" rx="8" fill="none" stroke="var(--how)" stroke-width="2"/>
+      <text x="656" y="596" font-size="14" font-weight="700" fill="var(--how)">Both: MEMORY.md now + upkeep ~hourly</text>
+      <text x="656" y="616" font-size="12.5">Separate jobs: memory, people, dreaming, skills</text>
+      <line x1="320" y1="601" x2="638" y2="601" stroke="var(--plus)" stroke-width="2" marker-end="url(#b)"/>
+      <text x="479" y="594" text-anchor="middle" font-size="12" fill="var(--plus)" font-weight="600">only verified claims kept</text>
+
+      <!-- 8 update policy -->
+      <rect x="20" y="642" width="300" height="58" rx="8" fill="none" stroke="var(--how)" stroke-width="2"/>
+      <text x="36" y="666" font-size="14" font-weight="700" fill="var(--how)">How updated</text>
+      <text x="36" y="686" font-size="12.5">Overwrite (Mem0) or keep history (Zep)</text>
+      <rect x="640" y="642" width="340" height="58" rx="8" fill="none" stroke="var(--how)" stroke-width="2"/>
+      <text x="656" y="666" font-size="14" font-weight="700" fill="var(--how)">Supersede + reinforce + valid_until</text>
+      <text x="656" y="686" font-size="12.5">History kept; files are the source of truth</text>
+      <line x1="320" y1="671" x2="638" y2="671" stroke="var(--plus)" stroke-width="2" marker-end="url(#b)"/>
+      <text x="479" y="664" text-anchor="middle" font-size="12" fill="var(--plus)" font-weight="600">markdown first, DB is index</text>
+
+      <text x="500" y="740" text-anchor="middle" font-size="12.5" fill="var(--muted)">Muse covers every standard layer; the orange links are where it differs.</text>
+    </g>
+  </svg>
+  </div>
+
+  <div class="legend">
+    <span><i class="k"></i> Muse does the standard thing</span>
+    <span><i class="k plus"></i> Muse goes further or chooses differently</span>
+  </div>
+
+  <footer>Muse facts: the user's Muse session on 2026-09-30 (database queries, docs, system prompt). Industry: LangChain memory docs, LangMem, Letta agent memory, Mem0, Zep (arXiv 2501.13956).</footer>
+</main>
+</body>
+</html>
