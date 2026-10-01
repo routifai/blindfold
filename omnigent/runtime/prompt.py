@@ -82,7 +82,9 @@ ROLLOVER_CONTEXT_INSTRUCTION = (
 # sessions is memory's. Appended only when the session's labels select
 # rollover, same gate as ROLLOVER_CONTEXT_INSTRUCTION.
 MEMORY_INSTRUCTION = (
-    "Long-term memory: check memory_search before answering anything about "
+    "Long-term memory (tools memory_search, memory_remember, memory_get, "
+    "memory_explain, memory_forget; some CLIs prefix them, e.g. "
+    "mcp__omnigent__memory_search): check memory_search before answering anything about "
     "the user's prior work, people, preferences, or decisions, and before "
     "recommending anything — don't guess or say what is or isn't remembered "
     "without checking. When the user states something durable (a "
