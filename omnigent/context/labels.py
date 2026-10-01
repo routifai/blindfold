@@ -19,7 +19,7 @@ CONTEXT_MODE_LABEL = "omnigent.context.mode"
 ROLLOVER_MODE_VALUE = "rollover"
 
 # Token count at which a rollover session rolls over. Unset falls back to
-# 45% of the session's context window, or 90,000 when the window is unknown
+# 60% of the model's context window (100k-200k), or 100,000 when unknown
 # (see rollover.resolve_rollover_threshold).
 ROLLOVER_AT_TOKENS_LABEL = "omnigent.context.rollover_at_tokens"
 

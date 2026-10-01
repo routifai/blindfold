@@ -23,7 +23,8 @@ To brief a coding agent working on this layer, hand it
 | Compaction with a tunable threshold and token budgets | ✅ Claude Code, Codex and Pi, at Omnigent's threshold |
 | Recall of exact earlier content | ✅ `session_history` tool; verified live on all three CLIs after compaction |
 | Contract for memory and orchestration | ✅ This document |
-| Automatic per-turn retrieval, source links, inactivity refresh, pruning | ❌ See [Not provided yet](#not-provided-yet) |
+| Recent turns kept verbatim after a compaction | ✅ All three CLIs, within `rollover_keep_tokens` |
+| Automatic per-turn retrieval of older items, source links, inactivity refresh, pruning | ❌ See [Not provided yet](#not-provided-yet) |
 
 Live proof (codeword first, ~100k tokens of documents, then "what was my first
 message, word for word?"): Claude Code on Haiku 4.5 and Sonnet 5, and Codex on
@@ -232,7 +233,7 @@ marker.
 | Pi | No built-in trigger at a token count | — | Extension compacts at the threshold after a settled turn |
 | Pi | Messages sent during a compaction were lost | Dropped user input | Inbox hold until `session_compact` (120 s cap) |
 | Pi | Extension config written before the model's window is known | Extension compacted at 100k regardless of window | Threshold patched into the config once the window resolves |
-| All | Models rarely call recall on their own when the summary looks sufficient | Answers from a lossy summary | Instruction in the system prompt; automatic per-turn retrieval planned |
+| All | Recall looked unused | Mostly our wiring (permission prompt, missing record of Codex calls); once fixed, Claude Code and Codex called it on their own in every live run | Pre-approval, always loaded, rollover instruction; recent turns re-sent after a compaction |
 
 ## Not provided yet
 
@@ -244,6 +245,71 @@ marker.
 | Pruning verbose material between rollovers | Not built |
 | Standing memory injected every turn | The extension point for long-term memory |
 | SDK harnesses; Pi side chats | Not supported yet |
+
+## Files changed
+
+Every file this work changes against upstream, and why.
+
+**Context-management core**
+
+| File | Why |
+|---|---|
+| `omnigent/context/__init__.py` | New package |
+| `omnigent/context/labels.py` | Label names (`omnigent.context.*`) and `is_rollover` |
+| `omnigent/context/rollover.py` | Threshold (`resolve_rollover_threshold`), kept-tail budget, recent-turn selection, state-file summary for Pi and side-chat seeds, side-chat seed builder, recent-turns block after a compaction (`build_post_compaction_tail`, once per compaction) |
+| `omnigent/runtime/prompt.py` | `ROLLOVER_CONTEXT_INSTRUCTION`, added to every rollover session's system prompt |
+| `omnigent/llms/summarize.py`, `omnigent/runtime/compaction.py` | `extra_instructions` so Omnigent's summarizer can produce the state-file shape |
+| `omnigent/models/model_fallbacks.py` | Fallback model for side-chat seed summaries when the session names none |
+
+**Recall**
+
+| File | Why |
+|---|---|
+| `omnigent/tools/builtins/session_history.py` | The `session_history` tool (read, search, status) |
+| `omnigent/tools/builtins/__init__.py`, `omnigent/tools/manager.py` | Register it, only for rollover sessions |
+| `omnigent/runner/tool_dispatch.py` | Run it from native CLIs through the runner (over the server API) and include it in the relay tool list |
+| `omnigent/server/routes/sessions/routes_items.py` | `GET /v1/sessions/{id}/items/search`, scoped to one session |
+| `omnigent/stores/conversation_store/sqlalchemy_store.py` | Quote full-text terms so IDs with `-` or `:` don't crash search |
+
+**Claude Code**
+
+| File | Why |
+|---|---|
+| `omnigent/harnesses/claude_native/main.py` | Compaction threshold through `CLAUDE_CODE_AUTO_COMPACT_WINDOW` + `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` |
+| `omnigent/harnesses/claude_native/bridge.py` | Keep `session_history` out of tool search (always loaded) |
+| `omnigent/harnesses/claude_native/forwarder.py` | Save Claude Code's real summary in the compaction record (waits for the summary line instead of saving a placeholder) |
+
+**Codex**
+
+| File | Why |
+|---|---|
+| `omnigent/harnesses/codex_native/launch_args.py` | Compaction threshold through `model_auto_compact_token_limit` |
+| `omnigent/harnesses/codex_native/forwarder.py` | Save Codex's real summary; record its MCP tool calls (e.g. `session_history`) |
+| `omnigent/harnesses/codex_native/main.py` | Recent-turns block on a resumed session; side-chat seed marker sent as a developer message |
+
+**Pi**
+
+| File | Why |
+|---|---|
+| `omnigent/resources/pi_native/omnigent_pi_native_extension.js` (+ `.test.js`) | Compact at the threshold after a settled turn, with Omnigent's summary; hold incoming messages during a compaction; recall instruction |
+| `omnigent/harnesses/pi_native/bridge.py` | Write the extension's rollover config; patch in the window-based threshold once the model is known |
+| `omnigent/harnesses/pi_native/credentials.py` | Pi's own compaction settings (reserve and kept tokens) from the same threshold |
+
+**Runner and server**
+
+| File | Why |
+|---|---|
+| `omnigent/runner/native/orchestration.py` | Per launch: the threshold from the model's window, pre-approving `session_history` on Claude Code, the rollover instruction, live labels when there's no startup snapshot, Codex threshold, Pi threshold patch |
+| `omnigent/runner/app.py` | Labels cache for rollover checks, relay tools by label, local provider credentials for side-chat summaries, recent-turns block on the next message after a compaction |
+| `omnigent/server/routes/sessions/routes_core.py` | Seed a side chat forked from a rollover session with one checkpoint (summary plus recent turns) |
+
+**Dev, docs and tests**
+
+| File | Why |
+|---|---|
+| `dev/rollover/` | Live end-to-end test on real CLIs (script, runner image, example config, how-to) |
+| `rollover/README.md`, `rollover/INTEGRATION.md`, `rollover/SUPER-CHAT-PROMPT.md` | This reference, the coding-agent briefing, the draft coordinator prompt |
+| `tests/` (24 files) | Unit tests for all of the above; `tests/conftest.py` also keeps local provider keys out of the suite |
 
 ## Testing
 
