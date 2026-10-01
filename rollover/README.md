@@ -54,14 +54,28 @@ Three parts:
 
 | CLI | How Omnigent sets the threshold | Summary and kept content |
 |---|---|---|
-| Claude Code | `CLAUDE_CODE_AUTO_COMPACT_WINDOW` + `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` (`claude_auto_compact_env`, `harnesses/claude_native/main.py`) | Claude Code's own |
-| Codex | `model_auto_compact_token_limit` (`codex_rollover_config_overrides`, `harnesses/codex_native/launch_args.py`) | Codex's own; it keeps the user's messages (up to ~20k tokens) plus its summary |
+| Claude Code | `CLAUDE_CODE_AUTO_COMPACT_WINDOW` + `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` (`claude_auto_compact_env`, `harnesses/claude_native/main.py`) | Claude Code's own summary, plus Omnigent's verbatim recent turns from before the compaction, delivered once on the next message (within `rollover_keep_tokens`) |
+| Codex | `model_auto_compact_token_limit` (`codex_rollover_config_overrides`, `harnesses/codex_native/launch_args.py`) | Codex's own; it keeps the user's messages (up to ~20k tokens) plus its summary, plus Omnigent's verbatim recent turns from before the compaction, delivered once on the next message (within `rollover_keep_tokens`) |
 | Pi | Omnigent's extension compacts after a settled turn at the threshold (`resources/pi_native/omnigent_pi_native_extension.js`) | Omnigent's state-file summary; recent turns within `rollover_keep_tokens` |
 
 Each compaction is recorded as a `compaction` item by the harness forwarder
 (Claude Code, Codex) or the Pi extension. The rollover instruction
 (`ROLLOVER_CONTEXT_INSTRUCTION`, `runtime/prompt.py`) is added to the system
 prompt of every rollover session.
+
+Claude Code and Codex keep less than Pi on their own rollover: Pi always
+carries a verbatim recent-turns tail forward (`select_recent` into
+`compacted_messages`), but Claude Code's own compaction keeps only its
+summary and Codex's keeps its summary plus user text only — no assistant
+replies. The runner reproduces Pi's tail for them: once a rollover session's
+`compaction` item is recorded, the NEXT message the web UI delivers to a
+claude-native or codex-native CLI gets a verbatim block of the whole turns
+Omnigent recorded immediately before that compaction (built by
+`build_post_compaction_tail`, `omnigent/context/rollover.py`), prepended
+only for that delivery — the persisted record and the user's own message are
+unchanged. One block per compaction; a later compaction re-arms it. Hooked in
+`omnigent/runner/app.py`'s `_apply_post_compaction_tail`, called from the
+shared `proxy_stream` turn-delivery path for both harnesses.
 
 ## Turning it on
 
@@ -71,7 +85,7 @@ Per session, off by default, set with labels **when the session is created**:
 |---|---|---|
 | `omnigent.context.mode` | `rollover` enables it | Unset: upstream behaviour, unchanged |
 | `omnigent.context.rollover_at_tokens` | Token threshold for a rollover | 60% of the model's context window, between 100,000 and 200,000; 100,000 when the window is unknown. A label value is never taken below 100,000 (or 80% of a smaller window). |
-| `omnigent.context.rollover_keep_tokens` | Budget for the verbatim tail where Omnigent writes the summary (Pi, side-chat seeds) | 16,000 |
+| `omnigent.context.rollover_keep_tokens` | Budget for the verbatim recent-turns tail, on all three CLIs (Pi's own, Claude Code's and Codex's post-compaction tail, side-chat seeds) | 16,000 |
 
 The window is looked up from the session's model at launch
 (`find_model_context_window`: catalog, then litellm), so the rule is the same
@@ -226,6 +240,7 @@ marker.
 
 - Unit tests: `tests/context`, `tests/tools/builtins/test_session_history.py`,
   `tests/test_claude_native.py`, `tests/test_codex_native*.py`,
-  `tests/test_pi_native*.py`, `tests/runner/test_session_history_tool_dispatch.py`.
+  `tests/test_pi_native*.py`, `tests/runner/test_session_history_tool_dispatch.py`,
+  `tests/runner/test_post_compaction_tail_delivery.py`.
 - Live end-to-end: [`dev/rollover/`](../dev/rollover/README.md) (real CLIs,
   costs ~100k tokens per harness).

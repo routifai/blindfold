@@ -17,6 +17,7 @@ from omnigent.context.labels import (
     DEFAULT_KEEP_TOKENS,
     ROLLOVER_AT_TOKENS_LABEL,
     ROLLOVER_KEEP_TOKENS_LABEL,
+    is_rollover,
 )
 from omnigent.entities import NON_CONTENT_ITEM_TYPES, CompactionData
 from omnigent.runtime.compaction import count_tokens, summarize_history
@@ -500,3 +501,95 @@ async def build_side_chat_seed(
         runner_client=runner_client,
         conversation_id=conversation_id,
     )
+
+
+# ---------------------------------------------------------------------------
+# Post-compaction tail: what Claude Code and Codex lose on their own rollover
+# ---------------------------------------------------------------------------
+
+# Delimiters for the one-shot block prepended to the first delivered user
+# message after a native CLI's own compaction (Claude Code, Codex). Wording
+# makes clear to the model this is system-provided, not something the user typed.
+_POST_COMPACTION_TAIL_HEADER = (
+    "[Recent conversation before the context was compacted — verbatim, "
+    "provided by the system, not a new message from the user]"
+)
+_POST_COMPACTION_TAIL_FOOTER = "[End of recent conversation]"
+
+
+def _render_post_compaction_tail(items: list[dict[str, Any]]) -> str:
+    """Render *items* as a delimited transcript block (see module docstring).
+
+    Shares its message/tool-call/tool-result line shapes with
+    :func:`_transcript_message`, but with plain ``User:``/``Assistant:`` role
+    labels instead of the summarizer's ``<conversation>`` framing — this
+    block is read by the CLI's own model, not a summarizer — and no extra
+    output truncation: *items* already went through :func:`_cap_tool_outputs`,
+    whose cap (and truncation note) must survive into the rendered text.
+    """
+    lines = [_POST_COMPACTION_TAIL_HEADER, ""]
+    for item in items:
+        kind = item.get("type")
+        if kind == "message":
+            role = "User" if item.get("role") == "user" else "Assistant"
+            lines.append(f"{role}: {_block_text(item.get('content'))}")
+        elif kind == "function_call":
+            lines.append(f"Tool call {item.get('name')}: {item.get('arguments', '')}")
+        elif kind == "function_call_output":
+            lines.append(f"Tool result: {item.get('output', '')}")
+    lines += ["", _POST_COMPACTION_TAIL_FOOTER]
+    return "\n".join(lines)
+
+
+def build_post_compaction_tail(
+    items: list[dict[str, Any]],
+    labels: Mapping[str, str] | None,
+    *,
+    model: str,
+) -> str | None:
+    """
+    Build the once-per-compaction verbatim-tail block, or ``None``.
+
+    Claude Code and Codex compact themselves at Omnigent's threshold, but
+    their own compaction keeps less than Pi's (see ``rollover/README.md``):
+    Claude Code keeps only its summary; Codex keeps its summary plus user
+    text only. This reproduces Pi's (and Muse's) design elsewhere — a
+    verbatim tail of the whole turns right before the boundary — from what
+    Omnigent already recorded, so the next message delivered to the CLI
+    can hand it back.
+
+    :param items: The session's record, chronological, as flat item dicts
+        (``compaction`` items included). Only the LATEST ``compaction``
+        item matters; anything at or after it is ignored — the goal is to
+        restore what its own CLI compaction discarded, not later turns.
+    :param labels: The session's labels. Gated on
+        :func:`~omnigent.context.labels.is_rollover`; also used for
+        :func:`resolve_keep_tokens`.
+    :param model: LLM model string, used to pick a tokenizer for the budget.
+    :returns: The rendered block, or ``None`` when the session isn't a
+        rollover session, no compaction has happened yet, or there is
+        nothing to select (e.g. the compaction was the first record item).
+    """
+    if not is_rollover(labels):
+        return None
+    last_compaction_index = next(
+        (i for i in range(len(items) - 1, -1, -1) if items[i].get("type") == "compaction"),
+        None,
+    )
+    if last_compaction_index is None:
+        return None
+    # Allowlist, like session_history's _RECALL_ITEM_KINDS: reasoning and
+    # lifecycle items (compaction, error, ...) are never part of the tail.
+    preceding = [
+        item
+        for item in items[:last_compaction_index]
+        if item.get("type") in _SUMMARIZER_INPUT_FIELDS
+    ]
+    if not preceding:
+        return None
+    recent = _cap_tool_outputs(
+        select_recent(preceding, keep_tokens=resolve_keep_tokens(labels), model=model)
+    )
+    if not recent:
+        return None
+    return _render_post_compaction_tail(recent)

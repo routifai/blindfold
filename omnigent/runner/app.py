@@ -1335,6 +1335,73 @@ class InstructionComposition:
 # _stream_message_to_harness.
 _GATED_COMPOSED_INSTRUCTION_HARNESSES = frozenset({"opencode-native", "hermes"})
 
+# These two compact themselves and keep less than Pi's own rollover tail
+# (rollover/README.md); the post-compaction verbatim-tail block is only ever
+# prepended for them.
+_POST_COMPACTION_TAIL_HARNESSES = frozenset({"claude-native", "codex-native"})
+
+
+def _prefix_blocks_with_tail(blocks: object, prefix: str) -> object:
+    """Prepend *prefix* to the first text content block in *blocks*.
+
+    :param blocks: A plain string, or a list of content blocks
+        (``{"type": "input_text", "text": ...}`` and the like).
+    :param prefix: Text to prepend, already carrying its own trailing
+        separator.
+    :returns: *blocks* with *prefix* prepended, never mutating the input.
+    """
+    if isinstance(blocks, str):
+        return prefix + blocks
+    if isinstance(blocks, list):
+        out = list(blocks)
+        for i, block in enumerate(out):
+            if (
+                isinstance(block, dict)
+                and block.get("type") in ("input_text", "text")
+                and isinstance(block.get("text"), str)
+            ):
+                out[i] = {**block, "text": prefix + block["text"]}
+                return out
+        return [{"type": "input_text", "text": prefix.rstrip("\n")}, *out]
+    return blocks
+
+
+def _prefix_content_with_tail(content: object, tail: str) -> object:
+    """Prepend *tail* to a turn's outgoing *content*, matching its shape.
+
+    Two shapes reach the harness, depending on the dispatch path: a flat
+    list of content blocks for a single new message (the direct-stream
+    path), or Responses-style conversation history — a list of
+    ``{"type": "message", "role": ..., "content": [...]}`` items (the
+    background-turn path, built from ``_session_histories``). The tail
+    belongs on the LATEST user turn either way, so a history list gets its
+    last user message's blocks prefixed instead of the list itself.
+
+    :param content: A turn's outgoing content — a plain string, a list of
+        content blocks, a list of history message items, or something else
+        (left untouched).
+    :param tail: Text to prepend, e.g. a post-compaction tail block.
+    :returns: *content* with *tail* prepended, never mutating the input.
+    """
+    prefix = f"{tail}\n\n"
+    is_history = (
+        isinstance(content, list)
+        and content
+        and all(isinstance(item, dict) and item.get("type") == "message" for item in content)
+    )
+    if not is_history:
+        return _prefix_blocks_with_tail(content, prefix)
+    messages = cast(list[dict[str, Any]], content)
+    for i in range(len(messages) - 1, -1, -1):
+        if messages[i].get("role") == "user":
+            updated = list(messages)
+            updated[i] = {
+                **messages[i],
+                "content": _prefix_blocks_with_tail(messages[i].get("content"), prefix),
+            }
+            return updated
+    return content
+
 
 def _wrap_as_message_event(body: _JsonObject) -> _JsonObject:
     """
@@ -3036,6 +3103,10 @@ def create_runner_app(
     # so tool-call-time gating (mcp_execute) never re-fetches it. Empty dict
     # means "resolved, not rollover" — distinct from "not yet resolved".
     _session_rollover_labels_cache: dict[str, dict[str, str]] = {}
+    # session_id → id of the latest ``compaction`` item whose post-compaction
+    # tail was already delivered. Runner-process lifetime, like the cache
+    # above: a restart re-delivers the tail once more, which is harmless.
+    _post_compaction_tail_consumed: dict[str, str] = {}
     _session_workspace_cache: dict[str, str | None] = {}  # session_id → workspace path
     _session_cursor_model_names: dict[str, dict[str, str]] = {}
     _session_claude_launch_configs: dict[str, ClaudeNativeUcodeConfig | None] = {}
@@ -8641,6 +8712,74 @@ def create_runner_app(
         _remember_rollover_labels(session_id, labels)
         return _session_rollover_labels_cache.get(session_id, {})
 
+    async def _apply_post_compaction_tail(
+        body: _JsonObject, conv_id: str, harness_name: str | None
+    ) -> _JsonObject:
+        """Prepend the once-per-compaction verbatim tail to this turn's content.
+
+        Claude Code keeps only its own summary after compacting, and Codex
+        keeps its summary plus user text only (``rollover/README.md``) — unlike
+        Pi, neither carries a verbatim recent-turns tail forward on its own.
+        This reproduces that tail from Omnigent's record and hands it to the
+        CLI on the first message delivered after the compaction it covers.
+        Returns *body* unchanged for every other harness, a non-rollover
+        session, or once the latest compaction has already been delivered.
+        Mutates only the in-flight request for this turn — the persisted user
+        item, ``_session_histories`` and ``_session_message_buffers`` copies
+        of *body* are untouched.
+        """
+        if harness_name not in _POST_COMPACTION_TAIL_HARNESSES:
+            return body
+        from omnigent.context.labels import is_rollover
+
+        rollover_labels = await _rollover_labels_for_session(conv_id)
+        if not is_rollover(rollover_labels):
+            return body
+        try:
+            resp = await server_client.get(
+                f"/v1/sessions/{conv_id}/items",
+                params={"limit": "100", "order": "desc"},
+                timeout=10.0,
+            )
+            page_items = resp.json().get("data", []) if resp.status_code == 200 else []
+        except (httpx.HTTPError, ValueError):
+            return body
+        compaction_index = next(
+            (i for i, item in enumerate(page_items) if item.get("type") == "compaction"),
+            None,
+        )
+        if compaction_index is None:
+            return body
+        compaction_id = page_items[compaction_index].get("id")
+        if not compaction_id or _post_compaction_tail_consumed.get(conv_id) == compaction_id:
+            return body
+        # Mark consumed up front: a build failure below must not retry this
+        # same compaction forever on later turns.
+        _post_compaction_tail_consumed[conv_id] = compaction_id
+        # page_items is newest-first; items older than the compaction item
+        # sit AFTER it in that list. Chronological order, compaction last —
+        # build_post_compaction_tail finds it and selects the tail before it.
+        chronological = [
+            *reversed(page_items[compaction_index + 1 :]),
+            page_items[compaction_index],
+        ]
+        labels = await _session_labels_for_runner_spawn(
+            server_client=server_client, session_id=conv_id
+        )
+        from omnigent.context.rollover import build_post_compaction_tail
+
+        model = (
+            cast(str | None, body.get("model_override"))
+            or cast(str | None, body.get("model"))
+            or "gpt-4"
+        )
+        tail = build_post_compaction_tail(chronological, labels, model=model)
+        if tail is None:
+            return body
+        new_body = dict(body)
+        new_body["content"] = _prefix_content_with_tail(body.get("content"), tail)
+        return new_body
+
     def _discard_comment_relay(session_id: str, relay: ClaudeNativeToolRelay) -> None:
         """Unbind and close *relay*, unless another path already replaced it.
 
@@ -9765,6 +9904,7 @@ def create_runner_app(
             _ds_sa = _session_sub_agent_names.get(conv_id)
             if _ds_sa and _session_sub_agent_resolved.get(conv_id) is False:
                 _warn_unresolved_sub_agent(conv_id, _ds_sa)
+            _instr_body = await _apply_post_compaction_tail(_instr_body, conv_id, harness_name)
             event_body = _wrap_as_message_event(_instr_body)
             _inject_mcp_schemas(event_body, _mcp_schemas)
             _response_id: str | None = None

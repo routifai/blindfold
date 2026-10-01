@@ -536,3 +536,119 @@ def test_checkpoint_marker_as_developer_only_touches_the_marker() -> None:
     out = codex_native._checkpoint_marker_as_developer(history)
     assert [m["role"] for m in out] == ["developer", "assistant", "user"]
     assert history[0]["role"] == "user"
+
+
+# ---------------------------------------------------------------------------
+# build_post_compaction_tail
+# ---------------------------------------------------------------------------
+
+
+def _rollover_labels(extra: dict[str, str] | None = None) -> dict[str, str]:
+    from omnigent.context.labels import CONTEXT_MODE_LABEL, ROLLOVER_MODE_VALUE
+
+    return {CONTEXT_MODE_LABEL: ROLLOVER_MODE_VALUE, **(extra or {})}
+
+
+def _compaction_item(item_id: str = "comp_1") -> dict[str, Any]:
+    return {"id": item_id, "type": "compaction", "summary": "…", "last_item_id": "u1"}
+
+
+def test_post_compaction_tail_none_without_rollover_label() -> None:
+    from omnigent.context.rollover import build_post_compaction_tail
+
+    items = [*_turn(1), _compaction_item()]
+    assert build_post_compaction_tail(items, {}, model="gpt-4o") is None
+    assert build_post_compaction_tail(items, None, model="gpt-4o") is None
+
+
+def test_post_compaction_tail_none_without_a_compaction_item() -> None:
+    from omnigent.context.rollover import build_post_compaction_tail
+
+    assert build_post_compaction_tail(_turn(1), _rollover_labels(), model="gpt-4o") is None
+
+
+def test_post_compaction_tail_none_when_compaction_is_the_first_item() -> None:
+    from omnigent.context.rollover import build_post_compaction_tail
+
+    items = [_compaction_item(), *_turn(1)]
+    assert build_post_compaction_tail(items, _rollover_labels(), model="gpt-4o") is None
+
+
+def test_post_compaction_tail_renders_markers_and_whole_turns() -> None:
+    from omnigent.context.rollover import build_post_compaction_tail
+
+    items = [*_turn(1, with_tool=True), _compaction_item()]
+    tail = build_post_compaction_tail(items, _rollover_labels(), model="gpt-4o")
+    assert tail is not None
+    lines = tail.splitlines()
+    assert lines[0] == (
+        "[Recent conversation before the context was compacted — verbatim, "
+        "provided by the system, not a new message from the user]"
+    )
+    assert lines[-1] == "[End of recent conversation]"
+    assert "User: question 1" in tail
+    assert "Assistant: answer 1" in tail
+    assert "Tool call some_tool: {}" in tail
+    assert "Tool result: ok" in tail
+
+
+def test_post_compaction_tail_selection_stays_within_keep_tokens_budget() -> None:
+    """Only the trailing whole turn survives a tight budget."""
+    from omnigent.context.labels import ROLLOVER_KEEP_TOKENS_LABEL
+    from omnigent.context.rollover import build_post_compaction_tail
+
+    items = [*_turn(1), *_turn(2), _compaction_item()]
+    tail = build_post_compaction_tail(
+        items, _rollover_labels({ROLLOVER_KEEP_TOKENS_LABEL: "1"}), model="gpt-4o"
+    )
+    assert tail is not None
+    assert "question 1" not in tail
+    assert "question 2" in tail
+    assert "answer 2" in tail
+
+
+def test_post_compaction_tail_caps_oversized_tool_output() -> None:
+    from omnigent.context.rollover import _KEPT_OUTPUT_MAX_CHARS, build_post_compaction_tail
+
+    items = _turn(1, with_tool=True)
+    for item in items:
+        if item.get("type") == "function_call_output":
+            item["output"] = "x" * (_KEPT_OUTPUT_MAX_CHARS * 5)
+    items.append(_compaction_item())
+    tail = build_post_compaction_tail(items, _rollover_labels(), model="gpt-4o")
+    assert tail is not None
+    assert "x" * (_KEPT_OUTPUT_MAX_CHARS * 5) not in tail
+    assert "output truncated at rollover" in tail
+
+
+def test_post_compaction_tail_excludes_reasoning_and_lifecycle_items() -> None:
+    from omnigent.context.rollover import build_post_compaction_tail
+
+    items = [
+        {"id": "r1", "type": "reasoning", "summary": []},
+        *_turn(1),
+        {"id": "err1", "type": "error", "message": "boom"},
+        _compaction_item(),
+    ]
+    tail = build_post_compaction_tail(items, _rollover_labels(), model="gpt-4o")
+    assert tail is not None
+    assert "boom" not in tail
+    assert "question 1" in tail
+
+
+def test_post_compaction_tail_ignores_items_after_the_latest_compaction() -> None:
+    """Only the LATEST compaction's boundary matters; a turn that happened
+    AFTER it (not yet compacted) is never part of the tail."""
+    from omnigent.context.rollover import build_post_compaction_tail
+
+    items = [
+        *_turn(1),
+        _compaction_item("comp_1"),
+        *_turn(2),
+        _compaction_item("comp_2"),
+        *_turn(3),
+    ]
+    tail = build_post_compaction_tail(items, _rollover_labels(), model="gpt-4o")
+    assert tail is not None
+    assert "question 2" in tail
+    assert "question 3" not in tail
