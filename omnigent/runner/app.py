@@ -8746,11 +8746,12 @@ def create_runner_app(
             server_client=server_client, session_id=conv_id
         )
         from omnigent.context.rollover import consume_post_compaction_tail
+        from omnigent.models.model_fallbacks import ROLLOVER_TOKEN_COUNT_MODEL
 
         model = (
             cast(str | None, body.get("model_override"))
             or cast(str | None, body.get("model"))
-            or "gpt-4"
+            or ROLLOVER_TOKEN_COUNT_MODEL
         )
         # page_items is newest-first; consume_post_compaction_tail wants
         # chronological order with the latest compaction item last.

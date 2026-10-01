@@ -1940,9 +1940,12 @@ async def _apply_post_compaction_tail_to_resume_items(
     if not any(item.get("type") == "compaction" for item in items):
         return items
     from omnigent.context.rollover import consume_post_compaction_tail, prefix_latest_user_item
+    from omnigent.models.model_fallbacks import ROLLOVER_TOKEN_COUNT_MODEL
 
     labels = await _resume_rollout_session_labels(client, session_id)
-    tail = consume_post_compaction_tail(items, labels, session_id=session_id, model="gpt-4")
+    tail = consume_post_compaction_tail(
+        items, labels, session_id=session_id, model=ROLLOVER_TOKEN_COUNT_MODEL
+    )
     return items if tail is None else prefix_latest_user_item(items, tail)
 
 
