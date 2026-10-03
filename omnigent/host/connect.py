@@ -706,6 +706,9 @@ _RUNNER_ENV_ALLOWLIST: frozenset[str] = frozenset(
         # Keep host and spawned-runner routing decisions aligned when the
         # host-slice-key kill switch is explicitly disabled.
         "OMNIGENT_HOST_SLICE_KEY_ENABLED",
+        # superside-chat settings read inside the runner (plain integers).
+        "OMNIGENT_ROLLOVER_IDLE_REFRESH_SECONDS",
+        "OMNIGENT_SUBAGENT_MAX_CONCURRENT",
     }
     # Windows system / profile constants (SYSTEMROOT is mandatory for Winsock,
     # USERPROFILE for Path.home(), etc.); a no-op on POSIX. See _platform.

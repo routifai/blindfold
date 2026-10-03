@@ -3842,6 +3842,23 @@ def test_build_runner_env_omits_cleanup_owner_without_active_janitor() -> None:
     assert RUNNER_HOST_OWNS_GLOBAL_CLEANUP_ENV_VAR not in env
 
 
+def test_build_runner_env_forwards_superside_chat_runner_settings() -> None:
+    env = _build_runner_env(
+        {
+            "OMNIGENT_ROLLOVER_IDLE_REFRESH_SECONDS": "60",
+            "OMNIGENT_SUBAGENT_MAX_CONCURRENT": "4",
+        },
+        server_url="http://server",
+        runner_id="runner_abc",
+        binding_token="tok",
+        workspace="/ws",
+        parent_pid=42,
+    )
+
+    assert env["OMNIGENT_ROLLOVER_IDLE_REFRESH_SECONDS"] == "60"
+    assert env["OMNIGENT_SUBAGENT_MAX_CONCURRENT"] == "4"
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="Symlink path is POSIX-only.")
 async def test_build_runner_env_preserves_short_symlink_spelling(tmp_path: Path) -> None:
     target = tmp_path / "private" / "tmp"

@@ -8998,6 +8998,7 @@ def create_runner_app(
         idle_seconds = await _superside_chat_idle_seconds(conv_id)
         if not should_roll_over_for_idle(labels, idle_seconds=idle_seconds):
             return
+        _logger.info("superside-chat refresh on return: %s idle %.0fs", conv_id, idle_seconds)
         resolved_model = model or ROLLOVER_TOKEN_COUNT_MODEL
         # defer_if_active=False: this runs synchronously at the start of
         # THIS turn, which already holds its own _active_turns slot (claimed
