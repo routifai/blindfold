@@ -252,7 +252,11 @@ from omnigent.session_event_batch import (
 )
 from omnigent.stores import AgentStore, ConversationStore
 from omnigent.stores.artifact_store import ArtifactStore
-from omnigent.stores.conversation_store import RUNNER_LIVENESS_TTL_S, runner_seen_is_fresh
+from omnigent.stores.conversation_store import (
+    RUNNER_LIVENESS_TTL_S,
+    SIDE_CHAT_LABEL_KEY,
+    runner_seen_is_fresh,
+)
 from omnigent.stores.file_store import FileStore
 from omnigent.stores.host_store import host_is_live
 from omnigent.stores.permission_store import PermissionStore
@@ -832,6 +836,14 @@ def register_events_routes(
                 pass
             else:
                 created_by = body_created_by
+        # An archived Side Chat that gets a new user message is being
+        # resumed on purpose — unarchive it rather than silently accepting
+        # input into a hidden chat (rollover/SUPERSIDE-CHAT-PLAN.md S4).
+        # Never fires for the Super Chat or a Sub-agent (no side-chat label).
+        if body.type == "message" and conv.archived and SIDE_CHAT_LABEL_KEY in conv.labels:
+            await asyncio.to_thread(
+                conversation_store.update_conversation, session_id, archived=False
+            )
         # Validate event type at the route boundary. Anything not in
         # ``_ALLOWED_EVENT_TYPES`` is a client mistake — failing here
         # is far better than silently persisting an item the agent

@@ -64,6 +64,7 @@ from omnigent.tools.builtins.scheduled_tasks import (
 )
 from omnigent.tools.builtins.session_history import SessionHistoryTool
 from omnigent.tools.builtins.session_rename import SysSessionRenameTool
+from omnigent.tools.builtins.side_chat import SideChatOpenTool
 from omnigent.tools.builtins.spawn import (
     SysSessionCloseTool,
     SysSessionCreateTool,
@@ -94,6 +95,7 @@ __all__ = [
     "NimbleResearchTool",
     "ReadSkillFileTool",
     "SessionHistoryTool",
+    "SideChatOpenTool",
     "SysAdviseModelsTool",
     "SysAgentDownloadTool",
     "SysAgentGetTool",
@@ -295,6 +297,12 @@ _BUILTIN_REGISTRY: dict[str, _BuiltinFactory | None] = {
     "memory_get": None,
     "memory_explain": None,
     "memory_forget": None,
+    # ``side_chat_open`` is auto-registered by
+    # ``ToolManager._register_side_chat_tools`` for superside-chat sessions
+    # only (label-driven, see omnigent/superchat/chats.py). Runner-dispatched
+    # (``omnigent/runner/tool_dispatch.py``) — reserved here so user specs
+    # cannot shadow it.
+    "side_chat_open": None,
     # ``sys_list_models`` is auto-registered by
     # ``ToolManager._register_sub_agent_tools`` with the dispatch grant
     # and intercepted by name in the runner's tool dispatch — reserved

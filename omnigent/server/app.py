@@ -140,6 +140,7 @@ from omnigent.stores.permission_store import PermissionStore
 from omnigent.stores.policy_store import PolicyStore
 from omnigent.stores.project_store import ProjectStore
 from omnigent.stores.scheduled_task_store import ScheduledTaskStore
+from omnigent.superchat.chats import SideChatArchiveSweeper
 
 _logger = logging.getLogger(__name__)
 
@@ -1779,9 +1780,16 @@ def create_app(
                 app_inst.state.managed_sandbox_reaper = managed_sandbox_reaper
                 await managed_sandbox_reaper.start()
 
+        # Side Chat auto-archive (rollover/SUPERSIDE-CHAT-PLAN.md S4): a
+        # cheap periodic sweep, never touching the Super Chat or Sub-agents.
+        side_chat_archive_sweeper = SideChatArchiveSweeper(conversation_store)
+        app_inst.state.side_chat_archive_sweeper = side_chat_archive_sweeper
+        await side_chat_archive_sweeper.start()
+
         try:
             yield
         finally:
+            await side_chat_archive_sweeper.shutdown()
             if managed_sandbox_reaper is not None:
                 await managed_sandbox_reaper.shutdown()
             # Run completion is event-driven (the _publish_status hook) plus a

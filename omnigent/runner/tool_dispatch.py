@@ -35,7 +35,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
-from omnigent.context.labels import inheritable_context_labels, is_rollover, uses_omnigent_context
+from omnigent.context.labels import (
+    inheritable_context_labels,
+    is_rollover,
+    is_superside_chat,
+    uses_omnigent_context,
+)
+from omnigent.superchat.chats import (
+    build_side_chat_blank_create_body,
+    build_side_chat_fork_body,
+    refuse_side_chat_open,
+)
 from omnigent.util.json_types import JsonObject as _JsonObject
 
 if TYPE_CHECKING:
@@ -87,6 +97,7 @@ from omnigent.tools.builtins.os_env import (
 )
 from omnigent.tools.builtins.session_history import SessionHistoryTool, status_from_labels
 from omnigent.tools.builtins.session_rename import SysSessionRenameTool
+from omnigent.tools.builtins.side_chat import SideChatOpenTool
 from omnigent.tools.builtins.spawn import (
     # Shared contract values with the in-process sys_session_* tools. Imported
     # (not duplicated) so the runner's REST-backed peek clamps to the same
@@ -321,6 +332,11 @@ _SESSION_HISTORY_TOOLS = frozenset({SessionHistoryTool.name()})
 _MEMORY_TOOLS = frozenset(
     {"memory_remember", "memory_search", "memory_get", "memory_explain", "memory_forget"}
 )
+
+# superside-chat (rollover/SUPERSIDE-CHAT-PLAN.md S4): ``side_chat_open``
+# forks or creates a new session and binds it to the Super Chat's own
+# host/runner — needs server_client, not an in-process ConversationStore.
+_SIDE_CHAT_TOOLS = frozenset({SideChatOpenTool.name()})
 
 # The title bound the rename tool advertises to the LLM — read once from the
 # tool schema so the dispatcher can never drift from the published contract.
@@ -926,6 +942,7 @@ _ALL_LOCAL_TOOLS = (
     | _AGENT_TOOLS
     | _POLICY_TOOLS
     | _SCHEDULED_TASK_TOOLS
+    | _SIDE_CHAT_TOOLS
 )
 _PLACEHOLDER_CWDS = (None, "", ".", "./")
 
@@ -1021,13 +1038,13 @@ def _granted_tool_names(
         matters here.
     :param labels: The session's labels, when known — decides label-gated
         registrations (currently: ``session_history`` and ``memory_*`` for a
-        rollover or superside-chat session). The cache key includes that
-        gate's outcome so a spec object reused across sessions in different
-        context modes never shares a cached grant.
+        rollover or superside-chat session, ``side_chat_open`` for a
+        superside-chat session). The cache key includes both gates so a spec
+        object reused across sessions in different modes never shares a grant.
     :raises Exception: Propagates ``ToolManager`` construction failures so
         callers can fail closed instead of guessing at the surface.
     """
-    cache_key = (id(agent_spec), harness, uses_omnigent_context(labels))
+    cache_key = (id(agent_spec), harness, uses_omnigent_context(labels), is_superside_chat(labels))
     cached = _granted_tool_names_cache.get(cache_key)
     if cached is not None and cached[0]() is agent_spec:
         return cached[1]
@@ -3864,6 +3881,118 @@ async def _session_create_from_config_path(
         title=args.get("title"),
         publish_event=publish_event,
     )
+
+
+async def _execute_side_chat_open(
+    args: _JsonObject,
+    *,
+    server_client: httpx.AsyncClient | None,
+    conversation_id: str | None,
+    labels: Mapping[str, str] | None,
+) -> str:
+    """
+    Open a Side Chat branched from the Super Chat (``side_chat_open``).
+
+    Looks up the caller's own session once (for its ``kind`` /
+    ``parent_session_id`` — needed for the Sub-agent refusal that ``labels``
+    alone can't express — plus ``host_id`` / ``workspace`` / ``agent_id`` to
+    bind the new chat the same way) via ``GET /v1/sessions/{conversation_id}``,
+    then either forks it (``with_context``, ``side_chat: true`` —
+    ``POST /v1/sessions/{conversation_id}/fork``) or creates a fresh
+    top-level session stamped with the discovery labels (``blank`` —
+    ``POST /v1/sessions``). Binds the result to the Super Chat's host via
+    ``POST /v1/hosts/{host_id}/runners`` (best-effort — an unbound Side Chat
+    behaves like an unbound fork made through the web UI) and, when
+    ``first_message`` is given, queues it the same way a named sub-agent
+    send does (``POST /v1/sessions/{id}/events``).
+
+    :param args: Parsed arguments: ``title`` + ``start`` required,
+        ``first_message`` optional.
+    :param server_client: HTTP client pointed at the Omnigent server;
+        ``None`` returns an error string.
+    :param conversation_id: The caller's own session id (the would-be Super
+        Chat); ``None`` returns an error string.
+    :param labels: The caller's own labels, from the dispatch context.
+    :returns: JSON handle ``{conversation_id, title, start}`` on success; a
+        JSON error object otherwise.
+    """
+    if server_client is None:
+        return json.dumps({"error": "side_chat_open requires server access"})
+    if not conversation_id:
+        return json.dumps({"error": "side_chat_open requires a session id"})
+
+    title = args.get("title")
+    if not isinstance(title, str) or not title.strip():
+        return json.dumps({"error": "side_chat_open requires a non-empty 'title' string"})
+    start = args.get("start")
+    if start not in ("with_context", "blank"):
+        return json.dumps({"error": "side_chat_open 'start' must be 'with_context' or 'blank'"})
+    first_message = args.get("first_message")
+    if first_message is not None and not (isinstance(first_message, str) and first_message):
+        return json.dumps({"error": "side_chat_open 'first_message' must be a non-empty string"})
+
+    try:
+        caller_resp = await server_client.get(f"/v1/sessions/{conversation_id}")
+    except httpx.HTTPError as exc:
+        return json.dumps({"error": f"side_chat_open failed to look up caller session: {exc}"})
+    if caller_resp.status_code >= 400:
+        return json.dumps(
+            {"error": f"side_chat_open caller lookup returned {caller_resp.status_code}"}
+        )
+    caller = caller_resp.json()
+    refusal = refuse_side_chat_open(
+        labels=labels,
+        kind=caller.get("kind"),
+        parent_session_id=caller.get("parent_session_id"),
+    )
+    if refusal is not None:
+        return json.dumps({"error": refusal})
+
+    if start == "with_context":
+        body = build_side_chat_fork_body(title)
+        try:
+            resp = await server_client.post(f"/v1/sessions/{conversation_id}/fork", json=body)
+        except httpx.HTTPError as exc:
+            return json.dumps({"error": f"side_chat_open fork failed: {exc}"})
+    else:
+        agent_id = caller.get("agent_id")
+        if not isinstance(agent_id, str) or not agent_id:
+            return json.dumps({"error": "side_chat_open: caller session has no agent binding"})
+        body = build_side_chat_blank_create_body(
+            agent_id=agent_id, title=title, source_conversation_id=conversation_id
+        )
+        try:
+            resp = await server_client.post("/v1/sessions", json=body)
+        except httpx.HTTPError as exc:
+            return json.dumps({"error": f"side_chat_open create failed: {exc}"})
+    if resp.status_code not in (200, 201):
+        return json.dumps(
+            {"error": f"side_chat_open {start} returned {resp.status_code}", "detail": resp.text}
+        )
+    new_conv = resp.json()
+    new_id = new_conv.get("id")
+    if not isinstance(new_id, str) or not new_id:
+        return json.dumps({"error": "side_chat_open: server did not return a new session id"})
+
+    host_id = caller.get("host_id")
+    workspace = caller.get("workspace")
+    if isinstance(host_id, str) and host_id and isinstance(workspace, str) and workspace:
+        try:
+            await server_client.post(
+                f"/v1/hosts/{host_id}/runners",
+                json={"session_id": new_id, "workspace": workspace},
+            )
+        except httpx.HTTPError:
+            # Best-effort: an unbound Side Chat behaves like an unbound
+            # fork made through the web UI — the caller can bind it later.
+            _logger.warning("side_chat_open: failed to bind host for %s", new_id, exc_info=True)
+
+    if isinstance(first_message, str) and first_message:
+        message_error = await _post_child_first_message(new_id, first_message, server_client)
+        if message_error is not None:
+            return message_error
+
+    return json.dumps({"conversation_id": new_id, "title": title, "start": start})
 
 
 async def _execute_web_fetch_tool(
@@ -7003,6 +7132,13 @@ async def execute_tool(
                 args,
                 conversation_id=conversation_id,
                 server_client=server_client,
+            )
+        elif tool_name in _SIDE_CHAT_TOOLS:
+            output = await _execute_side_chat_open(
+                args,
+                server_client=server_client,
+                conversation_id=conversation_id,
+                labels=labels,
             )
         elif tool_name in _WEB_FETCH_TOOLS:
             output = await _execute_web_fetch_tool(

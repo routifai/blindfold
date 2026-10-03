@@ -166,6 +166,10 @@ def test_builtin_names_size_matches_registry() -> None:
                 "memory_get",
                 "memory_explain",
                 "memory_forget",
+                # side_chat_open: auto-registered by ToolManager only for a
+                # superside-chat session (label-driven, not a spec opt-in —
+                # see ToolManager._register_side_chat_tools). Runner-dispatched.
+                "side_chat_open",
             }
         )
         == BUILTIN_NAMES
