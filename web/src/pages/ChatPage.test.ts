@@ -145,6 +145,33 @@ describe("Composer structural read-only reasons", () => {
   it("returns null for editable sessions without structural labels", () => {
     expect(readOnlyReasonForSessionLabels({ labels: {} }, { labels: {} })).toBeNull();
   });
+
+  it("makes a superside-chat sub-agent read-only even when otherwise unlabeled", () => {
+    expect(
+      readOnlyReasonForSessionLabels(
+        {
+          labels: { "omnigent.context.mode": "superside-chat" },
+          parentSessionId: "conv_super_chat",
+        },
+        null,
+      ),
+    ).toBe("Sub-agent chats are read-only");
+  });
+
+  it("leaves a non-superside-chat sub-agent editable", () => {
+    expect(
+      readOnlyReasonForSessionLabels({ labels: {}, parentSessionId: "conv_parent" }, null),
+    ).toBeNull();
+  });
+
+  it("leaves a superside-chat top-level session editable", () => {
+    expect(
+      readOnlyReasonForSessionLabels(
+        { labels: { "omnigent.context.mode": "superside-chat" }, parentSessionId: null },
+        null,
+      ),
+    ).toBeNull();
+  });
 });
 
 describe("Terminal-first surface selection", () => {

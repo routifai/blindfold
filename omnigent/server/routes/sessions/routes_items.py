@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 from fastapi import (
     APIRouter,
@@ -46,6 +47,7 @@ from omnigent.server.schemas import (
 )
 from omnigent.stores import AgentStore, ConversationStore
 from omnigent.stores.permission_store import PermissionStore
+from omnigent.superchat.activity import activity_to_dict, get_activity, list_activities
 
 
 def register_items_routes(
@@ -290,3 +292,94 @@ def register_items_routes(
             last_id=page.last_id,
             has_more=page.has_more,
         )
+
+    # ── GET /sessions/{session_id}/activities ────────────────────
+    # The Activity Feed: every Activity under session_id's Super Chat family
+    # (the Super Chat itself, its Side Chats, and their Sub-agents). Derived
+    # on read from conversations/items — see omnigent/superchat/activity.py.
+    # session_id may be the Super Chat or one of its Side Chats.
+
+    @router.get(
+        "/sessions/{session_id}/activities",
+        response_model=None,
+        responses={200: {"model": PaginatedList}},
+    )
+    async def list_session_activities(
+        request: Request,
+        session_id: str,
+        limit: int = Query(default=20, ge=1, le=100),
+        before: int | None = Query(default=None),
+    ) -> PaginatedList:
+        """
+        List the Activity Feed for ``session_id``'s Super Chat family.
+
+        :param session_id: A Super Chat or Side Chat session id.
+        :param limit: Maximum Activities to return, newest-first (1-100).
+        :param before: Only Activities started strictly before this epoch
+            timestamp.
+        :returns: A :class:`PaginatedList` of Activity summary dicts (no
+            per-step detail — see ``GET .../activities/{activity_id}``),
+            each carrying a ``date`` field for day-grouping. Empty when
+            ``session_id`` isn't a ``superside-chat`` session.
+        :raises OmnigentError: 403 if the caller lacks READ on
+            ``session_id``; 404 if no session exists there.
+        """
+        user_id = _get_user_id(request, auth_provider)
+        access = await _require_access_and_level(
+            user_id, session_id, LEVEL_READ, permission_store, conversation_store
+        )
+        if access.conversation is None:
+            conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
+            if conv is None:
+                raise _session_not_found()
+        activities = await asyncio.to_thread(
+            list_activities,
+            conversation_store,
+            session_id,
+            before=before,
+            limit=limit,
+        )
+        return PaginatedList(data=[activity_to_dict(activity) for activity in activities])
+
+    # ── GET /sessions/{session_id}/activities/{activity_id} ──────
+    # One Activity in full: steps carry their capped call/result detail.
+
+    @router.get(
+        "/sessions/{session_id}/activities/{activity_id}",
+        response_model=None,
+    )
+    async def get_session_activity(
+        request: Request,
+        session_id: str,
+        activity_id: str,
+    ) -> dict[str, Any]:
+        """
+        Return one Activity with full step detail.
+
+        :param session_id: A Super Chat or Side Chat session id.
+        :param activity_id: An id previously returned by
+            ``GET .../activities``.
+        :returns: The Activity dict, steps including each call's
+            arguments/output (capped).
+        :raises OmnigentError: 403 if the caller lacks READ on
+            ``session_id``; 404 if no session exists there, the session
+            isn't a ``superside-chat`` session, or ``activity_id`` doesn't
+            resolve within its family.
+        """
+        user_id = _get_user_id(request, auth_provider)
+        access = await _require_access_and_level(
+            user_id, session_id, LEVEL_READ, permission_store, conversation_store
+        )
+        if access.conversation is None:
+            conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
+            if conv is None:
+                raise _session_not_found()
+        activity = await asyncio.to_thread(
+            get_activity,
+            conversation_store,
+            session_id,
+            activity_id,
+        )
+        if activity is None:
+            raise _session_not_found()
+        return activity_to_dict(activity)

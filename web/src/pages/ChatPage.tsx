@@ -4302,7 +4302,10 @@ const PI_NATIVE_EFFORT_LEVELS = [
 type NativeModelPickerKind =
   "claude" | "codex" | "cursor" | "kiro" | "opencode" | "pi" | "devin" | "acp" | "configured";
 
-type LabelSource = { labels?: Record<string, string | null> | null } | null | undefined;
+type LabelSource =
+  | { labels?: Record<string, string | null> | null; parentSessionId?: string | null }
+  | null
+  | undefined;
 
 /**
  * Resolve a structural read-only reason from session labels.
@@ -4342,6 +4345,15 @@ export function readOnlyReasonForSessionLabels(
     activeSession?.labels?.["omnigent.wrapper"] ?? activeConv?.labels?.["omnigent.wrapper"];
   if (wrapper === "claude-code-native-ui-subagent") {
     return "Claude Code sub-agents are read-only";
+  }
+  const parentSessionId = activeSession?.parentSessionId ?? activeConv?.parentSessionId ?? null;
+  const contextMode =
+    activeSession?.labels?.["omnigent.context.mode"] ??
+    activeConv?.labels?.["omnigent.context.mode"];
+  // Super Chat / Side Chat sub-agents are view-only: only their Originating
+  // Chat may drive them (rollover/CONTEXT.md "Sub-agent").
+  if (parentSessionId != null && contextMode === "superside-chat") {
+    return "Sub-agent chats are read-only";
   }
   return null;
 }
