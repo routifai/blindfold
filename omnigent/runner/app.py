@@ -8960,12 +8960,17 @@ def create_runner_app(
         try:
             resp = await server_client.get(
                 f"/v1/sessions/{conv_id}/items",
-                params={"limit": "1", "order": "desc"},
+                params={"limit": "2", "order": "desc"},
                 timeout=10.0,
             )
             page_items = resp.json().get("data", []) if resp.status_code == 200 else []
         except (httpx.HTTPError, ValueError):
             return None
+        # The newest item is usually the message that started this turn;
+        # idle time is measured from the item before it.
+        newest = page_items[0] if page_items else {}
+        if newest.get("type") == "message" and newest.get("role") == "user":
+            page_items = page_items[1:]
         if not page_items:
             return None
         created_at = page_items[0].get("created_at")
@@ -9500,14 +9505,12 @@ def create_runner_app(
             )
             harness_name = canonicalize_harness(raw_harness) or raw_harness
 
+        # Refresh on return: checked every turn (a live chat keeps its history
+        # cached); a rollover drops the cache so the load below starts from it.
+        await _maybe_superside_chat_idle_rollover(
+            conv, model=cast(str | None, msg_body.get("model"))
+        )
         if conv not in _session_histories:
-            # "First message after idle" is exactly this branch: the runner
-            # has no cached history for the session yet. Roll over (if due)
-            # before loading history, so the load below already starts from
-            # the fresh compaction item.
-            await _maybe_superside_chat_idle_rollover(
-                conv, model=cast(str | None, msg_body.get("model"))
-            )
             _session_histories[conv] = (
                 [] if is_native_harness(harness_name) else await _load_history_as_input(conv)
             )
