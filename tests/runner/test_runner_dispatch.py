@@ -8386,9 +8386,10 @@ async def test_sys_session_create_superside_chat_prepends_memory_profile(
     from omnigent.runner import tool_dispatch
     from omnigent.runner.tool_dispatch import execute_tool
 
-    monkeypatch.setattr(
-        tool_dispatch, "memory_profile_for", lambda _user: "prefers concise answers"
-    )
+    async def _fake_profile(_client: Any, _conversation_id: Any) -> str:
+        return "prefers concise answers"
+
+    monkeypatch.setattr(tool_dispatch, "_fetch_memory_profile_block", _fake_profile)
     create_bodies: list[dict[str, Any]] = []
 
     async def _server_handler(request: httpx.Request) -> httpx.Response:
@@ -8418,7 +8419,7 @@ async def test_sys_session_create_superside_chat_prepends_memory_profile(
 
     assert len(create_bodies) == 1
     sent_text = create_bodies[0]["initial_items"][0]["data"]["content"][0]["text"]
-    assert sent_text == "Memory Profile:\nprefers concise answers\n\ndo it"
+    assert sent_text == "prefers concise answers\n\ndo it"
 
 
 @pytest.mark.asyncio

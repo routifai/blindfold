@@ -48,7 +48,6 @@ from omnigent.superchat.chats import (
 )
 from omnigent.superchat.subagents import (
     count_live_children,
-    memory_profile_for,
     prepend_memory_profile,
     refuse_subagent_concurrency,
     refuse_subagent_dispatch_override,
@@ -2588,6 +2587,26 @@ async def _subagent_nesting_refusal(
     return refuse_subagent_nesting(caller_kind=caller_kind, parent_kind=parent_kind)
 
 
+async def _fetch_memory_profile_block(
+    server_client: httpx.AsyncClient | None, conversation_id: str | None
+) -> str | None:
+    """The originating chat owner's Memory Profile block, or ``None``.
+
+    Read from the server (``GET /v1/sessions/{id}/memory/profile``): the
+    memory store lives server-side. Any failure means "no profile".
+    """
+    if server_client is None or not conversation_id:
+        return None
+    try:
+        resp = await server_client.get(
+            f"/v1/sessions/{conversation_id}/memory/profile", timeout=10.0
+        )
+        profile = resp.json().get("profile") if resp.status_code == 200 else None
+    except (httpx.HTTPError, ValueError):
+        return None
+    return profile if isinstance(profile, str) and profile else None
+
+
 async def _execute_subagent_tool(
     args: _JsonObject,
     *,
@@ -3262,7 +3281,9 @@ async def _execute_subagent_tool(
     if created_child and is_superside_chat(labels):
         # A new sub-agent starts from its Brief plus the Memory Profile
         # (rollover/CONTEXT.md: "Sub-agent"); never on a continuation.
-        message = prepend_memory_profile(message, memory_profile_for(dispatch_created_by))
+        message = prepend_memory_profile(
+            message, await _fetch_memory_profile_block(server_client, conversation_id)
+        )
 
     # Copy any forwarded parent files into the child and build the
     # first-turn content (input_text plus a file block per copied id).
@@ -3760,7 +3781,9 @@ async def _execute_session_create(
     if is_superside_chat(labels) and isinstance(message, str) and message:
         # A new child starts from its Brief plus the Memory Profile
         # (rollover/CONTEXT.md: "Sub-agent"), same as the named launch path.
-        message = prepend_memory_profile(message, memory_profile_for(None))
+        message = prepend_memory_profile(
+            message, await _fetch_memory_profile_block(server_client, conversation_id)
+        )
 
     if has_config_path:
         # The multipart create carries only the config bundle, so an effort

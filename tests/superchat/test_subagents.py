@@ -14,7 +14,6 @@ from omnigent.superchat.subagents import (
     count_live_children,
     format_subagent_wake_notice_with_result,
     is_live_child_row,
-    memory_profile_for,
     prepend_memory_profile,
     refuse_subagent_concurrency,
     refuse_subagent_dispatch_override,
@@ -153,11 +152,6 @@ def test_dispatch_override_refuses_reasoning_effort() -> None:
 # ── memory_profile_for / prepend_memory_profile ─────────────────────────────
 
 
-def test_memory_profile_for_is_a_none_stub_until_s6() -> None:
-    assert memory_profile_for("alice@example.com") is None
-    assert memory_profile_for(None) is None
-
-
 def test_prepend_memory_profile_is_a_noop_without_a_profile() -> None:
     assert prepend_memory_profile("do the thing", None) == "do the thing"
     assert prepend_memory_profile("do the thing", "") == "do the thing"
@@ -165,7 +159,7 @@ def test_prepend_memory_profile_is_a_noop_without_a_profile() -> None:
 
 def test_prepend_memory_profile_prepends_when_present() -> None:
     result = prepend_memory_profile("do the thing", "prefers concise answers")
-    assert result.startswith("Memory Profile:\nprefers concise answers\n\n")
+    assert result.startswith("prefers concise answers\n\n")
     assert result.endswith("do the thing")
 
 

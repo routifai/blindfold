@@ -186,34 +186,18 @@ def refuse_subagent_dispatch_override(
 # ── Brief + Memory Profile (hook for slice S6) ─────────────────────────────
 
 
-def memory_profile_for(user: str | None) -> str | None:
-    """Hook: the Memory Profile block to prepend to a new sub-agent's Brief.
-
-    ``rollover/CONTEXT.md`` ("Memory Profile", "Sub-agent"): every new
-    sub-agent starts from its Brief plus the user's Memory Profile. Slice
-    S6 implements the real lookup; until then this always returns ``None``
-    so a sub-agent starts from its Brief alone, unchanged from before S3.
-
-    :param user: Identity the profile would be looked up for (best-effort —
-        whatever the dispatch call site has on hand, e.g. the dispatching
-        human actor).
-    :returns: The profile text, or ``None`` when unavailable.
-    """
-    del user  # unused until S6 wires the real lookup
-    return None
-
-
 def prepend_memory_profile(message: str, profile: str | None) -> str:
     """Prepend a Memory Profile block to a sub-agent's first message (Brief).
 
     :param message: The Brief text as written by the Originating Chat.
-    :param profile: :func:`memory_profile_for`'s result; a no-op when
+    :param profile: The user's delimited Memory Profile block (the server's
+        ``GET /v1/sessions/{id}/memory/profile``); a no-op when
         ``None`` or empty.
     :returns: ``message``, with the profile block prepended when given.
     """
     if not profile:
         return message
-    return f"Memory Profile:\n{profile}\n\n{message}"
+    return f"{profile}\n\n{message}"
 
 
 # ── Result delivered in the wake, instead of only "N results waiting" ─────
