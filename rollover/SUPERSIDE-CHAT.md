@@ -7,7 +7,10 @@ Sub-agents on top of Omnigent. Terms are defined once, in
 capability; the engine (Claude SDK) only runs the model loop. Build history:
 [SUPERSIDE-CHAT-PLAN.md](SUPERSIDE-CHAT-PLAN.md) (slices S1-S7, all merged).
 
-Status: **built and unit-tested; not yet run live end to end.**
+Status: **built, unit-tested, and run live end to end on the Claude SDK engine
+(Haiku, 2026-10-03)**: Rollover (refresh on return), Sub-agents, Side
+Chats (with context, blank, archive), Memory Profile, Upkeep and the
+Activity Feed. See [Live test](#live-test).
 
 ## What the mode is
 
@@ -95,12 +98,12 @@ What the mode turns on, for the session and everything created from it:
 | Side Chat inactivity archive | env `OMNIGENT_SIDE_CHAT_ARCHIVE_AFTER_SECONDS` | 2592000 (1 month); 3600 for testing |
 | Sub-agent concurrency | env `OMNIGENT_SUBAGENT_MAX_CONCURRENT` + each Type's `max_sessions` in its `config.yaml` | 10 per caller; per-Type as configured |
 | Memory embeddings | env `OMNIGENT_MEMORY_EMBEDDINGS_MODEL` + the provider key on the server | `openai/text-embedding-3-small` |
+| Upkeep model | the server config's `llm:` block (`omnigent server --config`) | none: Upkeep runs are recorded as skipped (`no_llm_configured`) |
 
 ## Known limits
 
 | Limit | Note |
 |---|---|
-| Not run live yet | All of this is unit-tested only |
 | Activity Feed panel placement | The UI component exists but is not mounted in the app yet |
 | Side Chat archive sweep | Runs per workspace (no cross-workspace query exists) |
 | `?stream=true` turn path | Skips the turn-start hooks (idle refresh, deferred engine refresh); the default path is covered |
@@ -108,6 +111,8 @@ What the mode turns on, for the session and everything created from it:
 | A runner crash mid-task | Stops in-flight Sub-agents; finished Results are recovered |
 | Archived Side Chat | Only the wake is redirected to the Super Chat; the inbox entry stays with the Side Chat |
 | "Cancelled" Activity status | Inferred from stored items; there is no separate cancelled marker |
+| Upkeep window | Each run reads the newest ~30k tokens of the user's messages; a first run over a long history learns from the recent part only |
+| Rollover summary wording | The checkpoint text says the conversation "grew past its context limit" even when the cause was idle time |
 
 ## Adoption checklist
 
@@ -121,9 +126,20 @@ For another backend built on Omnigent:
 2. **Create each user's Super Chat once** with
    `omnigent.context.mode=superside-chat`.
 3. **Install the memory extra** (`omnigent[memory]`) on the server and set the
-   embeddings model and its provider key.
+   embeddings model and its provider key. Give the server an `llm:` block
+   (`omnigent server --config`) so Upkeep can run, for example:
+
+   ```yaml
+   llm:
+     model: anthropic/claude-haiku-4-5-20251001
+     connection:
+       api_key: ${ANTHROPIC_API_KEY}
+       base_url: https://api.anthropic.com/v1
+   ```
 4. **Set the settings above** (or keep the defaults; use the testing values
-   while trying it out).
+   while trying it out). The runner-side ones (idle refresh, Sub-agent
+   concurrency) are set on the host process; the host forwards them to each
+   runner.
 5. **Build the UI** on the routes: the Super Chat, its Side Chats
    (`related_chats`), the Activity Feed (`activities`) and read-only
    Sub-agent chats.
@@ -138,4 +154,28 @@ For another backend built on Omnigent:
    `tests/inner/test_claude_sdk_executor.py`,
    `tests/server/routes/test_sessions_fork.py`,
    `tests/server/integration/test_sessions_activities.py`,
-   `tests/spec/test_parser.py`.
+   `tests/spec/test_parser.py`, `tests/host/test_connect.py`,
+   `tests/server/test_memory_upkeep_scheduler.py`,
+   `tests/server/integration/test_sessions_items_search.py`.
+
+## Live test
+
+Run against a local server and a Docker runner, model `claude-haiku-4-5`, with
+idle refresh at 60 s and Side Chat archive at 60 s.
+
+| Check | Result |
+|---|---|
+| Engine adapter | Engine started with auto-compaction, auto-memory, setting sources and `Agent`/`Task` off; Omnigent tools present |
+| Refresh on return | After 75 s idle, the next message rolled the chat over; the answer still used a fact from before |
+| Sub-agent | Launched by Type; started from Brief + Memory Profile with the mode inherited; Result delivered in the wake; the assistant spoke first; a `model` override was refused |
+| Side Chats | With context answered from the Super Chat's seed; blank did not; a Side Chat could not open another; archived after inactivity, still readable by the Super Chat, unarchived when written to |
+| Memory | Memory Profile answered a question with no tool call; Upkeep after a rollover added a fact the user mentioned in passing and rejected two candidates whose quotes were not verbatim |
+| Activity Feed | Chat turns (titled by the request) and the Sub-agent listed, each with Steps |
+
+Bugs the live run found, all fixed with tests: runner-side settings stripped
+by the host's env filter; the rollover summary called with the agent name
+and routed to the wrong provider; the with-context Side Chat not seeded for
+this mode, and its seed carrying the request that opened it; Side Chats able
+to open Side Chats (label cache dropped `omnigent.side_chat`); archived Side
+Chats unreadable; Upkeep overflowing on a long history and missing JSON after
+prose; Activity titles repeating the chat title.
