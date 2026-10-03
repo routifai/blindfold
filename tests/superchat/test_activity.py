@@ -341,3 +341,17 @@ def test_system_started_turn_is_titled_by_the_chat() -> None:
         _FakeItemsStore(items), conv, include_step_detail=False
     )
     assert activities[0].title == "Side chat mechanics"
+
+
+def test_turn_titled_by_request_stored_outside_its_response_group() -> None:
+    conv = _conv(title="Main chat")
+    items = [
+        _msg("u1", "user", "check the Q4 totals", created_at=1, response_id="resp_user"),
+        _call("fc1", "memory_search", {"query": "q4"}, created_at=2, response_id="resp_2"),
+        _call_output("fo1", "found", created_at=3, response_id="resp_2"),
+        _msg("a1", "assistant", "Totals match", created_at=4, response_id="resp_2"),
+    ]
+    activities = _activities_for_conversation(
+        _FakeItemsStore(items), conv, include_step_detail=False
+    )
+    assert activities[0].title == "check the Q4 totals"

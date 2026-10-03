@@ -254,12 +254,11 @@ def _turn_outcome(group: list[ConversationItem], *, status: str) -> str | None:
     return _truncate(last_assistant, _OUTCOME_MAX_CHARS) if last_assistant else None
 
 
-def _turn_title(conversation: Conversation, group: list[ConversationItem]) -> str:
+def _turn_title(conversation: Conversation, request: str | None) -> str:
     # The user's request names the work; a system-started turn (a Result
     # wake) falls back to the chat's title.
-    first_user = _first_user_text(group)
-    if first_user and not first_user.startswith("[System"):
-        return _truncate(first_user, _TITLE_MAX_CHARS)
+    if request and not request.startswith("[System"):
+        return _truncate(request, _TITLE_MAX_CHARS)
     if conversation.title:
         return _truncate(conversation.title, _TITLE_MAX_CHARS)
     return "Activity"
@@ -269,6 +268,7 @@ def _turn_activity(
     conversation: Conversation,
     group: list[ConversationItem],
     *,
+    request: str | None,
     is_latest_group: bool,
     include_step_detail: bool,
 ) -> Activity | None:
@@ -286,7 +286,7 @@ def _turn_activity(
         id=f"{KIND_TURN}:{conversation.id}:{group[0].response_id}",
         kind=KIND_TURN,
         chat_id=conversation.id,
-        title=_turn_title(conversation, group),
+        title=_turn_title(conversation, request),
         outcome=_turn_outcome(group, status=status),
         status=status,
         started_at=group[0].created_at,
@@ -455,10 +455,15 @@ def _activities_for_conversation(
         return [_sub_agent_activity(conversation, items, include_step_detail=include_step_detail)]
     groups = _group_items_by_response(items)
     activities: list[Activity] = []
+    # The user message that started a turn is usually stored outside its
+    # response group, so carry the latest one forward.
+    request: str | None = None
     for index, group in enumerate(groups):
+        request = _first_user_text(group) or request
         activity = _turn_activity(
             conversation,
             group,
+            request=request,
             is_latest_group=(index == len(groups) - 1),
             include_step_detail=include_step_detail,
         )
