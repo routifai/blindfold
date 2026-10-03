@@ -14,6 +14,7 @@ from omnigent.context.rollover import (
     MIN_ROLLOVER_THRESHOLD_TOKENS,
     SUMMARIZER_DATE_PLACEHOLDER,
     build_rollover_item,
+    build_side_chat_seed,
     resolve_keep_tokens,
     resolve_rollover_threshold,
     select_recent,
@@ -750,3 +751,18 @@ def test_prefix_latest_user_item_no_user_message_is_a_no_op() -> None:
 
     items = [_msg("a1", "assistant", "hello")]
     assert prefix_latest_user_item(items, "TAIL") == items
+
+
+@pytest.mark.asyncio
+async def test_side_chat_seed_stops_at_parents_last_reply() -> None:
+    """A Side Chat opened mid-turn must not inherit the request opening it."""
+    items = _turn(1) + _turn(2) + [_msg("u3", "user", "open a side chat")]
+    client = _ReturnsTextClient("SUMMARY")
+
+    data = await build_side_chat_seed(
+        items, keep_tokens=100_000, model="gpt-4o", llm_client=client
+    )
+
+    assert data.last_item_id == "a2"
+    assert data.compacted_messages is not None
+    assert all(m.get("id") != "u3" for m in data.compacted_messages)

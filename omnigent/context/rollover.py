@@ -473,6 +473,18 @@ async def build_side_chat_seed(
     ]
     if not items:
         raise ValueError("build_side_chat_seed requires a non-empty parent record")
+    # Stop at the parent's last finished reply: a Side Chat opened mid-turn
+    # must not inherit (and act on) the request that is opening it.
+    last_reply_index = next(
+        (
+            i
+            for i in range(len(items) - 1, -1, -1)
+            if items[i].get("type") == "message" and items[i].get("role") == "assistant"
+        ),
+        None,
+    )
+    if last_reply_index is not None:
+        items = items[: last_reply_index + 1]
 
     last_compaction_index = next(
         (i for i in range(len(items) - 1, -1, -1) if items[i].get("type") == "compaction"),

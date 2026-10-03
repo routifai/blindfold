@@ -8786,10 +8786,12 @@ def create_runner_app(
         """
         if labels is None:
             return
-        value = labels.get(CONTEXT_MODE_LABEL)
-        _session_rollover_labels_cache[session_id] = (
-            {CONTEXT_MODE_LABEL: value} if value is not None else {}
-        )
+        from omnigent.stores.conversation_store import SIDE_CHAT_LABEL_KEY
+
+        # Both are fixed at creation; the side-chat label gates side_chat_open.
+        _session_rollover_labels_cache[session_id] = {
+            key: labels[key] for key in (CONTEXT_MODE_LABEL, SIDE_CHAT_LABEL_KEY) if key in labels
+        }
 
     async def _rollover_labels_for_session(session_id: str) -> dict[str, str]:
         """Durable per-session lookup of just the rollover-mode label.
@@ -14102,7 +14104,10 @@ def create_runner_app(
                 conn["base_url"] = fam.base_url
                 # Provider config stores the Claude SDK form (no version); the
                 # LLM client's Anthropic adapter expects the versioned base.
-                if family == "anthropic" and fam.base_url.rstrip("/") == "https://api.anthropic.com":
+                if (
+                    family == "anthropic"
+                    and fam.base_url.rstrip("/") == "https://api.anthropic.com"
+                ):
                     conn["base_url"] = "https://api.anthropic.com/v1"
             return conn or None
         except Exception:  # noqa: BLE001 — a missing local provider falls back to no auth
