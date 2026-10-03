@@ -13,7 +13,7 @@ import json
 import logging
 import re
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any, Protocol
 
@@ -37,6 +37,10 @@ GATE_MIN_USER_MESSAGES = 3
 #: this just needs another sweep to catch up (the watermark never skips
 #: anything, it only moves as far as this run actually read).
 WINDOW_SESSIONS_LIMIT = 200
+# One extraction call per run: keep the newest messages within this budget
+# (~30k tokens) and clip each one, so a long backlog can't overflow the model.
+WINDOW_MAX_CHARS = 120_000
+WINDOW_ITEM_MAX_CHARS = 2_000
 WINDOW_ITEMS_PAGE_SIZE = 50
 WINDOW_MAX_ITEMS_PER_SESSION = 500
 
@@ -305,6 +309,21 @@ def gather_window(
         cursor = page.last_id
     items.sort(key=lambda i: i.created_at)
     return items
+
+
+def bound_window(window_items: list[WindowItem]) -> list[WindowItem]:
+    """The newest *window_items* within :data:`WINDOW_MAX_CHARS`, each clipped
+    to :data:`WINDOW_ITEM_MAX_CHARS`, in chronological order."""
+    kept: list[WindowItem] = []
+    total = 0
+    for item in reversed(window_items):
+        clipped = replace(item, text=item.text[:WINDOW_ITEM_MAX_CHARS])
+        total += len(clipped.text)
+        if total > WINDOW_MAX_CHARS and kept:
+            break
+        kept.append(clipped)
+    kept.reverse()
+    return kept
 
 
 # ── 2. gate ───────────────────────────────────────────────────────────────
@@ -613,7 +632,9 @@ async def run_upkeep_once(
 
     counts = _new_counts()
     try:
-        window_items = await asyncio.to_thread(gather_window, conversation_store, user_id, since)
+        window_items = bound_window(
+            await asyncio.to_thread(gather_window, conversation_store, user_id, since)
+        )
         counts["seen"] = sum(1 for i in window_items if i.role == "user")
 
         if not gate(window_items, min_user_messages=min_user_messages):

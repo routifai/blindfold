@@ -642,3 +642,19 @@ async def test_run_upkeep_once_records_a_failed_run_on_unexpected_error(
     assert runs[0].state == "failed"
     # The lease is released even on failure — a later run can proceed.
     assert upkeep_store.has_running_run("alice") is False
+
+
+def test_bound_window_keeps_newest_items_within_budget() -> None:
+    big = "x" * (upkeep.WINDOW_ITEM_MAX_CHARS + 500)
+    count = upkeep.WINDOW_MAX_CHARS // upkeep.WINDOW_ITEM_MAX_CHARS + 10
+    items = [
+        upkeep.WindowItem(session_id="s", item_id=f"u{i}", role="user", text=big, created_at=i)
+        for i in range(count)
+    ]
+
+    kept = upkeep.bound_window(items)
+
+    assert all(len(i.text) == upkeep.WINDOW_ITEM_MAX_CHARS for i in kept)
+    assert sum(len(i.text) for i in kept) <= upkeep.WINDOW_MAX_CHARS
+    assert kept[-1].item_id == f"u{count - 1}", "newest item kept"
+    assert [i.created_at for i in kept] == sorted(i.created_at for i in kept)
