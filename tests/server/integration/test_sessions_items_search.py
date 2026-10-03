@@ -128,6 +128,22 @@ async def test_related_chats_lists_side_chat_children(
     assert chats[side_chat_id]["last_message_preview"] == "side chat question"
 
 
+async def test_related_chats_keeps_archived_side_chat_flagged(
+    client: httpx.AsyncClient, db_uri: str
+) -> None:
+    """An archived Side Chat stays readable by its Super Chat, flagged for the UI to hide."""
+    source_id = await _create_session(client, "related-chats-archived-source")
+    side_chat_id = await _create_session(client, "related-chats-archived-side-chat")
+    store = SqlAlchemyConversationStore(db_uri)
+    store.set_labels(side_chat_id, {FORK_SOURCE_LABEL_KEY: source_id, SIDE_CHAT_LABEL_KEY: "1"})
+    store.update_conversation(side_chat_id, archived=True)
+
+    resp = await client.get(f"/v1/sessions/{source_id}/related_chats")
+    assert resp.status_code == 200, resp.text
+    chats = {c["id"]: c for c in resp.json()["data"]}
+    assert chats[side_chat_id]["archived"] is True
+
+
 async def test_related_chats_excludes_fork_without_side_chat_label(
     client: httpx.AsyncClient, db_uri: str
 ) -> None:

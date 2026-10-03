@@ -558,6 +558,7 @@ def _chat_summary(conversation: Conversation, preview: str | None) -> dict[str, 
         "created_at": conversation.created_at,
         "updated_at": conversation.updated_at,
         "last_message_preview": preview,
+        "archived": conversation.archived,
     }
 
 
@@ -583,7 +584,7 @@ def list_related_chats(
     :param conversation_id: The calling (source) session id.
     :param limit: Maximum chats to return.
     :returns: ``[{"id", "title", "created_at", "updated_at",
-        "last_message_preview"}, ...]``, newest-updated child first, parent
+        "last_message_preview", "archived"}, ...]``, newest-updated child first, parent
         last; ``[]`` when *conversation_id* does not exist.
     """
     caller = conv_store.get_conversation(conversation_id)
@@ -601,6 +602,8 @@ def list_related_chats(
         fork_source_id=conversation_id,
         order="desc",
         sort_by="updated_at",
+        # Archived Side Chats stay readable; the ``archived`` flag lets a UI hide them.
+        include_archived=True,
     )
     for child in children.data:
         if SIDE_CHAT_LABEL_KEY in child.labels and same_owner(child.id):
