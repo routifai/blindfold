@@ -500,7 +500,9 @@ async def apply_candidate(
     matched_ids = {m["claim_id"] for m in matches}
 
     if relation == "same":
-        target_id = named_claim_id if named_claim_id in matched_ids else matches[0]["claim_id"]
+        target_id = str(
+            named_claim_id if named_claim_id in matched_ids else matches[0]["claim_id"]
+        )
         increment = (
             REINFORCE_INCREMENT_STATED
             if candidate.explicitness == "stated"

@@ -1001,7 +1001,7 @@ def should_dispatch_locally(tool_name: str) -> bool:
 # ``id(spec)`` because AgentSpec is an unhashable dataclass. The weakref
 # guards against id reuse after the spec is garbage-collected.
 _granted_tool_names_cache: dict[
-    tuple[int, str | None, bool], tuple[weakref.ref[AgentSpec], frozenset[str]]
+    tuple[int, str | None, bool, bool], tuple[weakref.ref[AgentSpec], frozenset[str]]
 ] = {}
 _GRANTED_TOOL_NAMES_CACHE_MAX = 256
 
