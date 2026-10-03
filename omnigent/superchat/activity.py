@@ -15,22 +15,15 @@ re-implementing either.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
+from omnigent.context.labels import is_superside_chat
 from omnigent.entities import Conversation, ConversationItem
 from omnigent.stores.conversation_store import ConversationStore
 from omnigent.tools.builtins.spawn import _project_activity_item
 from omnigent.util.session_lifecycle import is_session_closed, title_without_closed_marker
-
-# Mirrors omnigent.context.labels.CONTEXT_MODE_LABEL / the S1 slice's
-# ``SUPERSIDE_CHAT_MODE_VALUE``. Replaced at merge: S1 adds
-# ``is_superside_chat`` to omnigent/context/labels.py — import it from there
-# once landed instead of this private fallback.
-_CONTEXT_MODE_LABEL = "omnigent.context.mode"
-_SUPERSIDE_CHAT_MODE_VALUE = "superside-chat"
 
 STATUS_IN_PROGRESS = "in_progress"
 STATUS_DONE = "done"
@@ -49,18 +42,6 @@ _DEFAULT_LIMIT = 20
 _MAX_LIMIT = 100
 _OUTCOME_MAX_CHARS = 140
 _TITLE_MAX_CHARS = 80
-
-
-def is_superside_chat(labels: Mapping[str, str] | None) -> bool:
-    """Whether a session's labels select the superside-chat mode.
-
-    :param labels: The session's labels, or ``None``.
-    :returns: ``True`` only when ``omnigent.context.mode`` is exactly
-        ``"superside-chat"``.
-    """
-    if not labels:
-        return False
-    return labels.get(_CONTEXT_MODE_LABEL) == _SUPERSIDE_CHAT_MODE_VALUE
 
 
 @dataclass(frozen=True)
