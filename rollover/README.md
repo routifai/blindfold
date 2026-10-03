@@ -10,6 +10,8 @@ Side chats in detail (context, cross-chat reading, code map):
 [SIDE-CHAT.md](SIDE-CHAT.md).
 Agent memory, industry standard vs Muse (diagram, open in a browser):
 [memory-comparison.html](memory-comparison.html).
+The superside-chat contract for teams/backends adopting the Super Chat, its
+Side Chats and Sub-agents, plus the adoption checklist: [SUPERSIDE-CHAT.md](SUPERSIDE-CHAT.md).
 
 - **Super chat / orchestration team:** read [How it works](#how-it-works),
   [Turning it on](#turning-it-on) and [For the super chat and its sub-agents](#for-the-super-chat-and-its-sub-agents).

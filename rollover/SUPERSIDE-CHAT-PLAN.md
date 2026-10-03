@@ -3,7 +3,9 @@
 Turns on the Super Chat, Side Chats and Sub-agents for a session with
 `omnigent.context.mode=superside-chat`, on the Claude SDK engine. Language:
 [CONTEXT.md](CONTEXT.md). Ground rule: [ADR 0001](adr/0001-omnigent-owns-everything.md)
-(Omnigent owns everything; the engine only runs the model loop).
+(Omnigent owns everything; the engine only runs the model loop). S7's
+contract and adoption checklist: [SUPERSIDE-CHAT.md](SUPERSIDE-CHAT.md);
+example bundle: [`examples/super-chat/`](../examples/super-chat/).
 
 ## Principles
 

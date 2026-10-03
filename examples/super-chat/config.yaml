@@ -1,0 +1,49 @@
+# Super Chat — a bank employee's single, long-running work assistant.
+#
+# This is an EXAMPLE bundle for `omnigent.context.mode=superside-chat`
+# (see rollover/CONTEXT.md and rollover/SUPERSIDE-CHAT.md). A backend
+# creates one session per user from this bundle and sets the mode label
+# at session-creation time — the label itself is not a config.yaml field;
+# config.yaml only describes the agent (model family, tools, prompt).
+#
+# Sub-agent Types live under agents/<type>/, one directory per type
+# (researcher, analyst, drafter). Each is launched by its declared
+# `name`, never by naming a model — see AGENTS.md.
+#
+# Usage (parses the bundle; does not start a server or a session):
+#   uv run python -c "from omnigent.spec.parser import parse; from pathlib import Path; print(parse(Path('examples/super-chat')))"
+
+spec_version: 1
+name: super-chat
+description: >-
+  A bank employee's Super Chat: one long-running work assistant that
+  researches, analyzes and drafts by delegating to Sub-agents, and keeps
+  the conversation itself bounded with Omnigent's own Rollover and Memory.
+
+# The Super Chat's "brain" runs on the Claude Agent SDK. No model id is
+# pinned here (see the repo's no-hardcoded-models check) — it runs on
+# whatever Claude provider is configured as the default (`omnigent setup`),
+# and on whichever model that provider's catalog resolves as its default.
+# To pin a model or reasoning effort for this bundle, set them on a
+# provider profile or via `executor.model` / `executor.reasoning_effort`
+# in a local override — not as a literal model id checked into this file.
+executor:
+  type: omnigent
+  config:
+    harness: claude-sdk
+
+interaction:
+  conversational: true
+  modalities:
+    input: [text, file]
+    output: [text]
+
+tools:
+  # The three Sub-agent Types available to this Super Chat — see
+  # agents/<dir>/. Each has its own executor, model comment and
+  # max_sessions. A chat launches one by its declared `name`, never by
+  # naming a model (CONTEXT.md: "Sub-agent Type").
+  agents:
+    - researcher
+    - analyst
+    - drafter
