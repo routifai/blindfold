@@ -1471,13 +1471,17 @@ async def test_fork_non_side_chat_keeps_rollover_labels() -> None:
 
 @pytest.mark.asyncio
 async def test_fork_side_chat_of_superside_chat_keeps_mode_label() -> None:
-    """A Side Chat forked from a superside-chat Super Chat inherits
-    ``omnigent.context.mode=superside-chat`` — the store copies labels
-    wholesale (no drop-list entry for this label), so no route code needs
-    to stamp it explicitly. Unlike the rollover case, no checkpoint is
-    seeded: ``_seed_rollover_side_chat`` only fires for ``is_rollover``."""
+    """A with-context Side Chat of a superside-chat Super Chat inherits the
+    mode label and starts from the parent's checkpoint, not its full transcript."""
     conv = _make_conversation(labels={"omnigent.context.mode": "superside-chat"})
-    conv_store = _ConversationStore(conversations={"e9f8f58523cec9a57d3bdf93be543e8c": conv})
+    items = [
+        _make_item("9980c8a9248139f14f4165e5d53088aa", "Hello", response_id="resp_1"),
+        _make_compaction_item("comp_1", last_item_id="9980c8a9248139f14f4165e5d53088aa"),
+    ]
+    conv_store = _ConversationStore(
+        conversations={"e9f8f58523cec9a57d3bdf93be543e8c": conv},
+        items_by_conv={"e9f8f58523cec9a57d3bdf93be543e8c": items},
+    )
     client = TestClient(_build_app(conv_store))
 
     resp = client.post(
@@ -1487,9 +1491,14 @@ async def test_fork_side_chat_of_superside_chat_keeps_mode_label() -> None:
 
     assert resp.status_code == 201, f"got {resp.status_code}: {resp.text}"
     assert conv_store.fork_calls[0]["dropped_label_keys"] == frozenset()
+    assert conv_store.fork_calls[0]["resume_source_native_session"] is False
     fork_id = "c538360473d41c84c1eee13918fbeca0"
     assert conv_store._convs[fork_id].labels["omnigent.context.mode"] == "superside-chat"
-    assert conv_store.appended == [], "superside-chat forks do not seed a rollover checkpoint"
+    assert len(conv_store.appended) == 1
+    seeded_id, new_items = conv_store.appended[0]
+    assert seeded_id == fork_id
+    assert new_items[0].type == "compaction"
+    assert new_items[0].data.summary == "prior summary"
 
 
 @pytest.mark.asyncio

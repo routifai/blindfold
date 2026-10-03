@@ -30,7 +30,7 @@ from starlette.datastructures import UploadFile as StarletteUploadFile
 from omnigent.codex_approval_modes import (
     CODEX_NATIVE_PERMISSION_VALUES,
 )
-from omnigent.context.labels import is_rollover
+from omnigent.context.labels import uses_omnigent_context
 from omnigent.db.utils import generate_agent_id, generate_file_id
 from omnigent.debug_logging import add_audit_attrs, debug_event, set_current_runner_id
 from omnigent.entities import (
@@ -3314,7 +3314,7 @@ def register_core_routes(
         # A side chat forked from a rollover super chat stays a rollover
         # session (labels carry over untouched) — seeded from the parent's
         # checkpoint below, not its full transcript.
-        source_is_rollover = is_rollover(source.labels)
+        source_is_rollover = uses_omnigent_context(source.labels)
 
         # DANGEROUS codex full-bypass. The source's bypass label is always
         # dropped above (instance-scoped), so a bypass-armed source never

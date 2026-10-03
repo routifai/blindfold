@@ -8984,10 +8984,7 @@ def create_runner_app(
         except (httpx.HTTPError, ValueError):
             return None
         model = body.get("model_override") or body.get("llm_model")
-        if not isinstance(model, str) or not model:
-            return None
-        # A bare id routes to OpenAI in the LLM client; Claude ids need the prefix.
-        return f"anthropic/{model}" if model.startswith("claude") else model
+        return _summarize_model_id(model) if isinstance(model, str) and model else None
 
     async def _maybe_superside_chat_idle_rollover(conv_id: str) -> None:
         """Roll over a superside-chat session on its first message back from idle.
@@ -14006,6 +14003,10 @@ def create_runner_app(
             content={"error": {"code": -32601, "message": f"Method not found: {method!r}"}},
         )
 
+    def _summarize_model_id(model: str) -> str:
+        """Provider-prefix a bare Claude id; the LLM client routes bare ids to OpenAI."""
+        return f"anthropic/{model}" if model.startswith("claude") else model
+
     def _resolve_summarize_connection(
         session_id: str,
         model: str,
@@ -14181,6 +14182,8 @@ def create_runner_app(
         body = await request.json()
         messages = body.get("messages")
         model = body.get("model")
+        if isinstance(model, str) and model:
+            model = _summarize_model_id(model)
         if not isinstance(messages, list) or not model:
             return JSONResponse(
                 status_code=400,
