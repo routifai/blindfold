@@ -658,3 +658,12 @@ def test_bound_window_keeps_newest_items_within_budget() -> None:
     assert sum(len(i.text) for i in kept) <= upkeep.WINDOW_MAX_CHARS
     assert kept[-1].item_id == f"u{count - 1}", "newest item kept"
     assert [i.created_at for i in kept] == sorted(i.created_at for i in kept)
+
+
+async def test_extract_candidates_reads_json_after_prose() -> None:
+    reply = 'Here is what I found:\n\n```json\n{"candidates": [{"kind": "fact"}]}\n```\nDone.'
+
+    async def caller(*, instructions: str, input_text: str) -> str:
+        return reply
+
+    assert await upkeep.extract_candidates(caller, []) == [{"kind": "fact"}]

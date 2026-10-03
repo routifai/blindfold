@@ -341,13 +341,12 @@ def gate(
 
 
 def _strip_code_fence(text: str) -> str:
+    """The JSON object in a model reply, even when wrapped in a fence or prose."""
     stripped = text.strip()
-    if not stripped.startswith("```"):
+    start, end = stripped.find("{"), stripped.rfind("}")
+    if start == -1 or end < start:
         return stripped
-    stripped = stripped.strip("`")
-    if stripped.lower().startswith("json"):
-        stripped = stripped[4:]
-    return stripped.strip()
+    return stripped[start : end + 1]
 
 
 def _format_window_for_extraction(window_items: list[WindowItem]) -> str:
