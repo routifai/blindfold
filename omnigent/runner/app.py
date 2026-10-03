@@ -8764,6 +8764,111 @@ def create_runner_app(
         new_body["content"] = _prefix_content_with_tail(body.get("content"), tail)
         return new_body
 
+    async def _drop_superside_chat_warm_client(conv_id: str) -> None:
+        """Drop the warm claude-sdk client so the next turn cold-starts.
+
+        Invalidates this runner's cached history so the next dispatch
+        reloads it from the server (picking up the compaction item just
+        posted — see ``_load_history_as_input``), then releases the harness
+        subprocess: its shutdown runs ``ClaudeSDKExecutor.close_session``
+        (``ExecutorAdapter.on_shutdown``), which is the only way this
+        process reaches that method on another process's executor.
+        """
+        _session_histories.pop(conv_id, None)
+        if process_manager is not None:
+            await process_manager.release(conv_id)
+
+    async def _superside_chat_idle_seconds(conv_id: str) -> float | None:
+        """Seconds since *conv_id*'s last recorded item, or ``None`` on a lookup miss."""
+        try:
+            resp = await server_client.get(
+                f"/v1/sessions/{conv_id}/items",
+                params={"limit": "1", "order": "desc"},
+                timeout=10.0,
+            )
+            page_items = resp.json().get("data", []) if resp.status_code == 200 else []
+        except (httpx.HTTPError, ValueError):
+            return None
+        if not page_items:
+            return None
+        created_at = page_items[0].get("created_at")
+        return time.time() - created_at if isinstance(created_at, int) else None
+
+    async def _maybe_superside_chat_idle_rollover(conv_id: str, *, model: str | None) -> None:
+        """Roll over a superside-chat session on its first message back from idle.
+
+        Called only from the "no cached history yet" branch in
+        ``_run_turn_bg_setup_and_stream`` — the runner's own signal for
+        "first message after idle" (see ``omnigent.superchat.rollover.
+        should_roll_over_for_idle``). A no-op for a non-superside-chat
+        session (checked before the idle lookup, so those pay no extra
+        round trip).
+        """
+        from omnigent.context.labels import is_superside_chat
+        from omnigent.models.model_fallbacks import ROLLOVER_TOKEN_COUNT_MODEL
+        from omnigent.superchat.rollover import roll_over_session, should_roll_over_for_idle
+
+        labels = await _session_labels_for_runner_spawn(
+            server_client=server_client, session_id=conv_id
+        )
+        if not is_superside_chat(labels):
+            return
+        idle_seconds = await _superside_chat_idle_seconds(conv_id)
+        if not should_roll_over_for_idle(labels, idle_seconds=idle_seconds):
+            return
+        resolved_model = model or ROLLOVER_TOKEN_COUNT_MODEL
+        await roll_over_session(
+            conv_id,
+            labels=labels,
+            model=resolved_model,
+            server_client=server_client,
+            llm_client=_get_runner_llm_client(),
+            connection=_resolve_summarize_connection(conv_id, resolved_model),
+            on_rolled_over=lambda: _drop_superside_chat_warm_client(conv_id),
+        )
+
+    async def _maybe_superside_chat_threshold_rollover(
+        conv_id: str,
+        resp_response: _JsonObject,
+    ) -> None:
+        """Roll over a superside-chat session whose turn crossed the rollover threshold.
+
+        Reads ``usage.context_tokens``/``usage.model`` off an in-process
+        turn's ``response.completed`` event — the same fields
+        ``_context_labels_from_turn_usage`` (server-side) reads for the
+        context-ring labels. A no-op for a non-superside-chat session
+        (checked via the cheap cached rollover-mode label before the full
+        label fetch below).
+        """
+        from omnigent.context.labels import SUPERSIDE_CHAT_MODE_VALUE
+        from omnigent.models.model_fallbacks import ROLLOVER_TOKEN_COUNT_MODEL
+        from omnigent.superchat.rollover import roll_over_session, should_roll_over_for_threshold
+
+        cached_labels = await _rollover_labels_for_session(conv_id)
+        if cached_labels.get(CONTEXT_MODE_LABEL) != SUPERSIDE_CHAT_MODE_VALUE:
+            return
+        resp_usage = resp_response.get("usage")
+        context_tokens = resp_usage.get("context_tokens") if isinstance(resp_usage, dict) else None
+        if not isinstance(context_tokens, int):
+            return
+        resolved_model = (
+            resp_usage.get("model") if isinstance(resp_usage, dict) else None
+        ) or ROLLOVER_TOKEN_COUNT_MODEL
+        labels = await _session_labels_for_runner_spawn(
+            server_client=server_client, session_id=conv_id
+        )
+        if not should_roll_over_for_threshold(labels, context_tokens=context_tokens):
+            return
+        await roll_over_session(
+            conv_id,
+            labels=labels,
+            model=resolved_model,
+            server_client=server_client,
+            llm_client=_get_runner_llm_client(),
+            connection=_resolve_summarize_connection(conv_id, resolved_model),
+            on_rolled_over=lambda: _drop_superside_chat_warm_client(conv_id),
+        )
+
     def _discard_comment_relay(session_id: str, relay: ClaudeNativeToolRelay) -> None:
         """Unbind and close *relay*, unless another path already replaced it.
 
@@ -9175,6 +9280,13 @@ def create_runner_app(
             harness_name = canonicalize_harness(raw_harness) or raw_harness
 
         if conv not in _session_histories:
+            # "First message after idle" is exactly this branch: the runner
+            # has no cached history for the session yet. Roll over (if due)
+            # before loading history, so the load below already starts from
+            # the fresh compaction item.
+            await _maybe_superside_chat_idle_rollover(
+                conv, model=cast(str | None, msg_body.get("model"))
+            )
             _session_histories[conv] = (
                 [] if is_native_harness(harness_name) else await _load_history_as_input(conv)
             )
@@ -10039,6 +10151,9 @@ def create_runner_app(
                                             }
                                         )
                                         _text_acc.clear()
+                                    await _maybe_superside_chat_threshold_rollover(
+                                        conv_id, event.get("response") or {}
+                                    )
                                 elif _evt_type == "response.failed":
                                     _err = event.get("error") or (event.get("response") or {}).get(
                                         "error"
