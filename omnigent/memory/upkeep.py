@@ -73,7 +73,8 @@ today"), small talk, or secrets (passwords, tokens, API keys, account \
 numbers) — leave those out entirely.
 
 Each candidate's "claim_text" must be one self-contained sentence, written \
-so it makes sense with no other context. Each candidate's "quote" must be \
+so it makes sense with no other context. Refer to the user as "The user"; \
+never give them a name the user didn't state as their own. Each candidate's "quote" must be \
 the exact words the user wrote, copied verbatim from the cited item — do \
 not paraphrase, fix spelling, or add punctuation the user didn't use.
 
