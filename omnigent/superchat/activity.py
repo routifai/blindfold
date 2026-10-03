@@ -255,10 +255,14 @@ def _turn_outcome(group: list[ConversationItem], *, status: str) -> str | None:
 
 
 def _turn_title(conversation: Conversation, group: list[ConversationItem]) -> str:
+    # The user's request names the work; a system-started turn (a Result
+    # wake) falls back to the chat's title.
+    first_user = _first_user_text(group)
+    if first_user and not first_user.startswith("[System"):
+        return _truncate(first_user, _TITLE_MAX_CHARS)
     if conversation.title:
         return _truncate(conversation.title, _TITLE_MAX_CHARS)
-    first_user = _first_user_text(group)
-    return _truncate(first_user, _TITLE_MAX_CHARS) if first_user else "Activity"
+    return "Activity"
 
 
 def _turn_activity(

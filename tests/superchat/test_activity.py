@@ -177,7 +177,7 @@ def test_turn_with_tool_call_becomes_one_activity_with_a_step() -> None:
     activity = activities[0]
     assert activity.kind == "turn"
     assert activity.chat_id == "conv_1"
-    assert activity.title == "Side chat mechanics"
+    assert activity.title == "research side chat mechanics", "titled by the user's request"
     assert activity.outcome == "Researched side chat mechanics with quotes"
     assert activity.status == STATUS_DONE
     assert activity.started_at == 1
@@ -327,3 +327,17 @@ def test_sub_agent_status_done_when_closed_after_finishing() -> None:
 def test_sub_agent_status_done_when_idle_and_not_closed() -> None:
     conv = _conv(kind="sub_agent", live_status="idle")
     assert _sub_agent_status(conv) == STATUS_DONE
+
+
+def test_system_started_turn_is_titled_by_the_chat() -> None:
+    conv = _conv(title="Side chat mechanics")
+    items = [
+        _msg("u1", "user", "[System: sub-agent researcher/x finished (completed)]", created_at=1),
+        _call("fc1", "sys_read_inbox", {}, created_at=2),
+        _call_output("fo1", "delivered", created_at=3),
+        _msg("a1", "assistant", "Here is the result", created_at=4),
+    ]
+    activities = _activities_for_conversation(
+        _FakeItemsStore(items), conv, include_step_detail=False
+    )
+    assert activities[0].title == "Side chat mechanics"
