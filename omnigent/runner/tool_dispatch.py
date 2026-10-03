@@ -3665,6 +3665,12 @@ async def _execute_session_create(
 
     Maps a 404 to ``agent_not_found`` and 401/403 to ``access_denied``.
 
+    In a superside-chat session this path is gated the same way the named
+    ``sys_session_send`` launch is: a ``model``/``reasoning_effort``
+    override, the nesting cap, and the tree-wide default concurrency cap
+    (no per-Type cap — this path names no declared Sub-agent Type) all
+    apply, and a new child's ``message`` gets the Memory Profile prepended.
+
     :param args: Parsed arguments; exactly one of ``agent_id`` /
         ``config_path`` required, ``title`` / ``message`` optional.
     :param server_client: HTTP client pointed at the Omnigent server; ``None``
@@ -3707,6 +3713,55 @@ async def _execute_session_create(
                 )
             }
         )
+
+    # The same superside-chat-only rules sys_session_send enforces for its
+    # named (agent, title) launch apply here too — sys_session_create is
+    # the OTHER way to spawn a child, and would otherwise bypass them (no
+    # declared Sub-agent Type backs this path, so only the tree-wide
+    # default concurrency cap applies, not a per-Type cap).
+    if is_superside_chat(labels):
+        raw_model = args.get("model")
+        raw_effort = args.get("reasoning_effort")
+        override_refusal = refuse_subagent_dispatch_override(
+            model=raw_model if isinstance(raw_model, str) else None,
+            reasoning_effort=raw_effort if isinstance(raw_effort, str) else None,
+        )
+        if override_refusal is not None:
+            return json.dumps({"error": f"sys_session_create {override_refusal}"})
+        nesting_refusal = await _subagent_nesting_refusal(
+            conversation_id=conversation_id,
+            server_client=server_client,
+        )
+        if nesting_refusal is not None:
+            return json.dumps({"error": f"sys_session_create {nesting_refusal}"})
+        sibling_rows = await _list_child_sessions(
+            server_client=server_client,
+            conversation_id=conversation_id,
+        )
+        if isinstance(sibling_rows, str):
+            return json.dumps(
+                {
+                    "error": (
+                        f"sys_session_create cannot verify sub-agent "
+                        f"concurrency cap: {sibling_rows}"
+                    )
+                }
+            )
+        concurrency_refusal = refuse_subagent_concurrency(
+            live_count_of_type=0,
+            live_count_total=count_live_children(sibling_rows),
+            type_cap=None,
+            default_cap=resolve_default_concurrency_cap(),
+        )
+        if concurrency_refusal is not None:
+            return json.dumps({"error": f"sys_session_create {concurrency_refusal}"})
+
+    message = args.get("message")
+    if is_superside_chat(labels) and isinstance(message, str) and message:
+        # A new child starts from its Brief plus the Memory Profile
+        # (rollover/CONTEXT.md: "Sub-agent"), same as the named launch path.
+        message = prepend_memory_profile(message, memory_profile_for(None))
+
     if has_config_path:
         # The multipart create carries only the config bundle, so an effort
         # passed here would never reach the child. Refuse instead of dropping it.
@@ -3720,9 +3775,10 @@ async def _execute_session_create(
                     )
                 }
             )
+        config_path_args = {**args, "message": message}
         return await _session_create_from_config_path(
             str(config_path),
-            args,
+            config_path_args,
             server_client=server_client,
             conversation_id=conversation_id,
             publish_event=publish_event,
@@ -3734,7 +3790,7 @@ async def _execute_session_create(
         str(agent_id),
         conversation_id,
         args.get("title"),
-        args.get("message"),
+        message,
         model=args.get("model"),
         reasoning_effort=args.get("reasoning_effort"),
         labels=child_labels,
