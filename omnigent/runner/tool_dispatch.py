@@ -46,6 +46,15 @@ from omnigent.superchat.chats import (
     build_side_chat_fork_body,
     refuse_side_chat_open,
 )
+from omnigent.superchat.subagents import (
+    count_live_children,
+    memory_profile_for,
+    prepend_memory_profile,
+    refuse_subagent_concurrency,
+    refuse_subagent_dispatch_override,
+    refuse_subagent_nesting,
+    resolve_default_concurrency_cap,
+)
 from omnigent.util.json_types import JsonObject as _JsonObject
 
 if TYPE_CHECKING:
@@ -1651,6 +1660,7 @@ async def _send_to_in_flight_child(
     child_display_title: str,
     wrapper_label: str | None,
     created_by: str | None = None,
+    superside_chat: bool = False,
 ) -> str:
     """Steer a message into a sub-agent whose turn is already in flight.
 
@@ -1753,6 +1763,7 @@ async def _send_to_in_flight_child(
                 wrapper_label=wrapper_label,
                 created_by=created_by,
                 work_id=work_id,
+                superside_chat=superside_chat,
             )
             fresh.status = "running"
             # Best-effort dispatch-id stamp for restart recovery only; the
@@ -2520,6 +2531,63 @@ def _subagent_launching_message(agent: str, title: object, task_id: str) -> str:
     )
 
 
+async def _session_kind_and_parent(
+    session_id: str,
+    server_client: httpx.AsyncClient,
+) -> tuple[str | None, str | None]:
+    """
+    Best-effort ``(kind, parent_session_id)`` lookup for one session.
+
+    Used by the superside-chat nesting-cap check — a failed lookup reads
+    as "unknown", never as a refusal, so a transient server hiccup can't
+    itself block a launch.
+
+    :param session_id: The session to inspect.
+    :param server_client: HTTP client pointed at the Omnigent server.
+    :returns: ``(kind, parent_session_id)``, each ``None`` on any lookup
+        failure or missing field.
+    """
+    try:
+        resp = await server_client.get(f"/v1/sessions/{session_id}", timeout=10.0)
+    except httpx.HTTPError:
+        return None, None
+    if resp.status_code != 200:
+        return None, None
+    data = _string_object_dict(resp.json())
+    if data is None:
+        return None, None
+    kind = data.get("kind")
+    parent = data.get("parent_session_id")
+    return (
+        kind if isinstance(kind, str) else None,
+        parent if isinstance(parent, str) else None,
+    )
+
+
+async def _subagent_nesting_refusal(
+    *,
+    conversation_id: str,
+    server_client: httpx.AsyncClient,
+) -> str | None:
+    """
+    Return why a superside-chat sub-agent launch must be refused for nesting.
+
+    Resolves the caller's own ``kind`` and, when the caller is itself a
+    sub-agent, its parent's ``kind`` too — at most two REST round-trips —
+    and delegates the cap decision to
+    :func:`omnigent.superchat.subagents.refuse_subagent_nesting`.
+
+    :param conversation_id: The caller about to dispatch a new sub-agent.
+    :param server_client: HTTP client pointed at the Omnigent server.
+    :returns: An error message, or ``None`` when the launch may proceed.
+    """
+    caller_kind, caller_parent_id = await _session_kind_and_parent(conversation_id, server_client)
+    parent_kind: str | None = None
+    if caller_kind == "sub_agent" and caller_parent_id:
+        parent_kind, _ = await _session_kind_and_parent(caller_parent_id, server_client)
+    return refuse_subagent_nesting(caller_kind=caller_kind, parent_kind=parent_kind)
+
+
 async def _execute_subagent_tool(
     args: _JsonObject,
     *,
@@ -2528,6 +2596,7 @@ async def _execute_subagent_tool(
     agent_spec: AgentSpec | None = None,
     publish_event: Callable[[str, _JsonObject], None] | None = None,
     session_inbox: asyncio.Queue[_JsonObject] | None = None,
+    labels: Mapping[str, str] | None = None,
 ) -> str:
     """
     Dispatch a sub-agent tool call (``sys_session_send``).
@@ -2553,6 +2622,12 @@ async def _execute_subagent_tool(
         discovery events to the parent stream.
     :param session_inbox: Parent session's inbox queue for async
         completion delivery.
+    :param labels: The caller's own session labels, when known. Gates the
+        superside-chat-only rules (launch-by-Type-only, nesting cap,
+        concurrency cap, Memory Profile, Result-in-wake) and, when the
+        caller is a superside-chat session, is forwarded (filtered to the
+        inheritable set) so the child inherits the mode — see
+        ``rollover/SUPERSIDE-CHAT-PLAN.md`` slice S3.
     :returns: JSON child-session handle, or an error string.
     """
     # Lazy import to avoid circular dependency at module load.
@@ -2594,6 +2669,13 @@ async def _execute_subagent_tool(
         cost_budget = _subagent_cost_budget_from_args(args)
     except (ValueError, TypeError) as exc:
         return f"Error: sys_session_send invalid 'cost_budget': {exc}"
+
+    if is_superside_chat(labels):
+        override_refusal = refuse_subagent_dispatch_override(
+            model=model, reasoning_effort=reasoning_effort
+        )
+        if override_refusal is not None:
+            return f"Error: sys_session_send {override_refusal}"
 
     # By-session-id mode: post to an existing direct child instead of
     # spawning/continuing a named (agent, title) sub-agent.
@@ -2786,19 +2868,51 @@ async def _execute_subagent_tool(
                 child_display_title=f"{sub_agent_name}:{session_name}",
                 wrapper_label=child_wrapper_label,
                 created_by=dispatch_created_by,
+                superside_chat=is_superside_chat(labels),
             )
     else:
+        _sibling_rows: list[_JsonObject] | None = None
+        if is_superside_chat(labels):
+            nesting_refusal = await _subagent_nesting_refusal(
+                conversation_id=conversation_id,
+                server_client=server_client,
+            )
+            if nesting_refusal is not None:
+                return f"Error: sys_session_send {nesting_refusal}"
+            _fetched_siblings = await _list_child_sessions(
+                server_client=server_client,
+                conversation_id=conversation_id,
+            )
+            if isinstance(_fetched_siblings, str):
+                return f"Error: cannot verify sub-agent concurrency cap: {_fetched_siblings}"
+            _sibling_rows = _fetched_siblings
+            _type_spec = _find_subagent_spec(str(sub_agent_name), agent_spec)
+            _type_cap = getattr(_type_spec, "max_sessions", None)
+            concurrency_refusal = refuse_subagent_concurrency(
+                live_count_of_type=count_live_children(
+                    _sibling_rows, agent_type=str(sub_agent_name)
+                ),
+                live_count_total=count_live_children(_sibling_rows),
+                type_cap=_type_cap if isinstance(_type_cap, int) else None,
+                default_cap=resolve_default_concurrency_cap(),
+            )
+            if concurrency_refusal is not None:
+                return f"Error: sys_session_send {concurrency_refusal}"
         _auto_ordinal = False
         if not session_name:
             # No title hint — auto-generate a structured session name
             # (e.g. "researcher-1"). Recover ordinals from existing
             # children on first spawn after runner restart to avoid
-            # duplicates.
-            _all_children = await _list_child_sessions(
-                server_client=server_client,
-                conversation_id=conversation_id,
-                tool=str(sub_agent_name),
-            )
+            # duplicates. Reuse the sibling listing above when the
+            # concurrency check already fetched it.
+            if _sibling_rows is not None:
+                _all_children: list[_JsonObject] | str = _sibling_rows
+            else:
+                _all_children = await _list_child_sessions(
+                    server_client=server_client,
+                    conversation_id=conversation_id,
+                    tool=str(sub_agent_name),
+                )
             if isinstance(_all_children, str):
                 return (
                     f"Error: cannot allocate sub-agent name for "
@@ -2889,7 +3003,13 @@ async def _execute_subagent_tool(
             "parent_session_id": conversation_id,
             "title": f"{sub_agent_name}:{session_name}",
             "sub_agent_name": sub_agent_name,
-            "labels": {_runner_app.SUBAGENT_DISPATCH_ID_LABEL_KEY: work_id},
+            "labels": {
+                _runner_app.SUBAGENT_DISPATCH_ID_LABEL_KEY: work_id,
+                # Forward the mode label so a superside-chat sub-agent
+                # inherits omnigent.context.mode=superside-chat, like
+                # _execute_session_create already does.
+                **inheritable_context_labels(labels),
+            },
         }
         if harness_override_canonical is not None:
             create_body["harness_override"] = harness_override_canonical
@@ -3128,6 +3248,7 @@ async def _execute_subagent_tool(
         wrapper_label=child_wrapper_label,
         created_by=dispatch_created_by,
         work_id=work_id,
+        superside_chat=is_superside_chat(labels),
     )
     _publish_child_launching_update(
         parent_session_id=conversation_id,
@@ -3137,6 +3258,11 @@ async def _execute_subagent_tool(
         session_name=session_name,
         publish_event=publish_event,
     )
+
+    if created_child and is_superside_chat(labels):
+        # A new sub-agent starts from its Brief plus the Memory Profile
+        # (rollover/CONTEXT.md: "Sub-agent"); never on a continuation.
+        message = prepend_memory_profile(message, memory_profile_for(dispatch_created_by))
 
     # Copy any forwarded parent files into the child and build the
     # first-turn content (input_text plus a file block per copied id).
@@ -7093,6 +7219,7 @@ async def execute_tool(
                 agent_spec=agent_spec,
                 publish_event=publish_event,
                 session_inbox=session_inbox,
+                labels=labels,
             )
         elif tool_name in _LIST_MODELS_TOOLS:
             output = await _execute_list_models_tool(agent_spec=agent_spec)
@@ -8383,17 +8510,30 @@ def _truncate_inbox_output(output: object, *, source_session_id: str | None = No
     )
 
 
-def _format_async_task_item(payload: _JsonObject) -> str:
+def _format_async_task_item(payload: _JsonObject, *, wake_inlined: bool = False) -> str:
     """
     Render a completed/failed/cancelled async-task inbox payload.
 
     :param payload: Async-task payload with ``handle_id``,
         ``tool_name``, ``status``, ``output`` keys.
+    :param wake_inlined: ``True`` when this sub-agent's Result was already
+        delivered verbatim in its wake notice (superside-chat sessions;
+        see ``omnigent.superchat.subagents.format_subagent_wake_notice_with_result``)
+        — the item is still drained from the inbox, but its text is not
+        repeated here.
     :returns: Human-readable inbox line.
     """
     handle_id = payload.get("handle_id", "unknown")
     tool = payload.get("tool_name", "unknown")
     status = payload.get("status", "unknown")
+    if wake_inlined and payload.get("type") == "sub_agent":
+        agent = payload.get("agent") or payload.get("tool_name", "sub_agent")
+        title = payload.get("title", "")
+        target = f"{agent}:{title}" if title else str(agent)
+        return (
+            f"[System: sub-agent task {handle_id} ({status}) for {target} — "
+            "already delivered above in the wake notice.]"
+        )
     # A sub-agent's full result persists in its own session transcript,
     # so a truncated delivery can point the parent at the retrieval path.
     retrieval_id = _subagent_child_id(payload) if payload.get("type") == "sub_agent" else None
@@ -8709,7 +8849,14 @@ async def _drain_inbox(
             server_client=server_client,
             conversation_id=conversation_id,
         )
-        items.append(_format_async_task_item(evaluation.payload))
+        wake_inlined = False
+        child_id = _subagent_child_id(evaluation.payload)
+        if child_id is not None:
+            from omnigent.runner import app as _runner_app
+
+            entry = _runner_app.get_subagent_work(child_id)
+            wake_inlined = bool(entry is not None and entry.wake_inlined)
+        items.append(_format_async_task_item(evaluation.payload, wake_inlined=wake_inlined))
         if evaluation.retry_original:
             retry_payloads.append(payload)
         else:

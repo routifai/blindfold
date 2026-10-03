@@ -190,6 +190,10 @@ from omnigent.server.schemas import (
 )
 from omnigent.spec.skill_sources import resolve_session_skills
 from omnigent.spec.types import AgentSpec, LocalToolInfo, SkillSpec
+from omnigent.superchat.subagents import (
+    format_subagent_wake_notice_with_result,
+    resolve_wake_target,
+)
 from omnigent.terminals.control_bridge import bridge_tmux_control_to_websocket
 from omnigent.terminals.ws_common import WS_CLOSE_TERMINAL_NOT_FOUND
 from omnigent.tools.builtins.load_skill import (
@@ -1739,6 +1743,14 @@ class _SubagentWorkEntry:
         the parent's inbox.
     :param cancellation_confirmed: Whether a native terminal edge confirmed
         an abort, rather than an interrupt merely being requested.
+    :param superside_chat: Whether the dispatching parent is a
+        superside-chat session (``omnigent.context.mode=superside-chat``),
+        set at registration time from the dispatch's own labels. Gates the
+        Result-in-wake behavior (slice S3): see ``wake_inlined``.
+    :param wake_inlined: Whether this entry's Result was already delivered
+        verbatim in its wake notice — set when the wake is scheduled for a
+        ``superside_chat`` entry. ``sys_read_inbox`` reads this to avoid
+        repeating the Result text once the item is drained.
     """
 
     parent_session_id: str
@@ -1754,6 +1766,8 @@ class _SubagentWorkEntry:
     completed_at: float | None = None
     delivered: bool = False
     cancellation_confirmed: bool = False
+    superside_chat: bool = False
+    wake_inlined: bool = False
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1862,6 +1876,7 @@ def register_subagent_work(
     wrapper_label: str | None = None,
     created_by: str | None = None,
     work_id: str | None = None,
+    superside_chat: bool = False,
 ) -> _SubagentWorkEntry:
     """
     Register one running sub-agent dispatch.
@@ -1881,6 +1896,8 @@ def register_subagent_work(
         known from the parent turn context.
     :param work_id: Dispatch id already stamped on the child session,
         e.g. ``"subagent_a1b2c3d4e5f6"``; ``None`` mints a new one.
+    :param superside_chat: Whether the dispatching parent is a
+        superside-chat session — see :class:`_SubagentWorkEntry`.
     :returns: The registered work entry.
     """
     prior = _subagent_work_by_child.get(child_session_id)
@@ -1899,6 +1916,7 @@ def register_subagent_work(
         title=title,
         wrapper_label=wrapper_label,
         created_by=created_by,
+        superside_chat=superside_chat,
     )
     _drained_delivered_subagent_children.discard(child_session_id)
     _subagent_work_by_child[child_session_id] = entry
@@ -8511,6 +8529,29 @@ def create_runner_app(
 
     app.state.check_and_start_next_turn = _check_and_start_next_turn
 
+    async def _resolve_subagent_wake_target(parent_id: str) -> tuple[str, str | None]:
+        """Redirect an archived Side Chat's wake to its Super Chat (slice S3)."""
+        from omnigent.stores.conversation_store import FORK_SOURCE_LABEL_KEY, SIDE_CHAT_LABEL_KEY
+
+        try:
+            resp = await server_client.get(f"/v1/sessions/{parent_id}", timeout=10.0)
+        except httpx.HTTPError:
+            return parent_id, None
+        if resp.status_code != 200:
+            return parent_id, None
+        data = resp.json()
+        if not isinstance(data, dict):
+            return parent_id, None
+        raw_labels = data.get("labels")
+        labels = raw_labels if isinstance(raw_labels, dict) else {}
+        fork_source = labels.get(FORK_SOURCE_LABEL_KEY)
+        return resolve_wake_target(
+            parent_id=parent_id,
+            archived=bool(data.get("archived")),
+            is_side_chat=SIDE_CHAT_LABEL_KEY in labels,
+            fork_source_id=fork_source if isinstance(fork_source, str) else None,
+        )
+
     async def _post_subagent_wake_notice(
         parent_id: str,
         notice: str,
@@ -8518,9 +8559,15 @@ def create_runner_app(
         created_by: str | None,
         *,
         is_rewake: bool = False,
+        check_archived_redirect: bool = False,
     ) -> None:
+        target_id = parent_id
+        if check_archived_redirect:
+            target_id, note = await _resolve_subagent_wake_target(parent_id)
+            if note is not None:
+                notice = f"{note}\n{notice}"
         delivered = await _deliver_subagent_wake_post(
-            server_client, parent_id, notice, created_by=created_by
+            server_client, target_id, notice, created_by=created_by
         )
         if delivered:
             _stranded_wake_parents.discard(parent_id)
@@ -8561,12 +8608,25 @@ def create_runner_app(
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
-        notice = _format_subagent_wake_notice(
-            agent=entry.agent,
-            title=entry.title,
-            status=entry.status,
-            pending=inbox.qsize(),
-        )
+        if entry.superside_chat:
+            # Inline the Result itself rather than only "N results waiting"
+            # (rollover/SUPERSIDE-CHAT-PLAN.md slice S3); sys_read_inbox
+            # later sees entry.wake_inlined and won't repeat it.
+            notice = format_subagent_wake_notice_with_result(
+                agent=entry.agent,
+                title=entry.title,
+                status=entry.status,
+                child_session_id=entry.child_session_id,
+                result_text=entry.output,
+            )
+            entry.wake_inlined = True
+        else:
+            notice = _format_subagent_wake_notice(
+                agent=entry.agent,
+                title=entry.title,
+                status=entry.status,
+                pending=inbox.qsize(),
+            )
         if is_rewake and notice == _last_rewake_notice.get(entry.parent_session_id):
             return
         _subagent_wake_pending.add(entry.parent_session_id)
@@ -8577,6 +8637,7 @@ def create_runner_app(
                 entry.child_session_id,
                 entry.created_by,
                 is_rewake=is_rewake,
+                check_archived_redirect=entry.superside_chat,
             )
         )
         _wake_task.add_done_callback(_background_tasks.discard)

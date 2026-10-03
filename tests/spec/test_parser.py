@@ -2025,6 +2025,51 @@ def test_parse_sub_agents(tmp_path: Path) -> None:
     assert sub_names == {"researcher", "critic"}
 
 
+def test_parse_max_sessions_absent_is_none(agent_dir: Path) -> None:
+    """No top-level max_sessions: declares no cap (unlimited)."""
+    assert parse(agent_dir).max_sessions is None
+
+
+def test_parse_sub_agent_max_sessions(tmp_path: Path) -> None:
+    """A Sub-agent Type's own top-level max_sessions: parses onto its spec.
+
+    Mirrors examples/super-chat/agents/*/config.yaml (slice S3,
+    rollover/SUPERSIDE-CHAT-PLAN.md): the directory-bundle parser must read
+    this into AgentSpec.max_sessions, not just the legacy inline loader.
+    """
+    parent_config = {
+        "spec_version": 1,
+        "name": "parent",
+        "tools": {"agents": ["researcher"]},
+    }
+    (tmp_path / "config.yaml").write_text(yaml.dump(parent_config))
+    researcher_dir = tmp_path / "agents" / "researcher"
+    researcher_dir.mkdir(parents=True)
+    (researcher_dir / "config.yaml").write_text(
+        yaml.dump({"spec_version": 1, "name": "researcher", "max_sessions": 3})
+    )
+
+    spec = parse(tmp_path)
+    assert spec.max_sessions is None
+    (researcher,) = spec.sub_agents
+    assert researcher.max_sessions == 3
+
+
+def test_parse_max_sessions_rejects_non_integer(tmp_path: Path) -> None:
+    config = {"spec_version": 1, "max_sessions": "many"}
+    (tmp_path / "config.yaml").write_text(yaml.dump(config))
+    with pytest.raises(OmnigentError):
+        parse(tmp_path)
+
+
+@pytest.mark.parametrize("value", [0, -1])
+def test_parse_max_sessions_rejects_non_positive(tmp_path: Path, value: int) -> None:
+    config = {"spec_version": 1, "max_sessions": value}
+    (tmp_path / "config.yaml").write_text(yaml.dump(config))
+    with pytest.raises(OmnigentError, match="max_sessions must be >= 1"):
+        parse(tmp_path)
+
+
 def test_parse_interaction_defaults(agent_dir: Path) -> None:
     """Omitting interaction block entirely gives defaults."""
     spec = parse(agent_dir)

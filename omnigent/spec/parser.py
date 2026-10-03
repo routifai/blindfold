@@ -327,6 +327,18 @@ def parse(root: Path, *, expand_env: bool = True) -> AgentSpec:
     mcp_servers = mcp_servers + _parse_inline_mcp_servers(raw_tools, expand_env=expand_env)
     local_tools = _discover_local_tools(root / "tools")
     sub_agents = _discover_sub_agents(root / "agents", expand_env=expand_env)
+    # Top-level max_sessions: concurrent-session cap when this agent is
+    # exposed as a Sub-agent Type (AgentSpec.max_sessions; distinct from
+    # the legacy inline tools.<name>.max_sessions in inner/loader.py).
+    raw_max_sessions = raw.get("max_sessions")
+    max_sessions: int | None = None
+    if raw_max_sessions is not None:
+        max_sessions = _parse_int_field(raw_max_sessions, "max_sessions")
+        if max_sessions < 1:
+            raise OmnigentError(
+                f"max_sessions must be >= 1, got {max_sessions!r}",
+                code=ErrorCode.INVALID_INPUT,
+            )
 
     return AgentSpec(
         spec_version=spec_version,
@@ -345,6 +357,7 @@ def parse(root: Path, *, expand_env: bool = True) -> AgentSpec:
         mcp_servers=mcp_servers,
         local_tools=local_tools,
         sub_agents=sub_agents,
+        max_sessions=max_sessions,
         async_enabled=async_enabled,
         os_env=os_env,
         model_egress=model_egress,
