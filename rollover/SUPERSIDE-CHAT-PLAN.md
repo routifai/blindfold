@@ -23,7 +23,7 @@ example bundle: [`examples/super-chat/`](../examples/super-chat/).
 
 ## Slices
 
-Order: S1 first; S2, S3, S4 in parallel after it; then S5, S6, S7.
+Status: **all slices S1-S7 merged on `rollover`, unit-tested; not yet run live.** Built order: S1, S4, S5, S7, then S2, S3, S6.
 
 ### S1 · The switch and the engine adapter (foundation)
 
