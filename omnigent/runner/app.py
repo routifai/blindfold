@@ -9249,6 +9249,13 @@ def create_runner_app(
             "role": "user",
             "model": msg_body.get("model", ""),
         }
+        # Threaded onto CreateResponseRequest.context_mode (MessageEvent
+        # passthrough) so the claude-sdk executor adapter can tell a
+        # superside-chat turn apart from a plain one and turn off the SDK's
+        # own competing features for it only (see claude_sdk_executor.py).
+        _turn_context_mode = (await _rollover_labels_for_session(conv)).get(CONTEXT_MODE_LABEL)
+        if _turn_context_mode:
+            harness_body["context_mode"] = _turn_context_mode
         # The routed model rides in-band on the forwarded message. This body is
         # built field by field (not copied), so it must be threaded explicitly:
         # the harness forwards it onto CreateResponseRequest.model_override and
@@ -9330,10 +9337,17 @@ def create_runner_app(
                         ToolManager,
                     )
 
+                    # Thread the session's context-mode label through so a
+                    # superside-chat (or rollover) session's ToolManager
+                    # registers session_history/memory_* here too — this SDK
+                    # path otherwise never offers them, even though the
+                    # system prompt mentions them (see
+                    # ``_rollover_labels_for_session``).
                     _tmgr = ToolManager(
                         cached_spec,
                         workdir=_resolved_workdir_for_spec(cached_spec_entry, runner_workspace),
                         os_env_schema_only=True,
+                        labels=await _rollover_labels_for_session(conv),
                     )
                     all_tools.extend(_tmgr.get_tool_schemas())
                 except (
@@ -10169,6 +10183,9 @@ def create_runner_app(
                                                     publish_event=_publish_event,
                                                     filesystem_registry=filesystem_registry,
                                                     effective_harness=_session_harness_name(
+                                                        conv_id
+                                                    ),
+                                                    labels=await _rollover_labels_for_session(
                                                         conv_id
                                                     ),
                                                 )

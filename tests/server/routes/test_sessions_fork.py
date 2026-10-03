@@ -1470,6 +1470,29 @@ async def test_fork_non_side_chat_keeps_rollover_labels() -> None:
 
 
 @pytest.mark.asyncio
+async def test_fork_side_chat_of_superside_chat_keeps_mode_label() -> None:
+    """A Side Chat forked from a superside-chat Super Chat inherits
+    ``omnigent.context.mode=superside-chat`` — the store copies labels
+    wholesale (no drop-list entry for this label), so no route code needs
+    to stamp it explicitly. Unlike the rollover case, no checkpoint is
+    seeded: ``_seed_rollover_side_chat`` only fires for ``is_rollover``."""
+    conv = _make_conversation(labels={"omnigent.context.mode": "superside-chat"})
+    conv_store = _ConversationStore(conversations={"e9f8f58523cec9a57d3bdf93be543e8c": conv})
+    client = TestClient(_build_app(conv_store))
+
+    resp = client.post(
+        "/v1/sessions/e9f8f58523cec9a57d3bdf93be543e8c/fork",
+        json={"side_chat": True},
+    )
+
+    assert resp.status_code == 201, f"got {resp.status_code}: {resp.text}"
+    assert conv_store.fork_calls[0]["dropped_label_keys"] == frozenset()
+    fork_id = "c538360473d41c84c1eee13918fbeca0"
+    assert conv_store._convs[fork_id].labels["omnigent.context.mode"] == "superside-chat"
+    assert conv_store.appended == [], "superside-chat forks do not seed a rollover checkpoint"
+
+
+@pytest.mark.asyncio
 async def test_fork_codex_bypass_stamps_label_on_codex_target(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

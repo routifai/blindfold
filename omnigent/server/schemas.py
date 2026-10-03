@@ -1041,6 +1041,8 @@ class CreateResponseRequest(BaseModel):
         this single request. Drives the REPL's ``/model`` command.
     :param context_management: Compaction strategy objects,
         e.g. ``[{"type": "compaction", ...}]``.
+    :param context_mode: The session's ``omnigent.context.mode`` label
+        value, e.g. ``"superside-chat"``. ``None`` for a plain session.
     :param temperature: Ignored — agent controls this. Silently
         dropped.
     :param top_p: Ignored — agent controls this. Silently
@@ -1096,6 +1098,11 @@ class CreateResponseRequest(BaseModel):
     model_override: str | None = None
     # Compaction strategy objects, e.g. [{"type": "compaction", ...}]
     context_management: list[dict[str, Any]] | None = None
+    # The session's ``omnigent.context.mode`` label value (e.g.
+    # ``"superside-chat"``, ``"rollover"``), forwarded by the runner so an
+    # inner executor can tell which Omnigent-owned context mode (if any) a
+    # turn runs under. ``None`` for a plain session.
+    context_mode: str | None = None
     # Ignored fields — agent controls these; silently dropped.
     # Typed loosely because we only need to accept and discard them.
     temperature: float | None = None

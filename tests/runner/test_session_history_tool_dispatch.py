@@ -409,6 +409,40 @@ def test_ungranted_tool_reason_allows_with_rollover_label() -> None:
     assert reason is None
 
 
+def test_granted_tool_names_includes_session_history_for_superside_chat() -> None:
+    """The grant check is consistent with ToolManager's gate: superside-chat
+    gets session_history too, not just rollover."""
+    spec = _make_spec()
+    granted = _granted_tool_names(
+        spec, "claude-sdk", labels={"omnigent.context.mode": "superside-chat"}
+    )
+    assert "session_history" in granted
+
+
+def test_ungranted_tool_reason_allows_with_superside_chat_label() -> None:
+    spec = _make_spec()
+    reason = _ungranted_tool_reason(
+        "session_history",
+        spec,
+        "claude-sdk",
+        labels={"omnigent.context.mode": "superside-chat"},
+    )
+    assert reason is None
+
+
+def test_granted_tool_names_cache_does_not_leak_across_context_modes() -> None:
+    """Same spec object, same harness: a plain session must not see the
+    rollover/superside-chat grant from a cached entry keyed only on
+    (spec, harness) — see the cache key in ``_granted_tool_names``."""
+    spec = _make_spec()
+    granted_plain = _granted_tool_names(spec, "claude-sdk")
+    granted_superside = _granted_tool_names(
+        spec, "claude-sdk", labels={"omnigent.context.mode": "superside-chat"}
+    )
+    assert "session_history" not in granted_plain
+    assert "session_history" in granted_superside
+
+
 # ── Native relay advertisement ────────────────────────────────
 
 

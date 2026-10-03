@@ -1908,6 +1908,77 @@ async def test_executor_adapter_builds_config_from_request() -> None:
 
 
 @pytest.mark.asyncio
+async def test_executor_adapter_forwards_context_mode_to_config() -> None:
+    """``request.context_mode`` (the runner's forwarded ``omnigent.context.
+    mode`` label) reaches ``ExecutorConfig.extra`` so the claude-sdk
+    executor can tell a superside-chat turn apart from a plain one."""
+    from omnigent.inner.executor import Executor, ExecutorConfig, Message, ToolSpec, TurnComplete
+    from omnigent.runtime.harnesses._executor_adapter import ExecutorAdapter
+    from omnigent.runtime.harnesses._scaffold import TurnContext
+    from omnigent.server.schemas import CreateResponseRequest
+
+    captured: dict[str, object] = {}
+
+    class _CaptureExecutor(Executor):
+        async def run_turn(
+            self,
+            messages: list[Message],
+            tools: list[ToolSpec],
+            system_prompt: str,
+            config: ExecutorConfig | None = None,
+        ):
+            assert config is not None
+            captured["extra"] = dict(config.extra)
+            yield TurnComplete(response="ok")
+
+    adapter = ExecutorAdapter(executor_factory=lambda: _CaptureExecutor())
+    import asyncio
+
+    ctx = TurnContext(
+        response_id="resp_ctx_mode", event_queue=asyncio.Queue(), cancelled=asyncio.Event()
+    )
+    request = CreateResponseRequest(
+        model="my_coding_agent", input="hi", context_mode="superside-chat"
+    )
+    await adapter.run_turn(request, ctx)
+    assert captured["extra"] == {"context_mode": "superside-chat"}
+
+
+@pytest.mark.asyncio
+async def test_executor_adapter_omits_context_mode_when_unset() -> None:
+    """No ``context_mode`` on the request (the default) must not add the
+    key at all — byte-for-byte the pre-existing ``extra`` shape."""
+    from omnigent.inner.executor import Executor, ExecutorConfig, Message, ToolSpec, TurnComplete
+    from omnigent.runtime.harnesses._executor_adapter import ExecutorAdapter
+    from omnigent.runtime.harnesses._scaffold import TurnContext
+    from omnigent.server.schemas import CreateResponseRequest
+
+    captured: dict[str, object] = {}
+
+    class _CaptureExecutor(Executor):
+        async def run_turn(
+            self,
+            messages: list[Message],
+            tools: list[ToolSpec],
+            system_prompt: str,
+            config: ExecutorConfig | None = None,
+        ):
+            assert config is not None
+            captured["extra"] = dict(config.extra)
+            yield TurnComplete(response="ok")
+
+    adapter = ExecutorAdapter(executor_factory=lambda: _CaptureExecutor())
+    import asyncio
+
+    ctx = TurnContext(
+        response_id="resp_ctx_mode_unset", event_queue=asyncio.Queue(), cancelled=asyncio.Event()
+    )
+    request = CreateResponseRequest(model="my_coding_agent", input="hi")
+    await adapter.run_turn(request, ctx)
+    assert "context_mode" not in captured["extra"]
+
+
+@pytest.mark.asyncio
 async def test_executor_adapter_forwards_model_override_to_config() -> None:
     """``request.model_override`` is threaded into ``ExecutorConfig.model``.
 

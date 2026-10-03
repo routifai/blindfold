@@ -35,7 +35,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
-from omnigent.context.labels import is_rollover
+from omnigent.context.labels import inheritable_context_labels, is_rollover, uses_omnigent_context
 from omnigent.util.json_types import JsonObject as _JsonObject
 
 if TYPE_CHECKING:
@@ -1020,14 +1020,14 @@ def _granted_tool_names(
         :func:`_effective_harness_name`. Only the native/non-native split
         matters here.
     :param labels: The session's labels, when known — decides label-gated
-        registrations (currently: ``session_history`` for a rollover
-        session). The cache key includes its rollover-ness so a spec object
-        reused across a rollover and a non-rollover session never shares a
-        cached grant.
+        registrations (currently: ``session_history`` and ``memory_*`` for a
+        rollover or superside-chat session). The cache key includes that
+        gate's outcome so a spec object reused across sessions in different
+        context modes never shares a cached grant.
     :raises Exception: Propagates ``ToolManager`` construction failures so
         callers can fail closed instead of guessing at the surface.
     """
-    cache_key = (id(agent_spec), harness, is_rollover(labels))
+    cache_key = (id(agent_spec), harness, uses_omnigent_context(labels))
     cached = _granted_tool_names_cache.get(cache_key)
     if cached is not None and cached[0]() is agent_spec:
         return cached[1]
@@ -3371,6 +3371,7 @@ def _build_session_create_body(
     message: object,
     model: object = None,
     reasoning_effort: object = None,
+    labels: Mapping[str, str] | None = None,
 ) -> _JsonObject:
     """
     Build the JSON ``POST /v1/sessions`` body for ``sys_session_create``.
@@ -3398,6 +3399,10 @@ def _build_session_create_body(
         written as ``model_override`` on the session.
     :param reasoning_effort: Optional reasoning level, e.g. ``"high"``;
         written as ``reasoning_effort`` on the session.
+    :param labels: Labels to seed the child with, already filtered to the
+        inheritable set (see
+        ``omnigent.context.labels.inheritable_context_labels``). ``None``
+        or ``{}`` omits ``labels`` from the body entirely.
     :returns: The JSON request body.
     """
     body: _JsonObject = {
@@ -3417,6 +3422,8 @@ def _build_session_create_body(
                 "data": {"role": "user", "content": [{"type": "input_text", "text": message}]},
             }
         ]
+    if labels:
+        body["labels"] = dict(labels)
     return body
 
 
@@ -3491,6 +3498,7 @@ async def _execute_session_create(
     publish_event: Callable[[str, _JsonObject], None] | None,
     agent_spec: AgentSpec | None = None,
     runner_workspace: Path | None = None,
+    labels: Mapping[str, str] | None = None,
 ) -> str:
     """
     Create a child session (``sys_session_create``).
@@ -3526,12 +3534,20 @@ async def _execute_session_create(
         os_env cwd that ``config_path`` is read from.
     :param runner_workspace: The runner's workspace dir, authoritative
         for the os_env cwd when present.
+    :param labels: The caller's own session labels, when known. Only the
+        inheritable subset (the context-mode label and its rollover tuning
+        labels — see
+        ``omnigent.context.labels.inheritable_context_labels``) is
+        forwarded to the child, so a superside-chat sub-agent inherits
+        ``omnigent.context.mode=superside-chat`` without picking up
+        arbitrary parent labels.
     :returns: JSON handle on success; a JSON error object otherwise.
     """
     if server_client is None:
         return json.dumps({"error": "sys_session_create requires server access"})
     if conversation_id is None:
         return json.dumps({"error": "sys_session_create requires a session id"})
+    child_labels = inheritable_context_labels(labels)
     agent_id = args.get("agent_id")
     config_path = args.get("config_path")
     has_agent_id = isinstance(agent_id, str) and bool(agent_id)
@@ -3569,6 +3585,7 @@ async def _execute_session_create(
             publish_event=publish_event,
             agent_spec=agent_spec,
             runner_workspace=runner_workspace,
+            labels=child_labels,
         )
     body = _build_session_create_body(
         str(agent_id),
@@ -3577,6 +3594,7 @@ async def _execute_session_create(
         args.get("message"),
         model=args.get("model"),
         reasoning_effort=args.get("reasoning_effort"),
+        labels=child_labels,
     )
     try:
         resp = await server_client.post("/v1/sessions", json=body, timeout=30.0)
@@ -3703,6 +3721,7 @@ async def _upload_config_bundle(
     conversation_id: str,
     agent_spec: AgentSpec | None,
     runner_workspace: Path | None,
+    labels: Mapping[str, str] | None = None,
 ) -> _JsonObject | str:
     """
     Resolve, bundle, and upload a local agent config as a child session.
@@ -3721,6 +3740,8 @@ async def _upload_config_bundle(
     :param conversation_id: The caller's session id — the forced parent.
     :param agent_spec: The calling agent's spec, for os_env resolution.
     :param runner_workspace: The runner workspace, authoritative cwd.
+    :param labels: Labels to seed the child with, already filtered to the
+        inheritable set (see ``_execute_session_create``).
     :returns: The parsed ``CreatedSessionResponse`` dict on success; a
         JSON error string otherwise.
     """
@@ -3743,6 +3764,8 @@ async def _upload_config_bundle(
     title = args.get("title")
     if isinstance(title, str) and title:
         metadata["title"] = title
+    if labels:
+        metadata["labels"] = dict(labels)
     try:
         resp = await server_client.post(
             "/v1/sessions",
@@ -3771,6 +3794,7 @@ async def _session_create_from_config_path(
     publish_event: Callable[[str, _JsonObject], None] | None,
     agent_spec: AgentSpec | None,
     runner_workspace: Path | None,
+    labels: Mapping[str, str] | None = None,
 ) -> str:
     """
     Bundle-mode ``sys_session_create``: upload a new agent and launch it.
@@ -3791,6 +3815,8 @@ async def _session_create_from_config_path(
     :param publish_event: SSE publish callback for ``session.created``.
     :param agent_spec: The calling agent's spec, for os_env resolution.
     :param runner_workspace: The runner workspace, authoritative cwd.
+    :param labels: Labels to seed the child with, already filtered to the
+        inheritable set (see ``_execute_session_create``).
     :returns: JSON handle on success; a JSON error object otherwise.
     """
     data = await _upload_config_bundle(
@@ -3800,6 +3826,7 @@ async def _session_create_from_config_path(
         conversation_id=conversation_id,
         agent_spec=agent_spec,
         runner_workspace=runner_workspace,
+        labels=labels,
     )
     if isinstance(data, str):
         return data
@@ -6948,6 +6975,7 @@ async def execute_tool(
                 publish_event=publish_event,
                 agent_spec=agent_spec,
                 runner_workspace=runner_workspace,
+                labels=labels,
             )
         elif tool_name in _SESSION_SELF_WRITE_TOOLS:
             output = await _rename_current_session_via_rest(

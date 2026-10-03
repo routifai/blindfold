@@ -712,7 +712,9 @@ class TestConstructor(unittest.TestCase):
                 self.assertEqual((provider_name, family), ("databricks", "claude"))
                 return SimpleNamespace(model_id="catalog-databricks-claude-default")
 
-            async def fake_get_or_create_client(sdk, *, session_key, options, model):
+            async def fake_get_or_create_client(
+                sdk, *, session_key, options, model, rebuild_on_instructions_change=False
+            ):
                 captured["model"] = model
                 raise RuntimeError("stop after model resolution")
 
@@ -762,7 +764,9 @@ class TestConstructor(unittest.TestCase):
 
             captured: dict[str, str | None] = {}
 
-            async def fake_get_or_create_client(sdk, *, session_key, options, model):
+            async def fake_get_or_create_client(
+                sdk, *, session_key, options, model, rebuild_on_instructions_change=False
+            ):
                 captured["model"] = model
                 raise RuntimeError("stop after model resolution")
 
@@ -819,7 +823,9 @@ class TestConstructor(unittest.TestCase):
                 resolve_calls.append(profile)
                 return "system.ai.claude-opus-5"
 
-            async def fake_get_or_create_client(sdk, *, session_key, options, model):
+            async def fake_get_or_create_client(
+                sdk, *, session_key, options, model, rebuild_on_instructions_change=False
+            ):
                 captured.append(model)
                 raise RuntimeError("stop after model resolution")
 
@@ -921,7 +927,9 @@ class TestConstructor(unittest.TestCase):
 
             captured: dict[str, str | None] = {}
 
-            async def fake_get_or_create_client(sdk, *, session_key, options, model):
+            async def fake_get_or_create_client(
+                sdk, *, session_key, options, model, rebuild_on_instructions_change=False
+            ):
                 captured["model"] = model
                 raise RuntimeError("stop after model resolution")
 
@@ -961,7 +969,9 @@ class TestConstructor(unittest.TestCase):
 
             captured: dict[str, dict[str, str]] = {}
 
-            async def fake_get_or_create_client(sdk, *, session_key, options, model):
+            async def fake_get_or_create_client(
+                sdk, *, session_key, options, model, rebuild_on_instructions_change=False
+            ):
                 captured["env"] = dict(options.env or {})
                 captured["settings"] = json.loads(options.settings or "{}")
                 raise RuntimeError("stop after env assembly")
@@ -1039,7 +1049,9 @@ class TestConstructor(unittest.TestCase):
 
             captured: dict[str, dict[str, str]] = {}
 
-            async def fake_get_or_create_client(sdk, *, session_key, options, model):
+            async def fake_get_or_create_client(
+                sdk, *, session_key, options, model, rebuild_on_instructions_change=False
+            ):
                 captured["env"] = dict(options.env or {})
                 raise RuntimeError("stop after env assembly")
 
@@ -1091,7 +1103,9 @@ class TestConstructor(unittest.TestCase):
 
             captured: dict[str, dict[str, str]] = {}
 
-            async def fake_get_or_create_client(sdk, *, session_key, options, model):
+            async def fake_get_or_create_client(
+                sdk, *, session_key, options, model, rebuild_on_instructions_change=False
+            ):
                 captured["env"] = dict(options.env or {})
                 captured["settings"] = json.loads(options.settings or "{}")
                 raise RuntimeError("stop after env assembly")
@@ -1143,7 +1157,9 @@ class TestConstructor(unittest.TestCase):
 
             captured: dict[str, str | None] = {}
 
-            async def fake_get_or_create_client(sdk, *, session_key, options, model):
+            async def fake_get_or_create_client(
+                sdk, *, session_key, options, model, rebuild_on_instructions_change=False
+            ):
                 captured["model"] = model
                 raise RuntimeError("stop after model resolution")
 
@@ -1180,7 +1196,9 @@ class TestConstructor(unittest.TestCase):
             executor = ClaudeSDKExecutor(gateway=False)
             captured: dict[str, str | None] = {}
 
-            async def fake_get_or_create_client(sdk, *, session_key, options, model):
+            async def fake_get_or_create_client(
+                sdk, *, session_key, options, model, rebuild_on_instructions_change=False
+            ):
                 captured["model"] = model
                 raise RuntimeError("stop after model resolution")
 
@@ -1214,7 +1232,9 @@ class TestConstructor(unittest.TestCase):
 
             captured: dict[str, object] = {}
 
-            async def fake_get_or_create_client(sdk, *, session_key, options, model):
+            async def fake_get_or_create_client(
+                sdk, *, session_key, options, model, rebuild_on_instructions_change=False
+            ):
                 captured["thinking"] = getattr(options, "thinking", None)
                 raise RuntimeError("stop after options built")
 
@@ -1254,7 +1274,9 @@ class TestConstructor(unittest.TestCase):
 
             captured: dict[str, object] = {}
 
-            async def fake_get_or_create_client(sdk, *, session_key, options, model):
+            async def fake_get_or_create_client(
+                sdk, *, session_key, options, model, rebuild_on_instructions_change=False
+            ):
                 captured["thinking"] = getattr(options, "thinking", None)
                 raise RuntimeError("stop after options built")
 
@@ -1288,7 +1310,9 @@ class TestConstructor(unittest.TestCase):
 
             captured: dict[str, object] = {}
 
-            async def fake_get_or_create_client(sdk, *, session_key, options, model):
+            async def fake_get_or_create_client(
+                sdk, *, session_key, options, model, rebuild_on_instructions_change=False
+            ):
                 captured["thinking"] = getattr(options, "thinking", None)
                 raise RuntimeError("stop after options built")
 
@@ -1313,7 +1337,9 @@ class TestConstructor(unittest.TestCase):
             executor = ClaudeSDKExecutor(gateway=False, model="claude-opus-4-7")
             captured: dict[str, object] = {}
 
-            async def fake_get_or_create_client(sdk, *, session_key, options, model):
+            async def fake_get_or_create_client(
+                sdk, *, session_key, options, model, rebuild_on_instructions_change=False
+            ):
                 captured["thinking"] = getattr(options, "thinking", None)
                 raise RuntimeError("stop after options built")
 
@@ -2177,6 +2203,113 @@ class TestSystemMessages(unittest.TestCase):
             self.assertIn("databrickscfg", events[0].message)
 
         _run(_t())
+
+
+# ---------------------------------------------------------------------------
+# Tests: superside-chat turns off competing Claude Code engine features
+# ---------------------------------------------------------------------------
+
+
+class TestSupersideChatEngineOptions(unittest.TestCase):
+    """``cfg.extra["context_mode"] == "superside-chat"`` (see
+    ``_executor_adapter.ExecutorAdapter.run_turn`` / ``CreateResponseRequest
+    .context_mode``) turns off every Claude Code feature that would
+    compete with Omnigent for context/memory/sub-agents ownership. Every
+    other session (no ``context_mode``, or ``"rollover"``) is unaffected."""
+
+    @staticmethod
+    def _fake_sdk(captured_options: list):
+        class _ResultMessage:
+            def __init__(self, session_id, result):
+                self.session_id = session_id
+                self.result = result
+
+        class _FakeSDK:
+            AssistantMessage = type("AssistantMessage", (), {})
+            UserMessage = type("UserMessage", (), {})
+            SystemMessage = type("SystemMessage", (), {})
+            ResultMessage = _ResultMessage
+            StreamEvent = type("StreamEvent", (), {})
+            ClaudeAgentOptions = type(
+                "ClaudeAgentOptions",
+                (),
+                {"__init__": lambda self, **kwargs: self.__dict__.update(kwargs)},
+            )
+
+            class ClaudeSDKClient:
+                def __init__(self, options):
+                    captured_options.append(options)
+
+                async def connect(self):
+                    return None
+
+                async def query(self, prompt, session_id="default"):
+                    return None
+
+                async def receive_response(self):
+                    yield _ResultMessage("default", "ok")
+
+                async def disconnect(self):
+                    return None
+
+        return _FakeSDK
+
+    def _run_turn_with_context_mode(self, context_mode: str | None):
+        from omnigent.inner.claude_sdk_executor import ClaudeSDKExecutor
+        from omnigent.inner.executor import ExecutorConfig
+
+        captured_options: list = []
+
+        async def _t():
+            with patch(
+                "omnigent.inner.claude_sdk_executor._ensure_sdk",
+                return_value=self._fake_sdk(captured_options),
+            ):
+                executor = ClaudeSDKExecutor()
+                extra = {"context_mode": context_mode} if context_mode else {}
+                events = [
+                    e
+                    async for e in executor.run_turn(
+                        [{"role": "user", "content": "hello"}],
+                        [],
+                        "system prompt",
+                        config=ExecutorConfig(extra=extra),
+                    )
+                ]
+            self.assertEqual(len(events), 1)
+
+        _run(_t())
+        self.assertEqual(len(captured_options), 1)
+        return captured_options[0]
+
+    def test_superside_chat_disables_auto_compact_and_auto_memory(self):
+        options = self._run_turn_with_context_mode("superside-chat")
+        self.assertEqual(options.env.get("DISABLE_AUTO_COMPACT"), "1")
+        self.assertEqual(options.env.get("CLAUDE_CODE_DISABLE_AUTO_MEMORY"), "1")
+
+    def test_superside_chat_disables_filesystem_settings(self):
+        options = self._run_turn_with_context_mode("superside-chat")
+        self.assertEqual(options.setting_sources, [])
+
+    def test_superside_chat_disallows_builtin_subagent_tool(self):
+        options = self._run_turn_with_context_mode("superside-chat")
+        self.assertIn("Agent", options.disallowed_tools)
+        self.assertIn("Task", options.disallowed_tools)
+
+    def test_unset_context_mode_leaves_engine_features_untouched(self):
+        options = self._run_turn_with_context_mode(None)
+        self.assertNotIn("DISABLE_AUTO_COMPACT", options.env)
+        self.assertNotIn("CLAUDE_CODE_DISABLE_AUTO_MEMORY", options.env)
+        self.assertEqual(options.disallowed_tools, [])
+        self.assertNotEqual(getattr(options, "setting_sources", "unset-sentinel"), [])
+
+    def test_rollover_context_mode_leaves_engine_features_untouched(self):
+        """Only superside-chat gates these — rollover's own CLI-compaction
+        story (native CLIs) is unrelated to this SDK-engine adapter."""
+        options = self._run_turn_with_context_mode("rollover")
+        self.assertNotIn("DISABLE_AUTO_COMPACT", options.env)
+        self.assertNotIn("CLAUDE_CODE_DISABLE_AUTO_MEMORY", options.env)
+        self.assertEqual(options.disallowed_tools, [])
 
 
 # ---------------------------------------------------------------------------
@@ -4880,7 +5013,9 @@ class TestToolCallPolicyGate(unittest.TestCase):
 
             captured = {}
 
-            async def fake_get_or_create_client(sdk, *, session_key, options, model):
+            async def fake_get_or_create_client(
+                sdk, *, session_key, options, model, rebuild_on_instructions_change=False
+            ):
                 captured["can_use_tool"] = options.can_use_tool
                 raise RuntimeError("stop after options build")
 
@@ -4908,7 +5043,9 @@ class TestToolCallPolicyGate(unittest.TestCase):
             executor = ClaudeSDKExecutor(permission_mode="bypassPermissions")
             captured = {}
 
-            async def fake_get_or_create_client(sdk, *, session_key, options, model):
+            async def fake_get_or_create_client(
+                sdk, *, session_key, options, model, rebuild_on_instructions_change=False
+            ):
                 captured["can_use_tool"] = options.can_use_tool
                 raise RuntimeError("stop after options build")
 

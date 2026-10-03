@@ -44,6 +44,7 @@ from typing import Any, NamedTuple, Protocol, TypeAlias, cast
 
 from omnigent._platform import resolve_cli_binary, stable_user_id
 from omnigent.cli_invocation import cli_invocation
+from omnigent.context.labels import SUPERSIDE_CHAT_MODE_VALUE
 from omnigent.databricks_ai_gateway import is_databricks_ai_gateway_url
 from omnigent.inner import _proc
 from omnigent.inner.bundle_skills import ensure_bundle_plugin_manifest
@@ -704,6 +705,17 @@ _NO_SANDBOX_ENV = "OMNIGENT_CLAUDE_SDK_NO_SANDBOX"
 # daemon doesn't inherit (e.g. an nvm-managed global bin dir).
 _CLAUDE_PATH_ENV = "OMNIGENT_CLAUDE_PATH"
 
+# superside-chat turns off every Claude Code feature that would compete
+# with Omnigent for ownership of context/sub-agents/memory (ADR
+# rollover/adr/0001-omnigent-owns-everything.md). Same env vars
+# claude_native/main.py sets for a rollover terminal.
+_CLAUDE_CODE_DISABLE_AUTO_COMPACT_ENV = "DISABLE_AUTO_COMPACT"
+_CLAUDE_CODE_DISABLE_AUTO_MEMORY_ENV = "CLAUDE_CODE_DISABLE_AUTO_MEMORY"
+# The SDK's built-in sub-agent tool (``agents`` / "Agent tool" per
+# ClaudeAgentOptions.agents); "Task" is its historical CLI name. Omnigent
+# sub-agents are Omnigent sessions (see ``sys_session_create``), never this.
+_SDK_BUILTIN_SUBAGENT_TOOLS = ("Agent", "Task")
+
 
 def _usage_from_observed_call(
     last_call_usage: dict[str, Any] | None,  # type: ignore[explicit-any]
@@ -834,6 +846,28 @@ class _ClaudeClientState:
     model: str | None
     loop: asyncio.AbstractEventLoop | None = None
     task: asyncio.Task[None] | None = None
+    # Hash of the composed ``system_prompt`` this client was built with.
+    # Only populated (and acted on) for superside-chat — see
+    # ``_get_or_create_client``'s ``rebuild_on_instructions_change``.
+    instructions_hash: str | None = None
+
+
+def _composed_instructions_hash(system_prompt: object) -> str | None:
+    """Stable hash of a turn's composed ``system_prompt``, or ``None`` for none.
+
+    Used only to detect when a superside-chat session's framework
+    instructions (memory, rollover) changed since the warm client was
+    built — never persisted, never compared across processes.
+
+    :param system_prompt: ``ClaudeAgentOptions.system_prompt`` for this turn
+        (a plain string in this executor; ``None`` when unset).
+    :returns: A hex digest of *system_prompt*, or ``None`` when it is falsy.
+    """
+    if not system_prompt:
+        return None
+    import hashlib
+
+    return hashlib.sha256(str(system_prompt).encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -1851,8 +1885,31 @@ class ClaudeSDKExecutor(Executor):
         session_key: str,
         options: SdkOptions,
         model: str | None,
+        rebuild_on_instructions_change: bool = False,
     ) -> _ClaudeClient:
         state = self._clients.get(session_key)
+        new_instructions_hash = (
+            _composed_instructions_hash(getattr(options, "system_prompt", None))
+            if rebuild_on_instructions_change
+            else None
+        )
+        if (
+            state is not None
+            and rebuild_on_instructions_change
+            and new_instructions_hash != state.instructions_hash
+        ):
+            # A warm client keeps the ``system_prompt`` it was created with
+            # (the SDK never re-sends it); for superside-chat, framework
+            # instructions composed after turn 1 (memory, rollover) would
+            # otherwise never reach the model. Drop and reconnect so the
+            # next turn's options actually apply.
+            logger.info(
+                "superside-chat composed instructions changed for session %s; "
+                "rebuilding the warm Claude SDK client",
+                session_key,
+            )
+            await self._close_live_client(session_key)
+            state = None
         if state is None:
             await self._route_options_through_gateway_shim(options)
             # Tee CLI stderr so the connect timeout error carries the
@@ -1945,6 +2002,7 @@ class ClaudeSDKExecutor(Executor):
                 model=model,
                 loop=asyncio.get_running_loop(),
                 task=current_task,
+                instructions_hash=new_instructions_hash,
             )
             self._clients[session_key] = state
             return client
@@ -2562,11 +2620,20 @@ class ClaudeSDKExecutor(Executor):
                 )
             model = self._resolved_default_model
 
+        # Omnigent owns context, memory and sub-agents for a superside-chat
+        # session (rollover/adr/0001-omnigent-owns-everything.md); every
+        # competing Claude Code feature below is gated on this and a no-op
+        # otherwise.
+        is_superside_chat = cfg.extra.get("context_mode") == SUPERSIDE_CHAT_MODE_VALUE
+
         # Build env: Databricks gateway settings derived from profile-backed
         # creds. CLAUDECODE removal happens around the subprocess spawn in
         # ``_get_or_create_client`` via ``_unset_env_var`` — setting it to
         # ``""`` here would still leave an empty key in the child env.
         env = dict(self._extra_env)
+        if is_superside_chat:
+            env[_CLAUDE_CODE_DISABLE_AUTO_COMPACT_ENV] = "1"
+            env[_CLAUDE_CODE_DISABLE_AUTO_MEMORY_ENV] = "1"
         api_key_helper = env.pop(_CLAUDE_API_KEY_HELPER_ENV_KEY, None)
         # Teach Claude Code this gateway's spellings so no model surface routes
         # to an id the gateway rejects: pins for the family aliases, rewrites
@@ -2647,6 +2714,7 @@ class ClaudeSDKExecutor(Executor):
             "plugins": bundle_plugins,
             "extra_args": {"no-session-persistence": None},
             "max_buffer_size": 10 * 1024 * 1024,
+            "disallowed_tools": list(_SDK_BUILTIN_SUBAGENT_TOOLS) if is_superside_chat else [],
         }
         # Only forward ``setting_sources`` when explicitly set.
         # ``None`` lets the SDK apply its default
@@ -2659,6 +2727,11 @@ class ClaudeSDKExecutor(Executor):
         # branch).
         if resolved.setting_sources is not None:
             options_kwargs["setting_sources"] = resolved.setting_sources
+        if is_superside_chat:
+            # No CLAUDE.md / filesystem settings: Omnigent owns every
+            # instruction this session gets (system prompt + framework
+            # instructions below), never the CLI's own file discovery.
+            options_kwargs["setting_sources"] = []
         try:
             reasoning_effort = validate_effort(
                 cfg.extra.get("reasoning_effort"), "Claude Agent SDK", CLAUDE_EFFORTS
@@ -2867,6 +2940,7 @@ class ClaudeSDKExecutor(Executor):
             session_key=session_key,
             options=options,
             model=model,
+            rebuild_on_instructions_change=is_superside_chat,
         )
 
         # ── LLM_REQUEST policy evaluation ────────────────────────

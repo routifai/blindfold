@@ -8,7 +8,11 @@ from omnigent.context.labels import (
     ROLLOVER_KEEP_TOKENS_LABEL,
     ROLLOVER_MODE_VALUE,
     ROLLOVER_SESSION_LABELS,
+    SUPERSIDE_CHAT_MODE_VALUE,
+    inheritable_context_labels,
     is_rollover,
+    is_superside_chat,
+    uses_omnigent_context,
 )
 
 
@@ -42,3 +46,50 @@ def test_rollover_session_labels_cover_every_rollover_label() -> None:
         )
         == ROLLOVER_SESSION_LABELS
     )
+
+
+def test_superside_chat_mode_value_is_distinct_from_rollover() -> None:
+    assert SUPERSIDE_CHAT_MODE_VALUE == "superside-chat"
+    assert SUPERSIDE_CHAT_MODE_VALUE != ROLLOVER_MODE_VALUE
+
+
+def test_is_superside_chat_true_only_for_exact_value() -> None:
+    assert is_superside_chat({CONTEXT_MODE_LABEL: "superside-chat"}) is True
+    assert is_superside_chat({CONTEXT_MODE_LABEL: "rollover"}) is False
+    assert is_superside_chat({CONTEXT_MODE_LABEL: "Superside-Chat"}) is False
+    assert is_superside_chat({"unrelated.label": "x"}) is False
+
+
+def test_is_superside_chat_false_when_unset() -> None:
+    assert is_superside_chat({}) is False
+    assert is_superside_chat(None) is False
+
+
+def test_uses_omnigent_context_true_for_either_mode() -> None:
+    assert uses_omnigent_context({CONTEXT_MODE_LABEL: "rollover"}) is True
+    assert uses_omnigent_context({CONTEXT_MODE_LABEL: "superside-chat"}) is True
+
+
+def test_uses_omnigent_context_false_otherwise() -> None:
+    assert uses_omnigent_context({}) is False
+    assert uses_omnigent_context(None) is False
+    assert uses_omnigent_context({CONTEXT_MODE_LABEL: "blindfold"}) is False
+
+
+def test_inheritable_context_labels_keeps_only_the_rollover_label_set() -> None:
+    labels = {
+        CONTEXT_MODE_LABEL: "superside-chat",
+        ROLLOVER_AT_TOKENS_LABEL: "50000",
+        "omnigent.ui": "terminal",
+        "omnigent.wrapper": "claude-native",
+    }
+    assert inheritable_context_labels(labels) == {
+        CONTEXT_MODE_LABEL: "superside-chat",
+        ROLLOVER_AT_TOKENS_LABEL: "50000",
+    }
+
+
+def test_inheritable_context_labels_empty_for_none_or_empty() -> None:
+    assert inheritable_context_labels(None) == {}
+    assert inheritable_context_labels({}) == {}
+    assert inheritable_context_labels({"unrelated.label": "x"}) == {}

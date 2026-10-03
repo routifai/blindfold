@@ -1728,3 +1728,18 @@ def test_memory_tools_registration_is_not_a_spec_opt_in() -> None:
     names = mgr.get_tool_names()
     for name in _MEMORY_TOOL_NAMES:
         assert name in names
+
+
+# ── superside-chat gets the same two families as rollover ──────────────
+
+
+def test_session_history_present_for_superside_chat_session() -> None:
+    mgr = ToolManager(_make_spec(), labels={"omnigent.context.mode": "superside-chat"})
+    assert "session_history" in mgr.get_tool_names()
+
+
+def test_memory_tools_present_for_superside_chat_session() -> None:
+    mgr = ToolManager(_make_spec(), labels={"omnigent.context.mode": "superside-chat"})
+    names = mgr.get_tool_names()
+    for name in _MEMORY_TOOL_NAMES:
+        assert name in names

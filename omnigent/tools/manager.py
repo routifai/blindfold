@@ -12,7 +12,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from omnigent.context.labels import is_rollover
+from omnigent.context.labels import uses_omnigent_context
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.inner.os_env import OSEnvironment
 from omnigent.runtime import get_caps
@@ -153,8 +153,9 @@ class ToolManager:
             creating an environment. For metadata callers only; OS tool
             execution remains runner-owned. Preserves the ``os_env`` gate.
         :param labels: The session's labels, when known. Drives label-gated
-            auto-registration (currently: ``session_history`` for a rollover
-            session — ``omnigent.context.labels.is_rollover``). ``None``
+            auto-registration (currently: ``session_history`` and
+            ``memory_*`` for a rollover or superside-chat session —
+            ``omnigent.context.labels.uses_omnigent_context``). ``None``
             (the default) registers nothing label-gated, matching upstream
             behavior for every caller that doesn't pass labels.
         """
@@ -580,30 +581,32 @@ class ToolManager:
 
     def _register_session_history_tool(self) -> None:
         """
-        Auto-register ``session_history`` for a rollover session only.
+        Auto-register ``session_history`` for a rollover/superside-chat session.
 
-        Gated on ``is_rollover(self._labels)`` rather than a spec opt-in, so
-        every rollover session gets recall regardless of which agent spec is
-        bound to it. A session whose labels are unknown to this
-        :class:`ToolManager` call (``labels=None``) or that isn't in
-        rollover mode registers nothing here — byte-for-byte upstream.
+        Gated on ``uses_omnigent_context(self._labels)`` rather than a spec
+        opt-in, so every session in either Omnigent-owned context mode gets
+        recall regardless of which agent spec is bound to it. A session
+        whose labels are unknown to this :class:`ToolManager` call
+        (``labels=None``) or that is in neither mode registers nothing
+        here — byte-for-byte upstream.
         """
-        if is_rollover(self._labels):
+        if uses_omnigent_context(self._labels):
             self._tools[SessionHistoryTool.name()] = SessionHistoryTool()
 
     def _register_memory_tools(self) -> None:
         """
-        Auto-register the ``memory_*`` family for a rollover session only.
+        Auto-register the ``memory_*`` family for a rollover/superside-chat session.
 
-        Same gate as :meth:`_register_session_history_tool`: every rollover
-        session gets long-term memory regardless of which agent spec is
-        bound to it. The tools themselves fail with a clear error at
-        invocation if no :class:`~omnigent.memory.service.MemoryService` is
-        configured (see ``omnigent.tools.builtins.memory``), so registering
-        them unconditionally for rollover sessions is safe even when the
-        ``memory`` extra isn't installed.
+        Same gate as :meth:`_register_session_history_tool`: every session in
+        either Omnigent-owned context mode gets long-term memory regardless
+        of which agent spec is bound to it. The tools themselves fail with a
+        clear error at invocation if no
+        :class:`~omnigent.memory.service.MemoryService` is configured (see
+        ``omnigent.tools.builtins.memory``), so registering them
+        unconditionally is safe even when the ``memory`` extra isn't
+        installed.
         """
-        if not is_rollover(self._labels):
+        if not uses_omnigent_context(self._labels):
             return
         for tool in (
             MemoryRememberTool(),

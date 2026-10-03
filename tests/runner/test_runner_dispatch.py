@@ -7739,6 +7739,75 @@ async def test_sys_session_create_spawns_child_under_caller() -> None:
 
 
 @pytest.mark.asyncio
+async def test_sys_session_create_forwards_superside_chat_mode_to_child() -> None:
+    """
+    A superside-chat caller's ``sys_session_create`` stamps
+    ``omnigent.context.mode=superside-chat`` on the child's create body —
+    Side Chats inherit the mode by the fork store copying labels wholesale,
+    but a sub-agent create sends a fresh body, so the mode must be
+    forwarded explicitly (see ``inheritable_context_labels``).
+    """
+    from omnigent.runner.tool_dispatch import execute_tool
+
+    captured: dict[str, Any] = {}
+
+    async def _server_handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/sessions":
+            captured.update(json.loads(request.content))
+            return httpx.Response(
+                201, json={"id": "conv_child", "agent_id": "ag_x", "agent_name": "researcher"}
+            )
+        return httpx.Response(404, json={"error": str(request.url)})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(_server_handler),
+        base_url="http://server",
+    ) as server_client:
+        await execute_tool(
+            tool_name="sys_session_create",
+            arguments=json.dumps({"agent_id": "ag_x"}),
+            server_client=server_client,
+            conversation_id="conv_caller",
+            labels={
+                "omnigent.context.mode": "superside-chat",
+                "omnigent.ui": "terminal",  # not inheritable — must not ride along
+            },
+        )
+
+    assert captured["labels"] == {"omnigent.context.mode": "superside-chat"}
+
+
+@pytest.mark.asyncio
+async def test_sys_session_create_omits_labels_without_context_mode() -> None:
+    """A caller with no context-mode label (the default) sends no ``labels``
+    key at all — byte-for-byte the pre-existing body shape."""
+    from omnigent.runner.tool_dispatch import execute_tool
+
+    captured: dict[str, Any] = {}
+
+    async def _server_handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/sessions":
+            captured.update(json.loads(request.content))
+            return httpx.Response(
+                201, json={"id": "conv_child", "agent_id": "ag_x", "agent_name": "researcher"}
+            )
+        return httpx.Response(404, json={"error": str(request.url)})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(_server_handler),
+        base_url="http://server",
+    ) as server_client:
+        await execute_tool(
+            tool_name="sys_session_create",
+            arguments=json.dumps({"agent_id": "ag_x"}),
+            server_client=server_client,
+            conversation_id="conv_caller",
+        )
+
+    assert "labels" not in captured
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "arguments",
     [
@@ -7890,6 +7959,40 @@ async def test_sys_session_create_bundle_mode_uploads_child_under_caller(
     # not the caller's args — the orchestrator needs the NEW agent's id.
     assert handle["agent_id"] == "ag_new"
     assert handle["agent_name"] == "helper"
+
+
+@pytest.mark.asyncio
+async def test_sys_session_create_bundle_mode_forwards_superside_chat_mode(
+    tmp_path: Path,
+) -> None:
+    """The bundle-mode (``config_path``) create forwards the mode label
+    through the multipart ``metadata`` part too, same as agent_id mode."""
+    from omnigent.runner.tool_dispatch import execute_tool
+
+    (tmp_path / "helper.yaml").write_text("name: helper\nprompt: do helpful things\n")
+    create_requests: list[httpx.Request] = []
+
+    async def _server_handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/sessions":
+            create_requests.append(request)
+            return httpx.Response(201, json={"session_id": "conv_child", "agent_id": "ag_new"})
+        return httpx.Response(404, json={"error": str(request.url)})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(_server_handler),
+        base_url="http://server",
+    ) as server_client:
+        await execute_tool(
+            tool_name="sys_session_create",
+            arguments=json.dumps({"config_path": "helper.yaml"}),
+            server_client=server_client,
+            conversation_id="conv_caller",
+            runner_workspace=tmp_path,
+            labels={"omnigent.context.mode": "superside-chat"},
+        )
+
+    parts = _parse_multipart_create(create_requests[0])
+    assert parts["metadata"]["labels"] == {"omnigent.context.mode": "superside-chat"}
 
 
 @pytest.mark.asyncio

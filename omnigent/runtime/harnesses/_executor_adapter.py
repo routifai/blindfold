@@ -216,6 +216,11 @@ class ExecutorAdapter(HarnessApp):
                 extra["reasoning_effort"] = effort
         if request.max_output_tokens is not None:
             extra["max_tokens"] = int(request.max_output_tokens)
+        # The session's omnigent.context.mode label (e.g. "superside-chat"),
+        # when the runner forwarded one. Executors that don't look for this
+        # key (every inner executor but claude-sdk, today) simply ignore it.
+        if request.context_mode:
+            extra["context_mode"] = request.context_mode
         # model_override is the per-request override; takes precedence over the spec default.
         config = ExecutorConfig(model=request.model_override, extra=extra)
         tools = _normalize_tool_schemas(request.tools or [])
