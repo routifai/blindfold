@@ -29,9 +29,14 @@ VALID_KINDS = frozenset(
 )
 DEFAULT_KIND = "fact"
 
-# Starting confidence by explicitness, per MEMORY-PLAN.md section 3.
-_STATED_CONFIDENCE = 0.9
-_INFERRED_CONFIDENCE = 0.4
+# Starting confidence by explicitness, per MEMORY-PLAN.md section 3. Public
+# (not just the private aliases below) because Phase 3's upkeep job
+# (``omnigent/memory/upkeep.py``) picks a starting confidence for a verified
+# candidate the same way ``remember()`` does for a direct call.
+STATED_CONFIDENCE = 0.9
+INFERRED_CONFIDENCE = 0.4
+_STATED_CONFIDENCE = STATED_CONFIDENCE
+_INFERRED_CONFIDENCE = INFERRED_CONFIDENCE
 
 # --- remember()'s near-duplicate dedup rule (Phase 1; Phase 3's upkeep job
 # may refine this with a model call per the plan) ---
@@ -47,6 +52,36 @@ _REINFORCE_CONFIDENCE_INCREMENT = 0.05
 # that decays over ~90 days since the claim was last reinforced.
 _RECENCY_BOOST_WEIGHT = 0.1
 _RECENCY_BOOST_HALFLIFE_SECONDS = 90 * 24 * 3600
+
+# profile()'s projection (MEMORY-PLAN.md Phase 2, Muse's USER.md): active
+# claims of these kinds, grouped in this order. Phase 1 has no separate
+# "identity" kind, so a role/identity claim is stored as kind="fact" and
+# included here as "About the user".
+PROFILE_KINDS: tuple[str, ...] = ("preference", "instruction", "working_style", "fact")
+_PROFILE_GROUP_LABELS = {
+    "preference": "Preferences",
+    "instruction": "Standing instructions",
+    "working_style": "Working style",
+    "fact": "About the user",
+}
+_PROFILE_MIN_CONFIDENCE = 0.75
+# ~1.5k tokens, estimated chars/4 (no tokenizer call for a per-turn fetch).
+_PROFILE_MAX_CHARS = 1_500 * 4
+
+_PROFILE_BLOCK_HEADER = (
+    "[Standing memory about the user — provided by the system, not a message from the user]"
+)
+_PROFILE_BLOCK_FOOTER = "[End of standing memory]"
+
+
+def render_profile_block(profile: str) -> str:
+    """Wrap a rendered profile in the delimiters prepended to every turn.
+
+    Shared by every per-turn delivery seam (``rollover/MEMORY-PLAN.md``
+    Phase 2) so the wording lives in one place, next to the projection it
+    wraps.
+    """
+    return f"{_PROFILE_BLOCK_HEADER}\n\n{profile}\n\n{_PROFILE_BLOCK_FOOTER}"
 
 
 def _tokenize(text: str) -> set[str]:
@@ -82,6 +117,14 @@ class MemoryService:
     def __init__(self, store: MemoryStore, index: MemoryIndex) -> None:
         self._store = store
         self._index = index
+        # profile()'s render cache, per user; invalidated on any claim write
+        # for that user (see _invalidate_profile). Unbounded by design: one
+        # entry per user who has ever been profiled, a short string each.
+        self._profile_cache: dict[str, str | None] = {}
+
+    def _invalidate_profile(self, user_id: str) -> None:
+        """Drop a cached profile so the next call re-renders it from the store."""
+        self._profile_cache.pop(user_id, None)
 
     # ── Write path ──────────────────────────────────────────────────
 
@@ -124,6 +167,7 @@ class MemoryService:
             )
             self._index.delete(existing_id)
             self._index.upsert(new_claim)
+            self._invalidate_profile(user_id)
             return {"action": "superseded", "claim": _claim_to_dict(new_claim)}
 
         best = self._best_match(user_id, text)
@@ -137,6 +181,7 @@ class MemoryService:
             )
             if reinforced is not None:
                 self._index.upsert(reinforced)
+                self._invalidate_profile(user_id)
                 return {"action": "reinforced", "claim": _claim_to_dict(reinforced)}
 
         new_claim = self._store.create(
@@ -151,6 +196,7 @@ class MemoryService:
             confidence=_STATED_CONFIDENCE,
         )
         self._index.upsert(new_claim)
+        self._invalidate_profile(user_id)
         return {"action": "added", "claim": _claim_to_dict(new_claim)}
 
     def _best_match(self, user_id: str, text: str) -> tuple[str, float, str] | None:
@@ -160,6 +206,100 @@ class MemoryService:
             return None
         top = hits[0]
         return top["id"], float(top["score"]), str(top["text"])
+
+    # ── Write path (Phase 3's upkeep job) ────────────────────────────
+    #
+    # Thin wrappers around the store/index, mirroring remember()'s shape,
+    # for a caller (``omnigent/memory/upkeep.py``) that has already decided
+    # kind/confidence/explicitness/run_id itself (via its own classify step)
+    # rather than remember()'s text-similarity dedup.
+
+    def record_claim(
+        self,
+        user_id: str,
+        kind: str,
+        text: str,
+        *,
+        quote: str | None = None,
+        speaker: str | None = None,
+        evidence: list[MemoryEvidenceLink] | None = None,
+        explicitness: str = "stated",
+        confidence: float = STATED_CONFIDENCE,
+        run_id: str | None = None,
+        valid_until: int | None = None,
+    ) -> dict[str, Any]:
+        """Insert a new active claim written by an upkeep run (or any caller
+        that already knows it is not a duplicate of an active claim)."""
+        resolved_kind = kind if kind in VALID_KINDS else DEFAULT_KIND
+        new_claim = self._store.create(
+            uuid.uuid4().hex,
+            user_id,
+            resolved_kind,
+            text,
+            quote=quote,
+            speaker=speaker,
+            evidence=evidence,
+            explicitness=explicitness,
+            confidence=confidence,
+            valid_until=valid_until,
+            run_id=run_id,
+        )
+        self._index.upsert(new_claim)
+        self._invalidate_profile(user_id)
+        return {"action": "added", "claim": _claim_to_dict(new_claim)}
+
+    def reinforce_claim(
+        self, claim_id: str, user_id: str, *, confidence_increment: float
+    ) -> dict[str, Any] | None:
+        """Bump an active claim's confidence/reinforcement count, or ``None`` if
+        *claim_id* is not an active claim belonging to *user_id*."""
+        reinforced = self._store.reinforce(
+            claim_id, user_id, confidence_increment=confidence_increment
+        )
+        if reinforced is None:
+            return None
+        self._index.upsert(reinforced)
+        self._invalidate_profile(user_id)
+        return _claim_to_dict(reinforced)
+
+    def supersede_claim(
+        self,
+        old_claim_id: str,
+        user_id: str,
+        *,
+        kind: str,
+        text: str,
+        quote: str | None = None,
+        speaker: str | None = None,
+        evidence: list[MemoryEvidenceLink] | None = None,
+        explicitness: str = "stated",
+        confidence: float = STATED_CONFIDENCE,
+        run_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Supersede *old_claim_id* with a new active claim written by an
+        upkeep run. ``{"error": ...}`` if *old_claim_id* is not an active
+        claim belonging to *user_id*."""
+        old = self._store.get(old_claim_id, user_id)
+        if old is None or old.status != "active":
+            return {"error": f"no active claim {old_claim_id} to replace"}
+        resolved_kind = kind if kind in VALID_KINDS else DEFAULT_KIND
+        new_claim = self._store.supersede(
+            old_claim_id,
+            user_id,
+            new_claim_id=uuid.uuid4().hex,
+            kind=resolved_kind,
+            claim_text=text,
+            quote=quote,
+            speaker=speaker,
+            evidence=evidence,
+            explicitness=explicitness,
+            confidence=confidence,
+            run_id=run_id,
+        )
+        self._index.delete(old_claim_id)
+        self._index.upsert(new_claim)
+        self._invalidate_profile(user_id)
+        return {"action": "superseded", "claim": _claim_to_dict(new_claim)}
 
     # ── Read path ───────────────────────────────────────────────────
 
@@ -268,7 +408,56 @@ class MemoryService:
         if updated is None:
             return {"status": "not_found"}
         self._index.delete(target_id)
+        self._invalidate_profile(user_id)
         return {"status": "forgotten", "claim": _claim_to_dict(updated)}
+
+    # ── Work profile (Phase 2) ──────────────────────────────────────
+
+    def profile(self, user_id: str) -> str | None:
+        """Render the standing work profile injected every turn.
+
+        A projection of *user_id*'s active claims — Muse's ``USER.md``
+        (``rollover/MEMORY-PLAN.md`` Phase 2): claims of :data:`PROFILE_KINDS`
+        with confidence at least :data:`_PROFILE_MIN_CONFIDENCE`, grouped by
+        kind, newest-reinforced first within a group, capped at roughly
+        :data:`_PROFILE_MAX_CHARS` characters. Cached per user until the next
+        claim write for that user (:meth:`_invalidate_profile`).
+
+        :returns: The rendered profile text (without the delimiter block —
+            see :func:`render_profile_block`), or ``None`` when there is
+            nothing to show.
+        """
+        if user_id in self._profile_cache:
+            return self._profile_cache[user_id]
+        rendered = self._render_profile(user_id)
+        self._profile_cache[user_id] = rendered
+        return rendered
+
+    def _render_profile(self, user_id: str) -> str | None:
+        lines: list[str] = []
+        char_count = 0
+        for kind in PROFILE_KINDS:
+            claims = self._store.list_active(
+                user_id, kind=kind, min_confidence=_PROFILE_MIN_CONFIDENCE
+            )
+            if not claims:
+                continue
+            claims.sort(key=lambda c: c.reinforced_at or c.first_seen, reverse=True)
+            header = f"{_PROFILE_GROUP_LABELS[kind]}:"
+            if char_count + len(header) + 1 > _PROFILE_MAX_CHARS:
+                break
+            section = [header]
+            section_chars = len(header) + 1
+            for claim in claims:
+                line = f"- {claim.claim_text}"
+                if char_count + section_chars + len(line) + 1 > _PROFILE_MAX_CHARS:
+                    break
+                section.append(line)
+                section_chars += len(line) + 1
+            if len(section) > 1:
+                lines.extend(section)
+                char_count += section_chars
+        return "\n".join(lines) if lines else None
 
     # ── Maintenance ─────────────────────────────────────────────────
 

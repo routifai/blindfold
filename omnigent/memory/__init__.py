@@ -17,11 +17,21 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from omnigent.memory.config import MemoryConfig
 from omnigent.memory.service import MemoryService
 
-__all__ = ["MemoryConfig", "MemoryService", "build_memory_service", "memory_extra_available"]
+if TYPE_CHECKING:
+    from omnigent.stores.memory_upkeep_store import MemoryUpkeepStore
+
+__all__ = [
+    "MemoryConfig",
+    "MemoryService",
+    "build_memory_service",
+    "build_memory_upkeep_store",
+    "memory_extra_available",
+]
 
 
 def memory_extra_available() -> bool:
@@ -53,3 +63,16 @@ def build_memory_service(db_uri: str, index_dir: Path) -> MemoryService | None:
     store = SqlAlchemyMemoryStore(db_uri)
     index = MemoryIndex(index_dir)
     return MemoryService(store, index)
+
+
+def build_memory_upkeep_store(db_uri: str) -> MemoryUpkeepStore:
+    """Build the server's :class:`~omnigent.stores.memory_upkeep_store.MemoryUpkeepStore`.
+
+    Separate from :func:`build_memory_service` because the upkeep-run table
+    needs no txtai/litellm extra — it is plain SQLAlchemy, always available.
+
+    :param db_uri: SQLAlchemy database URI backing the ``memory_upkeep_runs`` table.
+    """
+    from omnigent.stores.memory_upkeep_store.sqlalchemy_store import SqlAlchemyMemoryUpkeepStore
+
+    return SqlAlchemyMemoryUpkeepStore(db_uri)

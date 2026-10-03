@@ -290,6 +290,49 @@ async def test_forget_requires_claim_id_or_query(client: httpx.AsyncClient, db_u
     assert resp.status_code == 400
 
 
+# ── profile (S6 per-turn delivery seam) ──────────────────────────────────────
+
+
+async def test_profile_is_none_with_no_claims(client: httpx.AsyncClient, db_uri: str) -> None:
+    session_id = await _make_session(db_uri)
+    resp = await client.get(f"/v1/sessions/{session_id}/memory/profile", headers=_headers())
+    assert resp.status_code == 200
+    assert resp.json() == {"profile": None}
+
+
+async def test_profile_wraps_active_claims_in_the_delimiter_block(
+    client: httpx.AsyncClient, db_uri: str
+) -> None:
+    session_id = await _make_session(db_uri)
+    await client.post(
+        f"/v1/sessions/{session_id}/memory/remember",
+        json={"text": "Prefers figures in CAD", "kind": "preference"},
+        headers=_headers(),
+    )
+    resp = await client.get(f"/v1/sessions/{session_id}/memory/profile", headers=_headers())
+    assert resp.status_code == 200
+    profile = resp.json()["profile"]
+    assert profile is not None
+    assert profile.startswith("[Standing memory about the user")
+    assert profile.endswith("[End of standing memory]")
+    assert "Prefers figures in CAD" in profile
+
+
+async def test_profile_is_isolated_per_owner(client: httpx.AsyncClient, db_uri: str) -> None:
+    alice_session = await _make_session(db_uri, owner="alice@example.com")
+    bob_session = await _make_session(db_uri, owner="bob@example.com")
+    await client.post(
+        f"/v1/sessions/{alice_session}/memory/remember",
+        json={"text": "Prefers figures in CAD", "kind": "preference"},
+        headers=_headers("alice@example.com"),
+    )
+
+    bob_resp = await client.get(
+        f"/v1/sessions/{bob_session}/memory/profile", headers=_headers("bob@example.com")
+    )
+    assert bob_resp.json() == {"profile": None}
+
+
 # ── not mounted without a memory_service ─────────────────────────────────────
 
 

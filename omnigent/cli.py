@@ -4470,9 +4470,13 @@ def server(
     # Long-term memory (optional `omnigent[memory]` extra). None when txtai
     # isn't installed — the memory_* tools then surface a clear error
     # instead of a half-working feature.
-    from omnigent.memory import build_memory_service
+    from omnigent.memory import build_memory_service, build_memory_upkeep_store
 
     memory_service = build_memory_service(db_uri, Path(art_loc) / "memory_index")
+    # The upkeep-run table needs no txtai extra — always built when memory
+    # itself is configured, backing the S6 compaction trigger and hourly
+    # sweep (rollover/SUPERSIDE-CHAT-PLAN.md).
+    memory_upkeep_store = build_memory_upkeep_store(db_uri) if memory_service is not None else None
 
     # Initialize the runtime with store references so workflow code
     # can access them via getter functions (get_agent_cache(), etc.).
@@ -4659,6 +4663,7 @@ def server(
         permission_store=permission_store,
         scheduled_task_store=scheduled_task_store,
         memory_service=memory_service,
+        memory_upkeep_store=memory_upkeep_store,
         project_store=project_store,
         auth_provider=auth_provider,
         host_store=host_store,

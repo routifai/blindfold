@@ -86,6 +86,23 @@ def create_session_memory_router(
             replaces_claim_id=body.replaces_claim_id,
         )
 
+    @router.get("/sessions/{session_id}/memory/profile")
+    async def profile(
+        request: Request,
+        session_id: str,
+    ) -> dict[str, Any]:
+        """The session owner's Memory Profile, wrapped in the delimiter block.
+
+        Read by the runner process (``omnigent/runner/app.py``) every
+        ``superside-chat`` turn (SUPERSIDE-CHAT-PLAN.md S6) — a plain HTTP
+        GET rather than an in-process call since the runner may be a
+        separate process with no runtime access.
+        """
+        owner = await _resolve_user(request, session_id)
+        from omnigent.superchat.memory import memory_profile_for
+
+        return {"profile": memory_profile_for(owner, service=memory_service)}
+
     @router.get("/sessions/{session_id}/memory/search")
     async def search(
         request: Request,

@@ -23,6 +23,7 @@ from fastapi.routing import APIRoute
 from starlette.datastructures import Headers
 from starlette.types import Message, Receive, Scope, Send
 
+from omnigent.context.labels import is_superside_chat
 from omnigent.db.workspace_cache import WorkspaceScopedCache
 from omnigent.debug_logging import add_audit_attrs, debug_event, mark_request_audit_suppressed
 from omnigent.entities import (
@@ -1566,6 +1567,22 @@ def register_events_routes(
                 session_id,
                 [item],
             )
+            # Memory upkeep trigger (rollover/SUPERSIDE-CHAT-PLAN.md S6):
+            # a superside-chat session's own compaction is the signal that
+            # there is new, settled conversation to learn from. Native-CLI
+            # rollover sessions are untouched — upkeep for them is out of
+            # scope for this slice. The session's *owner* (never the
+            # authenticated caller, which may be the runner/system on a
+            # Sub-agent's own session) is whose memory gets updated — the
+            # same resolution ``memory_*`` and the memory routes use.
+            if is_superside_chat(conv.labels):
+                coordinator = getattr(request.app.state, "memory_upkeep_coordinator", None)
+                if coordinator is not None:
+                    owner = await asyncio.to_thread(
+                        conversation_store.get_session_owner, session_id
+                    )
+                    if owner:
+                        coordinator.schedule(owner)
             return {"queued": True}
         if body.type == _EXTERNAL_ASSISTANT_MESSAGE_TYPE:
             item_id = await _persist_external_assistant_message(

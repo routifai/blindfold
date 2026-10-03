@@ -136,6 +136,7 @@ from omnigent.stores.conversation_store import (
     runner_seen_is_fresh,
 )
 from omnigent.stores.host_store import HostStore
+from omnigent.stores.memory_upkeep_store import MemoryUpkeepStore
 from omnigent.stores.permission_store import PermissionStore
 from omnigent.stores.policy_store import PolicyStore
 from omnigent.stores.project_store import ProjectStore
@@ -1308,6 +1309,7 @@ def create_app(
     permission_store: PermissionStore | None = None,
     scheduled_task_store: ScheduledTaskStore | None = None,
     memory_service: MemoryService | None = None,
+    memory_upkeep_store: MemoryUpkeepStore | None = None,
     project_store: ProjectStore | None = None,
     auth_provider: AuthProvider | None = None,
     host_store: HostStore | None = None,
@@ -1367,6 +1369,15 @@ def create_app(
         ``None`` disables the ``/v1/sessions/{id}/memory`` endpoints; the
         tools themselves still register in rollover sessions but return a
         clear "not configured" error when invoked.
+    :param memory_upkeep_store: Store backing Phase 3 memory upkeep runs
+        (``rollover/MEMORY-PLAN.md``). When set together with
+        *memory_service*, a :class:`~omnigent.server.memory_upkeep.MemoryUpkeepCoordinator`
+        is exposed on ``app.state.memory_upkeep_coordinator`` and an hourly
+        sweep runs for the server's lifetime; a ``superside-chat`` session's
+        compaction event schedules a run through it
+        (``rollover/SUPERSIDE-CHAT-PLAN.md`` S6). ``None`` leaves the
+        trigger disabled (``app.state.memory_upkeep_coordinator`` is
+        ``None``), not broken.
     :param project_store: Store for first-class projects (owner-private
         containers that group sessions). ``None`` disables the
         ``/v1/projects`` CRUD endpoints.
@@ -1786,9 +1797,27 @@ def create_app(
         app_inst.state.side_chat_archive_sweeper = side_chat_archive_sweeper
         await side_chat_archive_sweeper.start()
 
+        # Memory upkeep hourly sweep (rollover/SUPERSIDE-CHAT-PLAN.md S6):
+        # the compaction trigger (routes_events.py) catches most signal
+        # promptly; this catches a superside-chat user whose session never
+        # compacted. The coordinator itself was already built above (not
+        # here) so app.state carries it even without a lifespan.
+        memory_upkeep_scheduler: Any = None
+        if memory_upkeep_coordinator is not None:
+            from omnigent.server.memory_upkeep import MemoryUpkeepScheduler
+
+            memory_upkeep_scheduler = MemoryUpkeepScheduler(
+                conversation_store=conversation_store,
+                coordinator=memory_upkeep_coordinator,
+            )
+            app_inst.state.memory_upkeep_scheduler = memory_upkeep_scheduler
+            await memory_upkeep_scheduler.start()
+
         try:
             yield
         finally:
+            if memory_upkeep_scheduler is not None:
+                await memory_upkeep_scheduler.shutdown()
             await side_chat_archive_sweeper.shutdown()
             if managed_sandbox_reaper is not None:
                 await managed_sandbox_reaper.shutdown()
@@ -3269,6 +3298,24 @@ def create_app(
             prefix="/v1",
             tags=["memory"],
         )
+    # Memory upkeep trigger (rollover/SUPERSIDE-CHAT-PLAN.md S6): built
+    # eagerly (not inside the lifespan) so a test — or any caller — that
+    # never triggers ASGI startup still sees the real coordinator (or
+    # ``None``) on ``app.state`` right after construction. The hourly
+    # sweep, which needs an async ``.start()``, is armed in the lifespan
+    # below.
+    memory_upkeep_coordinator: Any = None
+    if memory_service is not None and memory_upkeep_store is not None:
+        from omnigent.memory.upkeep import build_upkeep_llm_caller
+        from omnigent.server.memory_upkeep import MemoryUpkeepCoordinator
+
+        memory_upkeep_coordinator = MemoryUpkeepCoordinator(
+            conversation_store=conversation_store,
+            memory_service=memory_service,
+            upkeep_store=memory_upkeep_store,
+            llm_caller_factory=build_upkeep_llm_caller,
+        )
+    app.state.memory_upkeep_coordinator = memory_upkeep_coordinator
     if scheduled_task_store is not None:
         app.include_router(
             create_scheduled_tasks_router(

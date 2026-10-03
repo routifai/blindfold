@@ -1825,3 +1825,61 @@ class SqlMemoryClaim(OmnigentBase):
             "id",
         ),
     )
+
+
+class SqlMemoryUpkeepRun(OmnigentBase):
+    """
+    SQLAlchemy model for the ``memory_upkeep_runs`` table.
+
+    One row per Phase 3 memory upkeep run (window -> gate -> extract ->
+    verify -> apply -> project -> record). The per-user watermark is the
+    last ``succeeded`` run's ``window_until`` — there is no separate
+    watermark table — and a ``running`` row doubles as that user's
+    single-run lease. See ``rollover/MEMORY-PLAN.md`` section 4.
+
+    :param id: Unique run identifier (bare 32-char hex string).
+    :param user_id: The user this run processed.
+    :param window_since: Unix epoch seconds the window started at.
+    :param window_until: Unix epoch seconds the window ended at.
+    :param state: ``running``, ``succeeded``, ``failed``, or ``skipped``.
+    :param disposition: Short machine-readable outcome, or ``None``.
+    :param counts: JSON-encoded counts dict (seen/candidates/inserted/
+        reinforced/superseded/rejected/rejected_reasons).
+    :param started_at: Unix epoch seconds the run started.
+    :param finished_at: Unix epoch seconds the run finished, or ``None``
+        while ``state == "running"``.
+    """
+
+    __tablename__ = "memory_upkeep_runs"
+
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        nullable=False,
+        server_default="0",
+        default=current_workspace_id,
+    )
+    id: Mapped[str] = mapped_column(Uuid16, primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    window_since: Mapped[int] = mapped_column(Integer, nullable=False)
+    window_until: Mapped[int] = mapped_column(Integer, nullable=False)
+    state: Mapped[str] = mapped_column(String(16), nullable=False, server_default="running")
+    disposition: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    counts: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[int] = mapped_column(Integer, nullable=False)
+    finished_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('running', 'succeeded', 'failed', 'skipped')",
+            name="ck_memory_upkeep_runs_state",
+        ),
+        Index(
+            "ix_memory_upkeep_runs_user_scope",
+            "workspace_id",
+            "user_id",
+            "state",
+            "started_at",
+            "id",
+        ),
+    )

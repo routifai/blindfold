@@ -47,7 +47,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from omnigent._platform import normalize_interactive_shells
 from omnigent.acp_cli_harnesses import ACP_CLI_HARNESSES
-from omnigent.context.labels import CONTEXT_MODE_LABEL
+from omnigent.context.labels import CONTEXT_MODE_LABEL, SUPERSIDE_CHAT_MODE_VALUE
 from omnigent.debug_logging import (
     debug_event,
     phase_scope,
@@ -1407,6 +1407,30 @@ def _prefix_content_with_tail(content: object, tail: str) -> object:
             }
             return updated
     return content
+
+
+def _apply_memory_profile_to_body(body: _JsonObject, block: str | None) -> _JsonObject:
+    """Prepend *block* (a rendered Memory Profile, already delimiter-wrapped)
+    to *body*'s outgoing content, or return *body* unchanged if *block* is
+    falsy (memory not configured, or the profile is empty — never deliver an
+    empty block). Mutates only the in-flight request for this turn — the
+    persisted user item, ``_session_histories`` and
+    ``_session_message_buffers`` copies of *body* are untouched, and the
+    block never reaches a rollover summary (``rollover/SUPERSIDE-CHAT-PLAN.md``
+    S6). Shares :func:`_prefix_content_with_tail`'s shape handling (flat
+    content blocks vs. a history-list turn).
+
+    :param body: This turn's outgoing harness body (``{"content": ...}``).
+    :param block: The rendered, delimiter-wrapped Memory Profile block, or
+        ``None``/empty.
+    :returns: *body* with *block* prepended to its content, or *body* itself
+        (never mutated) when *block* is falsy.
+    """
+    if not block:
+        return body
+    new_body = dict(body)
+    new_body["content"] = _prefix_content_with_tail(body.get("content"), block)
+    return new_body
 
 
 def _wrap_as_message_event(body: _JsonObject) -> _JsonObject:
@@ -8982,6 +9006,25 @@ def create_runner_app(
                 extra={"session_id": conv_id},
             )
 
+    async def _apply_memory_profile_block(body: _JsonObject, conv_id: str) -> _JsonObject:
+        """Prepend the user's Memory Profile delimiter block to this turn's content.
+
+        Called only for ``superside-chat`` turns (``rollover/SUPERSIDE-CHAT-PLAN.md``
+        S6) — the caller has already checked the session's mode. Fetched fresh
+        every turn via the server's own API: the SDK's system prompt is frozen
+        per warm client, so a per-message block is the seam that still reaches
+        it (``omnigent/inner/claude_sdk_executor.py``).
+        """
+        try:
+            resp = await server_client.get(
+                f"/v1/sessions/{conv_id}/memory/profile",
+                timeout=10.0,
+            )
+            block = resp.json().get("profile") if resp.status_code == 200 else None
+        except (httpx.HTTPError, ValueError):
+            return body
+        return _apply_memory_profile_to_body(body, block)
+
     def _discard_comment_relay(session_id: str, relay: ClaudeNativeToolRelay) -> None:
         """Unbind and close *relay*, unless another path already replaced it.
 
@@ -9536,6 +9579,8 @@ def create_runner_app(
                 "content",
                 [],
             )
+        if _turn_context_mode == SUPERSIDE_CHAT_MODE_VALUE:
+            harness_body = await _apply_memory_profile_block(harness_body, conv)
         _content = cast(list[object], harness_body.get("content", []))
         _content_summary = []
         for _ci in _content:

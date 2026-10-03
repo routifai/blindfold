@@ -31,6 +31,7 @@ from omnigent.entities.device_grant import DeviceGrant
 from omnigent.entities.file import StoredFile
 from omnigent.entities.github_connection import GithubConnection
 from omnigent.entities.memory_claim import MemoryClaim, MemoryEvidenceLink
+from omnigent.entities.memory_upkeep import MemoryUpkeepRun
 from omnigent.entities.pagination import PagedList
 from omnigent.entities.permission import ResolvedAccess, SessionPermission
 from omnigent.entities.policy import Policy
@@ -67,6 +68,7 @@ __all__ = [
     "LoadedAgent",
     "MemoryClaim",
     "MemoryEvidenceLink",
+    "MemoryUpkeepRun",
     "MessageData",
     "NativeToolData",
     "NewConversationItem",

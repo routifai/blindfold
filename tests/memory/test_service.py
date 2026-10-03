@@ -9,6 +9,7 @@ any network).
 from __future__ import annotations
 
 import os
+import uuid
 
 # Two copies of libomp (torch + faiss-cpu) can both be linked into the same
 # macOS dev process; this is the documented, narrowly-scoped workaround for
@@ -230,6 +231,218 @@ def test_forget_by_query_targets_best_match(service: MemoryService) -> None:
 def test_forget_requires_claim_id_or_query(service: MemoryService) -> None:
     result = service.forget("alice")
     assert result["status"] == "error"
+
+
+# ── profile (Phase 2 work profile) ──────────────────────────────────────────
+
+
+def test_profile_is_none_with_no_claims(service: MemoryService) -> None:
+    assert service.profile("alice") is None
+
+
+def test_profile_excludes_kinds_outside_the_profile_set(service: MemoryService) -> None:
+    service.remember("alice", "Prefers figures in CAD", kind="preference")
+    service.remember("alice", "Works on the payments team", kind="fact")
+    service.remember("alice", "A one-off decision", kind="decision")  # not a profile kind
+
+    profile = service.profile("alice")
+    assert profile is not None
+    assert "Prefers figures in CAD" in profile
+    assert "Works on the payments team" in profile
+    assert "A one-off decision" not in profile
+
+
+def test_profile_excludes_claims_below_the_confidence_threshold(service: MemoryService) -> None:
+    service.remember("alice", "Prefers figures in CAD", kind="preference")
+    # Below the 0.75 profile threshold; remember()'s stated claims start at
+    # 0.9, so an inferred low-confidence claim is written directly.
+    service._store.create(
+        uuid.uuid4().hex,
+        "alice",
+        "preference",
+        "Maybe likes short replies",
+        explicitness="inferred",
+        confidence=0.4,
+    )
+    service._invalidate_profile("alice")
+
+    profile = service.profile("alice")
+    assert profile is not None
+    assert "Prefers figures in CAD" in profile
+    assert "Maybe likes short replies" not in profile
+
+
+def test_profile_groups_by_kind_with_headers(service: MemoryService) -> None:
+    service.remember("alice", "Prefers figures in CAD", kind="preference")
+    service.remember("alice", "Always cc finance on reports", kind="instruction")
+    service.remember("alice", "Likes a terse, direct tone", kind="working_style")
+    service.remember("alice", "Works on the payments team", kind="fact")
+
+    profile = service.profile("alice")
+    assert profile is not None
+    assert "Preferences:" in profile
+    assert "Standing instructions:" in profile
+    assert "Working style:" in profile
+    assert "About the user:" in profile
+    # Preferences group (declared first) renders before working style.
+    assert profile.index("Preferences:") < profile.index("Working style:")
+
+
+def test_profile_orders_newest_reinforced_first_within_a_group(
+    service: MemoryService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import itertools
+
+    import omnigent.stores.memory_store.sqlalchemy_store as store_module
+
+    # now_epoch() has one-second resolution; a real clock could tie three
+    # writes in the same test. A strictly increasing fake clock makes the
+    # "newest-reinforced first" ordering deterministic.
+    counter = itertools.count(1_000_000)
+    monkeypatch.setattr(store_module, "now_epoch", lambda: next(counter))
+
+    service.remember("alice", "Prefers figures in CAD", kind="preference")
+    service.remember("alice", "Prefers quarterly summaries", kind="preference")
+    # Reinforcing the first claim bumps its reinforced_at ahead of the second.
+    service.remember("alice", "prefers figures in cad", kind="preference")
+
+    profile = service.profile("alice")
+    assert profile is not None
+    assert profile.index("Prefers figures in CAD") < profile.index("Prefers quarterly summaries")
+
+
+def test_profile_is_isolated_per_user(service: MemoryService) -> None:
+    service.remember("alice", "Prefers figures in CAD", kind="preference")
+    assert service.profile("bob") is None
+
+
+def test_profile_excludes_forgotten_claims(service: MemoryService) -> None:
+    result = service.remember("alice", "Prefers figures in CAD", kind="preference")
+    service.forget("alice", claim_id=result["claim"]["claim_id"], confirm=True)
+    assert service.profile("alice") is None
+
+
+def test_profile_caps_at_roughly_the_character_budget(service: MemoryService) -> None:
+    from omnigent.memory.service import _PROFILE_MAX_CHARS
+
+    for i in range(150):
+        text = f"Preference number {i} about something fairly specific"
+        service.remember("alice", text, kind="preference")
+
+    profile = service.profile("alice")
+    assert profile is not None
+    assert len(profile) <= _PROFILE_MAX_CHARS + 200  # a little slack for the last header/line
+
+
+def test_profile_is_cached_until_the_next_write(service: MemoryService) -> None:
+    assert service.profile("alice") is None
+    service.remember("alice", "Prefers figures in CAD", kind="preference")
+    # Cache was populated by the first (None) call; a write must invalidate it.
+    profile = service.profile("alice")
+    assert profile is not None
+    assert "Prefers figures in CAD" in profile
+
+
+def test_profile_cache_invalidated_by_reinforce(service: MemoryService) -> None:
+    service.remember("alice", "Prefers figures in CAD", kind="preference")
+    first = service.profile("alice")
+    service.remember("alice", "Prefers quarterly summaries", kind="preference")
+    second = service.profile("alice")
+    assert first != second
+    assert "Prefers quarterly summaries" in (second or "")
+
+
+def test_profile_cache_invalidated_by_supersede(service: MemoryService) -> None:
+    first = service.remember("alice", "Prefers figures in CAD", kind="preference")
+    service.profile("alice")  # populate the cache
+    service.remember(
+        "alice",
+        "Actually wants figures in USD now",
+        kind="preference",
+        replaces_claim_id=first["claim"]["claim_id"],
+    )
+    profile = service.profile("alice")
+    assert profile is not None
+    assert "USD" in profile
+    assert "CAD" not in profile
+
+
+def test_profile_cache_invalidated_by_forget(service: MemoryService) -> None:
+    result = service.remember("alice", "Prefers figures in CAD", kind="preference")
+    service.profile("alice")  # populate the cache
+    service.forget("alice", claim_id=result["claim"]["claim_id"], confirm=True)
+    assert service.profile("alice") is None
+
+
+def test_profile_cache_is_per_user(service: MemoryService) -> None:
+    service.remember("alice", "Prefers figures in CAD", kind="preference")
+    assert service.profile("bob") is None
+    service.remember("bob", "Prefers figures in USD", kind="preference")
+    # Alice's cache entry must not have been clobbered by bob's write.
+    assert "USD" not in (service.profile("alice") or "")
+    assert "USD" in (service.profile("bob") or "")
+
+
+# ── render_profile_block ─────────────────────────────────────────────────────
+
+
+def test_render_profile_block_wraps_in_delimiters() -> None:
+    from omnigent.memory.service import render_profile_block
+
+    block = render_profile_block("Preferences:\n- Prefers figures in CAD")
+    assert block.startswith("[Standing memory about the user")
+    assert block.endswith("[End of standing memory]")
+    assert "Prefers figures in CAD" in block
+
+
+# ── record_claim / reinforce_claim / supersede_claim (Phase 3's upkeep job) ──
+
+
+def test_record_claim_adds_and_indexes_a_claim(service: MemoryService) -> None:
+    result = service.record_claim(
+        "alice", "preference", "Prefers figures in CAD", explicitness="inferred", confidence=0.4
+    )
+    assert result["action"] == "added"
+    assert result["claim"]["explicitness"] == "inferred"
+    assert service.search("alice", "figures CAD")
+
+
+def test_record_claim_invalidates_the_profile_cache(service: MemoryService) -> None:
+    assert service.profile("alice") is None
+    service.record_claim("alice", "preference", "Prefers figures in CAD", confidence=0.9)
+    profile = service.profile("alice")
+    assert profile is not None
+    assert "Prefers figures in CAD" in profile
+
+
+def test_reinforce_claim_bumps_confidence_and_reindexes(service: MemoryService) -> None:
+    added = service.record_claim("alice", "preference", "Prefers figures in CAD", confidence=0.4)
+    claim_id = added["claim"]["claim_id"]
+    reinforced = service.reinforce_claim(claim_id, "alice", confidence_increment=0.2)
+    assert reinforced is not None
+    assert reinforced["confidence"] == pytest.approx(0.6)
+
+
+def test_reinforce_claim_returns_none_for_unknown_claim(service: MemoryService) -> None:
+    assert service.reinforce_claim("a" * 32, "alice", confidence_increment=0.2) is None
+
+
+def test_supersede_claim_replaces_the_named_claim(service: MemoryService) -> None:
+    added = service.record_claim("alice", "preference", "Prefers figures in CAD", confidence=0.9)
+    claim_id = added["claim"]["claim_id"]
+    result = service.supersede_claim(
+        claim_id, "alice", kind="preference", text="Prefers figures in USD", confidence=0.9
+    )
+    assert result["action"] == "superseded"
+    assert service.get("alice", claim_id)["status"] == "superseded"
+    assert service.get("alice", result["claim"]["claim_id"])["status"] == "active"
+
+
+def test_supersede_claim_rejects_an_unknown_or_inactive_claim(service: MemoryService) -> None:
+    result = service.supersede_claim(
+        "a" * 32, "alice", kind="preference", text="Prefers figures in USD"
+    )
+    assert "error" in result
 
 
 # ── rebuild_index ────────────────────────────────────────────────────────────
