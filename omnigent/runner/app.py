@@ -1340,6 +1340,12 @@ _GATED_COMPOSED_INSTRUCTION_HARNESSES = frozenset({"opencode-native", "hermes"})
 # prepended for them.
 _POST_COMPACTION_TAIL_HARNESSES = frozenset({"claude-native", "codex-native"})
 
+# Bound on a turn's wait for a same-session superside-chat rollover already
+# in flight (see _consume_superside_chat_pending_refresh) before dispatching
+# on what could be pre-rollover state. The rollover itself is not cancelled
+# on timeout — only this wait gives up.
+_SUPERSIDE_CHAT_ROLLOVER_WAIT_TIMEOUT_S = 60.0
+
 
 def _prefix_blocks_with_tail(blocks: object, prefix: str) -> object:
     """Prepend *prefix* to the first text content block in *blocks*.
@@ -3267,6 +3273,15 @@ def create_runner_app(
     _stranded_wake_retry_task: list[asyncio.Task[None]] = []
 
     _session_histories = _session_histories_ref
+    # superside-chat rollover: sessions whose warm-client drop was deferred
+    # because a turn was active when the rollover finished (see
+    # _drop_superside_chat_warm_client), and the in-flight rollover task per
+    # session the next turn waits on (see
+    # _consume_superside_chat_pending_refresh).
+    _superside_chat_pending_refresh: set[str] = set()
+    _superside_chat_rollover_tasks: dict[str, asyncio.Task[None]] = {}
+    app.state.superside_chat_pending_refresh = _superside_chat_pending_refresh
+    app.state.superside_chat_rollover_tasks = _superside_chat_rollover_tasks
     _last_server_item_id: dict[str, str] = {}
     _session_event_queues = _session_event_queues_ref
     app.state.session_event_queues = _session_event_queues
@@ -8764,7 +8779,9 @@ def create_runner_app(
         new_body["content"] = _prefix_content_with_tail(body.get("content"), tail)
         return new_body
 
-    async def _drop_superside_chat_warm_client(conv_id: str) -> None:
+    async def _drop_superside_chat_warm_client(
+        conv_id: str, *, defer_if_active: bool = True
+    ) -> None:
         """Drop the warm claude-sdk client so the next turn cold-starts.
 
         Invalidates this runner's cached history so the next dispatch
@@ -8773,10 +8790,85 @@ def create_runner_app(
         subprocess: its shutdown runs ``ClaudeSDKExecutor.close_session``
         (``ExecutorAdapter.on_shutdown``), which is the only way this
         process reaches that method on another process's executor.
+
+        A background threshold rollover can finish while a DIFFERENT turn
+        is live on the warm client it would drop — releasing then would
+        kill that turn's in-flight connection. With *defer_if_active* (the
+        default), a live ``_active_turns`` entry defers the drop instead:
+        it's recorded in ``_superside_chat_pending_refresh`` and applied at
+        the start of the session's next turn
+        (``_consume_superside_chat_pending_refresh``). The idle-refresh
+        caller passes ``defer_if_active=False``: it runs synchronously at
+        the start of ITS OWN turn, before that turn has dispatched
+        anything, so ``_active_turns`` already holds its own slot and
+        deferring would be wrong — the whole point is to release now, so
+        this turn's own dispatch cold-starts.
         """
+        if defer_if_active and conv_id in _active_turns:
+            _superside_chat_pending_refresh.add(conv_id)
+            return
         _session_histories.pop(conv_id, None)
         if process_manager is not None:
             await process_manager.release(conv_id)
+
+    async def _consume_superside_chat_pending_refresh(conv_id: str) -> None:
+        """Apply a deferred superside-chat warm-client drop at the start of a turn.
+
+        Called unconditionally at the top of ``_run_turn_bg_setup_and_stream``
+        for every turn (cheap no-op for a session with nothing pending).
+        First waits (bounded) for an in-flight rollover task for *conv_id* —
+        scheduled by ``_maybe_superside_chat_threshold_rollover`` as a
+        background task so the turn that triggered it isn't blocked on the
+        summarizer — so this turn never dispatches on pre-rollover state.
+        Then, if that rollover (or an earlier one) deferred its drop because
+        THIS session had an active turn at the time, applies it now: this
+        turn is the next one, so no turn is active yet.
+        """
+        task = _superside_chat_rollover_tasks.get(conv_id)
+        if task is not None and not task.done():
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(task), timeout=_SUPERSIDE_CHAT_ROLLOVER_WAIT_TIMEOUT_S
+                )
+            except TimeoutError:
+                _logger.warning(
+                    "superside-chat rollover still in flight after %.0fs for %s; "
+                    "proceeding without waiting further",
+                    _SUPERSIDE_CHAT_ROLLOVER_WAIT_TIMEOUT_S,
+                    conv_id,
+                    extra={"session_id": conv_id},
+                )
+            except Exception:  # noqa: BLE001 — the rollover task logs its own failures
+                pass
+        if conv_id in _superside_chat_pending_refresh:
+            _superside_chat_pending_refresh.discard(conv_id)
+            await _drop_superside_chat_warm_client(conv_id, defer_if_active=False)
+
+    def _schedule_superside_chat_threshold_rollover(
+        conv_id: str, resp_response: _JsonObject
+    ) -> None:
+        """Schedule the threshold-rollover check as a background task.
+
+        Keeps the turn's SSE stream from blocking on the summarizer LLM call
+        (see ``_maybe_superside_chat_threshold_rollover``). Tracked in both
+        ``_background_tasks`` (process-lifetime GC safety, as elsewhere in
+        this module) and ``_superside_chat_rollover_tasks`` (so the
+        session's next turn can wait for it — see
+        ``_consume_superside_chat_pending_refresh``).
+        """
+        task = asyncio.create_task(
+            _maybe_superside_chat_threshold_rollover(conv_id, resp_response),
+            name=f"superside-chat-rollover-{conv_id}",
+        )
+        _superside_chat_rollover_tasks[conv_id] = task
+
+        def _on_done(done: asyncio.Task[None], _conv_id: str = conv_id) -> None:
+            _background_tasks.discard(done)
+            if _superside_chat_rollover_tasks.get(_conv_id) is done:
+                _superside_chat_rollover_tasks.pop(_conv_id, None)
+
+        task.add_done_callback(_on_done)
+        _background_tasks.add(task)
 
     async def _superside_chat_idle_seconds(conv_id: str) -> float | None:
         """Seconds since *conv_id*'s last recorded item, or ``None`` on a lookup miss."""
@@ -8817,6 +8909,10 @@ def create_runner_app(
         if not should_roll_over_for_idle(labels, idle_seconds=idle_seconds):
             return
         resolved_model = model or ROLLOVER_TOKEN_COUNT_MODEL
+        # defer_if_active=False: this runs synchronously at the start of
+        # THIS turn, which already holds its own _active_turns slot (claimed
+        # by the caller before this turn's task was even created) — the
+        # default deferral check would otherwise always (wrongly) defer.
         await roll_over_session(
             conv_id,
             labels=labels,
@@ -8824,7 +8920,9 @@ def create_runner_app(
             server_client=server_client,
             llm_client=_get_runner_llm_client(),
             connection=_resolve_summarize_connection(conv_id, resolved_model),
-            on_rolled_over=lambda: _drop_superside_chat_warm_client(conv_id),
+            on_rolled_over=lambda: _drop_superside_chat_warm_client(
+                conv_id, defer_if_active=False
+            ),
         )
 
     async def _maybe_superside_chat_threshold_rollover(
@@ -8839,35 +8937,50 @@ def create_runner_app(
         context-ring labels. A no-op for a non-superside-chat session
         (checked via the cheap cached rollover-mode label before the full
         label fetch below).
+
+        Runs as a background task (see
+        ``_schedule_superside_chat_threshold_rollover``), so every exception
+        is caught and logged here — an unhandled one would otherwise only
+        surface as an "exception never retrieved" warning.
         """
         from omnigent.context.labels import SUPERSIDE_CHAT_MODE_VALUE
         from omnigent.models.model_fallbacks import ROLLOVER_TOKEN_COUNT_MODEL
         from omnigent.superchat.rollover import roll_over_session, should_roll_over_for_threshold
 
-        cached_labels = await _rollover_labels_for_session(conv_id)
-        if cached_labels.get(CONTEXT_MODE_LABEL) != SUPERSIDE_CHAT_MODE_VALUE:
-            return
-        resp_usage = resp_response.get("usage")
-        context_tokens = resp_usage.get("context_tokens") if isinstance(resp_usage, dict) else None
-        if not isinstance(context_tokens, int):
-            return
-        resolved_model = (
-            resp_usage.get("model") if isinstance(resp_usage, dict) else None
-        ) or ROLLOVER_TOKEN_COUNT_MODEL
-        labels = await _session_labels_for_runner_spawn(
-            server_client=server_client, session_id=conv_id
-        )
-        if not should_roll_over_for_threshold(labels, context_tokens=context_tokens):
-            return
-        await roll_over_session(
-            conv_id,
-            labels=labels,
-            model=resolved_model,
-            server_client=server_client,
-            llm_client=_get_runner_llm_client(),
-            connection=_resolve_summarize_connection(conv_id, resolved_model),
-            on_rolled_over=lambda: _drop_superside_chat_warm_client(conv_id),
-        )
+        try:
+            cached_labels = await _rollover_labels_for_session(conv_id)
+            if cached_labels.get(CONTEXT_MODE_LABEL) != SUPERSIDE_CHAT_MODE_VALUE:
+                return
+            resp_usage = resp_response.get("usage")
+            context_tokens = (
+                resp_usage.get("context_tokens") if isinstance(resp_usage, dict) else None
+            )
+            if not isinstance(context_tokens, int):
+                return
+            resolved_model = (
+                resp_usage.get("model") if isinstance(resp_usage, dict) else None
+            ) or ROLLOVER_TOKEN_COUNT_MODEL
+            labels = await _session_labels_for_runner_spawn(
+                server_client=server_client, session_id=conv_id
+            )
+            if not should_roll_over_for_threshold(labels, context_tokens=context_tokens):
+                return
+            await roll_over_session(
+                conv_id,
+                labels=labels,
+                model=resolved_model,
+                server_client=server_client,
+                llm_client=_get_runner_llm_client(),
+                connection=_resolve_summarize_connection(conv_id, resolved_model),
+                on_rolled_over=lambda: _drop_superside_chat_warm_client(conv_id),
+            )
+        except Exception:  # noqa: BLE001 — background task; never fail the turn that scheduled it
+            _logger.warning(
+                "superside-chat threshold rollover failed for %s",
+                conv_id,
+                exc_info=True,
+                extra={"session_id": conv_id},
+            )
 
     def _discard_comment_relay(session_id: str, relay: ClaudeNativeToolRelay) -> None:
         """Unbind and close *relay*, unless another path already replaced it.
@@ -9184,6 +9297,10 @@ def create_runner_app(
         msg_body: _JsonObject,
         conv: str,
     ) -> None:
+        # Cheap no-op for a session with no pending superside-chat rollover;
+        # otherwise waits out an in-flight one and applies a deferred
+        # warm-client drop before anything below touches the harness.
+        await _consume_superside_chat_pending_refresh(conv)
         _dispatched_agent_id = cast(str | None, msg_body.get("agent_id"))
         _prior_agent_id = _session_agent_ids.get(conv)
         if (
@@ -10151,7 +10268,7 @@ def create_runner_app(
                                             }
                                         )
                                         _text_acc.clear()
-                                    await _maybe_superside_chat_threshold_rollover(
+                                    _schedule_superside_chat_threshold_rollover(
                                         conv_id, event.get("response") or {}
                                     )
                                 elif _evt_type == "response.failed":
