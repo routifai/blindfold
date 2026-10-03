@@ -8976,7 +8976,20 @@ def create_runner_app(
         created_at = page_items[0].get("created_at")
         return time.time() - created_at if isinstance(created_at, int) else None
 
-    async def _maybe_superside_chat_idle_rollover(conv_id: str, *, model: str | None) -> None:
+    async def _superside_chat_session_model(conv_id: str) -> str | None:
+        """The model *conv_id*'s turns run on (the summarizer uses it), or ``None``."""
+        try:
+            resp = await server_client.get(f"/v1/sessions/{conv_id}", timeout=10.0)
+            body = resp.json() if resp.status_code == 200 else {}
+        except (httpx.HTTPError, ValueError):
+            return None
+        model = body.get("model_override") or body.get("llm_model")
+        if not isinstance(model, str) or not model:
+            return None
+        # A bare id routes to OpenAI in the LLM client; Claude ids need the prefix.
+        return f"anthropic/{model}" if model.startswith("claude") else model
+
+    async def _maybe_superside_chat_idle_rollover(conv_id: str) -> None:
         """Roll over a superside-chat session on its first message back from idle.
 
         Called only from the "no cached history yet" branch in
@@ -8999,7 +9012,8 @@ def create_runner_app(
         if not should_roll_over_for_idle(labels, idle_seconds=idle_seconds):
             return
         _logger.info("superside-chat refresh on return: %s idle %.0fs", conv_id, idle_seconds)
-        resolved_model = model or ROLLOVER_TOKEN_COUNT_MODEL
+        # The turn body's ``model`` is the agent name; summarize on the session's LLM.
+        resolved_model = await _superside_chat_session_model(conv_id) or ROLLOVER_TOKEN_COUNT_MODEL
         # defer_if_active=False: this runs synchronously at the start of
         # THIS turn, which already holds its own _active_turns slot (claimed
         # by the caller before this turn's task was even created) — the
@@ -9508,9 +9522,7 @@ def create_runner_app(
 
         # Refresh on return: checked every turn (a live chat keeps its history
         # cached); a rollover drops the cache so the load below starts from it.
-        await _maybe_superside_chat_idle_rollover(
-            conv, model=cast(str | None, msg_body.get("model"))
-        )
+        await _maybe_superside_chat_idle_rollover(conv)
         if conv not in _session_histories:
             _session_histories[conv] = (
                 [] if is_native_harness(harness_name) else await _load_history_as_input(conv)
@@ -14087,6 +14099,10 @@ def create_runner_app(
                 conn["api_key"] = fam.api_key
             if fam.base_url:
                 conn["base_url"] = fam.base_url
+                # Provider config stores the Claude SDK form (no version); the
+                # LLM client's Anthropic adapter expects the versioned base.
+                if family == "anthropic" and fam.base_url.rstrip("/") == "https://api.anthropic.com":
+                    conn["base_url"] = "https://api.anthropic.com/v1"
             return conn or None
         except Exception:  # noqa: BLE001 — a missing local provider falls back to no auth
             _logger.warning(
